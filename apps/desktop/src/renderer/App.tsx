@@ -58,10 +58,65 @@ const previewState: WorkspaceSnapshot = {
       remotePath: '/incoming'
     }
   ],
-  tabs: [],
-  activeTabId: null,
+  tabs: [
+    {
+      id: 'preview-tab-ssh',
+      sessionType: 'ssh',
+      profileId: 'preview-profile-ssh',
+      title: '123',
+      layout: 'terminal-file',
+      status: 'connected'
+    }
+  ],
+  activeTabId: 'preview-tab-ssh',
   transfers: [],
-  sessions: {}
+  sessions: {
+    'preview-tab-ssh': {
+      profileId: 'preview-profile-ssh',
+      summary: 'Connected to 192.168.3.197:22',
+      terminalTranscript:
+        'Linux fnOSNAS-CN 6.18.18-trim #473 SMP PREEMPT_DYNAMIC Thu Apr  9 09:34:02 UTC 2026 x86_64\r\nLast login: Fri May 15 21:57:26 2026 from 127.0.0.1\r\nCould not chdir to home directory /home/Stoffel: No such file or directory\r\nStoffel@fnOSNAS-CN:~$ ',
+      remotePath: '/',
+      remoteFiles: [
+        { path: '/boot', name: 'boot', type: 'folder', modified: '2026-05-11 17:46', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' },
+        { path: '/dev', name: 'dev', type: 'folder', modified: '2026-05-15 07:20', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' },
+        { path: '/etc', name: 'etc', type: 'folder', modified: '2026-05-11 17:46', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' },
+        { path: '/home', name: 'home', type: 'folder', modified: '2024-08-01 16:06', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' },
+        { path: '/run', name: 'run', type: 'folder', modified: '2026-05-15 07:20', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' }
+      ],
+      connected: true,
+      systemMetrics: {
+        ip: '192.168.3.197',
+        uptime: '4 天',
+        load: '0.44, 0.66, 0.62',
+        cpuPercent: 10,
+        memoryPercent: 68,
+        memoryUsage: '7.9G/11.6G',
+        swapPercent: 7,
+        swapUsage: '290M/4.0G',
+        diskRows: [
+          { path: '/dev', usage: '5.8G/5.8G' },
+          { path: '/run', usage: '1.1G/1.2G' },
+          { path: '/', usage: '44G/63G' },
+          { path: '/dev/shm', usage: '5.9G/5.9G' },
+          { path: '/run/lock', usage: '5.0M/5.0M' }
+        ],
+        networkInterfaces: ['enp3s0-ovs'],
+        activeNetworkInterface: 'enp3s0-ovs',
+        networkRates: { tx: '540B', rx: '233B' },
+        networkSamples: Array.from({ length: 18 }, (_, index) => ({
+          tx: [5, 11, 8, 14, 4, 9, 2, 12, 10, 6, 15, 7, 3, 8, 11, 4, 6, 9][index],
+          rx: [10, 19, 13, 22, 6, 24, 8, 15, 18, 12, 20, 9, 5, 13, 16, 8, 11, 14][index]
+        })),
+        topProcesses: [
+          { memory: '3171.4M', cpu: '3.0', command: 'python' },
+          { memory: '1309.4M', cpu: '1.0', command: 'next-server' },
+          { memory: '536.1M', cpu: '0.6', command: 'python3' },
+          { memory: '349.7M', cpu: '0.5', command: 'trim-photos' }
+        ]
+      }
+    }
+  }
 }
 
 const defaultForm: CreateProfileInput = {
@@ -108,6 +163,8 @@ export function App() {
       setWorkspace(previewState)
       setLocalPath(previewLocalPath)
       setLocalItems(localPreviewFiles)
+      setActiveHomeTabId(null)
+      setTabOrder(['session:preview-tab-ssh'])
       setError(t.browserPreview)
       return
     }
@@ -401,14 +458,6 @@ export function App() {
 
         <main className="fs-main">
           <header className="fs-tabbar">
-            <button
-              className="folder-button"
-              type="button"
-              title={t.openConnection}
-              onClick={() => setShowConnectionManager(true)}
-            >
-              ▰
-            </button>
             <div className="fs-tabs">
               {orderedTabs.map((entry, index) => (
                 entry.kind === 'home' ? (
@@ -475,8 +524,8 @@ export function App() {
               <button className="add-tab" type="button" onClick={handleAddHomeTab}>+</button>
             </div>
             <div className="window-tools">
-              <span>▦</span>
-              <span>☰</span>
+              <span title="Grid">▦</span>
+              <span title="Menu">☰</span>
             </div>
           </header>
 
@@ -795,7 +844,6 @@ function SessionWorkspace({
             initialText={activeSession.terminalTranscript ?? ''}
             onStatus={onTerminalSummary}
           />
-          <div className="terminal-summary-bar">{terminalSummary ?? activeSession.summary}</div>
         </div>
       ) : null}
       <FileManager
@@ -830,6 +878,7 @@ function FileManager({
       <div className="file-tabs">
         <button className="active" type="button">{t.file}</button>
         <button type="button">{t.command}</button>
+        <span className="file-current-path">/</span>
       </div>
       <div className="file-toolbar">
         <span>{activeSession.remotePath}</span>
