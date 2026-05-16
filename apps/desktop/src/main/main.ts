@@ -12,7 +12,9 @@ function createWindow() {
     minWidth: 1040,
     minHeight: 680,
     title: 'TermDock',
-    backgroundColor: '#0b1220',
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 20, y: 18 },
+    backgroundColor: '#151515',
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.cjs'),
       contextIsolation: true,
