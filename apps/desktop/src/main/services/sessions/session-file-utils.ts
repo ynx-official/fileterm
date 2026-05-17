@@ -106,7 +106,7 @@ tx2=$(awk -F"[: ]+" -v iface="$active_iface" "\\$1 == iface {print \\$11}" /proc
 rx_rate=$(( (rx2-rx1) * 1000 / 150 ))
 tx_rate=$(( (tx2-tx1) * 1000 / 150 ))
 disk=$(df -hP | awk "NR>1 {printf \\"%s|%s/%s\\\\n\\", \\$6, \\$4, \\$2}" | head -n 12)
-procs=$(ps -eo rss,pcpu,comm --sort=-rss | awk "NR>1 && NR<6 {printf \\"%.1fM|%s|%s\\\\n\\", \\$1/1024, \\$2, \\$3}")
+procs=$(ps -eo rss=,pcpu=,etimes=,comm= | awk "NF >= 4 {printf \\"%.1fM|%s|%s|%s\\\\n\\", \\$1/1024, \\$2, \\$3, \\$4}")
 echo "__IP__\${ip}"
 echo "__UPTIME__\${uptime_days}"
 echo "__LOAD__\${load}"
@@ -148,10 +148,18 @@ export function parseSystemMetrics(raw: string): SystemMetrics {
     const [diskPath, usage] = line.split('|')
     return { path: diskPath, usage }
   })
-  const topProcesses = readBlock('__PROCS_START__', '__PROCS_END__').map((line) => {
-    const [memory, cpu, command] = line.split('|')
-    return { memory, cpu, command }
-  })
+  const transientCollectorCommands = new Set(['ps', 'awk', 'bash', 'sleep', 'sh'])
+  const topProcesses = readBlock('__PROCS_START__', '__PROCS_END__')
+    .map((line) => {
+      const [memory, cpu, elapsedSeconds, command] = line.split('|')
+      return {
+        memory,
+        cpu,
+        command,
+        elapsedSeconds: Number(elapsedSeconds) || 0
+      }
+    })
+    .filter((process) => !transientCollectorCommands.has(process.command))
 
   return {
     ip: readLine('__IP__'),
@@ -169,7 +177,10 @@ export function parseSystemMetrics(raw: string): SystemMetrics {
       rx: formatRate(Number(rxRate) || 0),
       tx: formatRate(Number(txRate) || 0)
     },
-    networkSamples: buildSamples(Number(rxRate) || 0, Number(txRate) || 0),
+    networkSamples: [{
+      rx: Number(rxRate) || 0,
+      tx: Number(txRate) || 0
+    }],
     topProcesses
   }
 }
@@ -190,16 +201,4 @@ function formatRate(bytesPerSecond: number) {
     return `${Math.round(bytesPerSecond / 1024)}K`
   }
   return `${bytesPerSecond}B`
-}
-
-function buildSamples(rx: number, tx: number) {
-  const rxBase = Math.max(1, rx)
-  const txBase = Math.max(1, tx)
-  return Array.from({ length: 18 }, (_value, index) => {
-    const wave = 0.55 + ((index % 6) * 0.08)
-    return {
-      rx: Math.round(rxBase * wave),
-      tx: Math.round(txBase * (1 - (index % 5) * 0.07 + 0.25))
-    }
-  })
 }

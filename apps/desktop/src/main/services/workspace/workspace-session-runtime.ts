@@ -10,6 +10,7 @@ import { LiveFtpSessionController, LiveSshSessionController } from '../session-c
 type LiveSessionController = LiveSshSessionController | LiveFtpSessionController
 
 export class WorkspaceSessionRuntime {
+  private static readonly NETWORK_HISTORY_LIMIT = 600
   private readonly sessions = new Map<string, SessionSnapshot>()
   private readonly liveControllers = new Map<string, LiveSessionController>()
   private readonly metricsPollers = new Map<string, ReturnType<typeof setInterval>>()
@@ -126,7 +127,7 @@ export class WorkspaceSessionRuntime {
         remotePath: controller.getRemotePath(),
         remoteFiles: files,
         connected: true,
-        systemMetrics
+        systemMetrics: systemMetrics ? this.mergeNetworkHistory(undefined, systemMetrics) : undefined
       })
       this.options.updateTabStatus(tabId, 'connected')
       if (controller.type === 'ssh') {
@@ -243,7 +244,7 @@ export class WorkspaceSessionRuntime {
 
       this.sessions.set(tabId, {
         ...latest,
-        systemMetrics
+        systemMetrics: this.mergeNetworkHistory(latest.systemMetrics, systemMetrics)
       })
 
       await this.emitSnapshot(sender)
@@ -272,6 +273,22 @@ export class WorkspaceSessionRuntime {
         this.tabSenders.delete(tabId)
         this.stopMetricsPolling(tabId)
       }
+    }
+  }
+
+  private mergeNetworkHistory(
+    previousMetrics: SessionSnapshot['systemMetrics'] | undefined,
+    nextMetrics: NonNullable<SessionSnapshot['systemMetrics']>
+  ) {
+    const nextPoint = nextMetrics.networkSamples.at(-1) ?? { rx: 0, tx: 0 }
+    const previousSamples =
+      previousMetrics?.activeNetworkInterface === nextMetrics.activeNetworkInterface
+        ? previousMetrics.networkSamples
+        : []
+
+    return {
+      ...nextMetrics,
+      networkSamples: [...previousSamples, nextPoint].slice(-WorkspaceSessionRuntime.NETWORK_HISTORY_LIMIT)
     }
   }
 }

@@ -98,6 +98,7 @@ export interface SidebarProcessItem {
   memory: string
   cpu: string
   command: string
+  elapsedSeconds: number
 }
 
 export interface NetworkSamplePoint {
