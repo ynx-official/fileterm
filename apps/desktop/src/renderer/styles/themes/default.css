@@ -1,4 +1,5 @@
-:root {
+:root,
+:root[data-theme='default'] {
   --bg-main: #151515;
   --bg-sidebar: #242424;
   --bg-card: #1f1f1f;

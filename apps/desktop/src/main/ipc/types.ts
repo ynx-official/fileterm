@@ -1,0 +1,20 @@
+import { BrowserWindow } from 'electron'
+import type { WebContents } from 'electron'
+import type { LocalFilesService } from '../services/local-files-service.js'
+import type { WorkspaceService } from '../services/workspace-service.js'
+
+export interface IpcWindowOptions {
+  getMainWindow(): BrowserWindow | null
+  openConnectionManagerWindow(parent: BrowserWindow): void
+  openConnectionFormWindow(parent: BrowserWindow, mode: 'create' | 'edit', profileId?: string): void
+}
+
+export interface IpcServices {
+  workspaceService: WorkspaceService
+  localFilesService: LocalFilesService
+  broadcastSnapshot(snapshot: Awaited<ReturnType<WorkspaceService['getSnapshot']>>): void
+}
+
+export function resolveWindow(sender: WebContents, options: IpcWindowOptions) {
+  return BrowserWindow.fromWebContents(sender) ?? options.getMainWindow() ?? undefined
+}

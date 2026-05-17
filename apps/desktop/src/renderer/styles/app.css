@@ -1312,48 +1312,70 @@ button:disabled {
   grid-template-rows: auto auto minmax(0, 1fr) auto auto;
 }
 
-.file-context-menu {
+.context-menu {
   position: fixed;
   z-index: 110;
-  width: 184px;
+  min-width: 144px;
   overflow: hidden;
-  border: 1px solid #bdbdbd;
-  background: #f7f7f7;
-  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.32);
-  color: #111;
-  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
-  font-size: 14px;
+  padding: 5px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(30, 32, 37, 0.96);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(18px);
+  color: #eef3fa;
+  font-family: "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: 12px;
 }
 
-.file-context-menu button {
+.file-context-menu {
+  min-width: 168px;
+}
+
+.tab-context-menu {
+  min-width: 116px;
+}
+
+.context-menu button {
   display: block;
   width: 100%;
-  height: 31px;
-  padding: 0 18px;
+  height: 26px;
+  padding: 0 10px;
   border: 0;
-  border-radius: 0;
+  border-radius: 7px;
   background: transparent;
-  color: #111;
+  color: inherit;
   text-align: left;
+  font-size: 12px;
+  line-height: 26px;
 }
 
-.file-context-menu button:hover:not(:disabled) {
-  background: #0b7fd3;
+.context-menu button:hover:not(:disabled) {
+  background: rgba(73, 152, 255, 0.2);
   color: #fff;
 }
 
-.file-context-menu button:disabled {
-  color: #9a9a9a;
+.context-menu button:disabled {
+  color: rgba(194, 202, 213, 0.42);
 }
 
-.file-context-menu span {
+.context-menu button.is-danger:not(:disabled) {
+  color: #ffb7b7;
+}
+
+.context-menu button.is-danger:hover:not(:disabled) {
+  background: rgba(255, 90, 90, 0.18);
+  color: #ffd5d5;
+}
+
+.context-menu-separator {
   display: block;
   height: 1px;
-  margin: 4px 0;
-  background: #d3d3d3;
+  margin: 5px 4px;
+  background: rgba(255, 255, 255, 0.08);
 }
 
-.file-context-menu .context-close {
+.context-menu .context-close {
   display: none;
 }
 
@@ -1388,6 +1410,59 @@ button:disabled {
   padding: 18px 20px 20px;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
+}
+
+.manager-window {
+  min-height: 100vh;
+  padding: 0;
+  background: #1b1b1b;
+  -webkit-app-region: drag;
+}
+
+.modal-card.manager-modal.standalone {
+  position: relative;
+  width: 100%;
+  min-height: 100vh;
+  padding: 46px 20px 20px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal-card.manager-modal.standalone .modal-header {
+  position: absolute;
+  top: 14px;
+  left: 0;
+  width: 100%;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  color: #999;
+  pointer-events: none;
+}
+
+.modal-card.manager-modal.standalone .manager-toolbar,
+.modal-card.ssh-modal.standalone .modal-header {
+  -webkit-app-region: drag;
+}
+
+.modal-card.manager-modal.standalone button,
+.modal-card.manager-modal.standalone input,
+.modal-card.manager-modal.standalone select,
+.modal-card.manager-modal.standalone textarea,
+.modal-card.manager-modal.standalone .manager-table,
+.modal-card.manager-modal.standalone .manager-row,
+.modal-card.manager-modal.standalone .manager-actions,
+.modal-card.ssh-modal.standalone button,
+.modal-card.ssh-modal.standalone input,
+.modal-card.ssh-modal.standalone select,
+.modal-card.ssh-modal.standalone textarea,
+.modal-card.ssh-modal.standalone .ssh-modal-body,
+.modal-card.ssh-modal.standalone .ssh-form-shell,
+.modal-card.ssh-modal.standalone .ssh-form-page,
+.modal-card.ssh-modal.standalone .ssh-modal-nav {
+  -webkit-app-region: no-drag;
 }
 
 .manager-toolbar {
@@ -1494,6 +1569,21 @@ button:disabled {
 .modal-card.ssh-modal {
   width: min(900px, 88vw);
   min-height: 560px;
+}
+
+.connection-form-window {
+  min-height: 100vh;
+  padding: 12px;
+  background: #1b1b1b;
+}
+
+.modal-card.ssh-modal.standalone {
+  width: 100%;
+  min-height: calc(100vh - 24px);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .modal-header {

@@ -79,6 +79,11 @@ export interface FileContentSnapshot {
   source: 'local' | 'remote'
 }
 
+export interface DirectorySnapshot<TItem> {
+  path: string
+  items: TItem[]
+}
+
 export interface SidebarProcessItem {
   memory: string
   cpu: string
@@ -147,6 +152,57 @@ export interface CreateProfileInput {
   backspaceKey?: string
   deleteKey?: string
   enableExecChannel?: boolean
+}
+
+export type ConnectionFormMode = 'create' | 'edit'
+
+export type AppWindowMode = 'main' | 'connection-manager' | 'connection-form'
+
+export interface TerminalDataPayload {
+  tabId: string
+  chunk: string
+}
+
+export interface TerminalStatePayload {
+  tabId: string
+  summary: string
+  transcript: string
+  connected: boolean
+}
+
+export interface TermdockDesktopApi {
+  platform: string
+  appName: string
+  isDesktop: boolean
+  openConnectionManagerWindow(): Promise<void>
+  openConnectionFormWindow(mode: ConnectionFormMode, profileId?: string): Promise<void>
+  closeCurrentWindow(): Promise<void>
+  getSnapshot(): Promise<WorkspaceSnapshot>
+  createProfile(input: CreateProfileInput): Promise<WorkspaceSnapshot>
+  updateProfile(profileId: string, input: CreateProfileInput): Promise<WorkspaceSnapshot>
+  deleteProfile(profileId: string): Promise<WorkspaceSnapshot>
+  openProfile(profileId: string): Promise<WorkspaceSnapshot>
+  openProfileFromManager(profileId: string): Promise<WorkspaceSnapshot>
+  activateTab(tabId: string): Promise<WorkspaceSnapshot>
+  reconnectTab(tabId: string): Promise<WorkspaceSnapshot>
+  disconnectTab(tabId: string): Promise<WorkspaceSnapshot>
+  closeTab(tabId: string): Promise<WorkspaceSnapshot>
+  listLocalDirectory(dirPath?: string): Promise<DirectorySnapshot<LocalFileItem>>
+  readLocalFile(filePath: string): Promise<string>
+  writeLocalFile(filePath: string, content: string): Promise<void>
+  selectLocalFiles(defaultPath?: string): Promise<string[]>
+  selectLocalDirectory(defaultPath?: string): Promise<string | null>
+  queueUpload(fileNames: string[]): Promise<WorkspaceSnapshot>
+  uploadFile(tabId: string, localPath: string, remoteDirectory: string): Promise<WorkspaceSnapshot>
+  downloadFile(tabId: string, remotePath: string, localDirectory: string): Promise<WorkspaceSnapshot>
+  writeTerminal(tabId: string, data: string): Promise<void>
+  resizeTerminal(tabId: string, cols: number, rows: number): Promise<void>
+  openRemotePath(tabId: string, targetPath: string): Promise<WorkspaceSnapshot>
+  readRemoteFile(tabId: string, targetPath: string): Promise<string>
+  writeRemoteFile(tabId: string, targetPath: string, content: string): Promise<WorkspaceSnapshot>
+  onTerminalData(listener: (payload: TerminalDataPayload) => void): () => void
+  onTerminalState(listener: (payload: TerminalStatePayload) => void): () => void
+  onWorkspaceSnapshot(listener: (snapshot: WorkspaceSnapshot) => void): () => void
 }
 
 export interface SessionController {

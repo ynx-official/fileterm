@@ -1,0 +1,129 @@
+import type { WorkspaceTab } from '@termdock/core'
+import { tabStatusClass } from '../../app/app-utils'
+import { AppIcon } from '../common/AppIcon'
+
+export type OrderedTabEntry =
+  | { key: string; kind: 'home'; id: string }
+  | { key: string; kind: 'session'; tab: WorkspaceTab }
+
+export type TabContextTarget =
+  | { kind: 'home'; id: string; title: string }
+  | { kind: 'session'; id: string; title: string; status: WorkspaceTab['status'] }
+
+export function TabBar({
+  activeHomeTabId,
+  activeSessionTabId,
+  onAddHomeTab,
+  onActivateHome,
+  onActivateSession,
+  onCloseHomeTab,
+  onCloseSessionTab,
+  onDragEnd,
+  onDragEnter,
+  onDragStart,
+  onOpenConnectionManager,
+  onOpenTabContext,
+  orderedTabs
+}: {
+  activeHomeTabId: string | null
+  activeSessionTabId: string | null
+  onAddHomeTab(): void
+  onActivateHome(id: string): void
+  onActivateSession(id: string): void
+  onCloseHomeTab(event: React.MouseEvent<HTMLButtonElement>, id: string): void
+  onCloseSessionTab(event: React.MouseEvent<HTMLButtonElement>, id: string): void
+  onDragEnd(): void
+  onDragEnter(targetKey: string): void
+  onDragStart(tabKey: string): void
+  onOpenConnectionManager(): void
+  onOpenTabContext(event: React.MouseEvent<HTMLDivElement>, target: TabContextTarget): void
+  orderedTabs: OrderedTabEntry[]
+}) {
+  return (
+    <header className="fs-tabbar">
+      <div className="titlebar-brand">
+        <strong>TermDock</strong>
+      </div>
+      <div className="titlebar-tabarea">
+        <button aria-label="Open connection manager" className="tabbar-folder-button" onClick={onOpenConnectionManager} title="连接管理器" type="button">
+          <AppIcon name="connections" size={16} />
+        </button>
+        <div className="fs-tabs">
+          {orderedTabs.map((entry, index) => (
+            entry.kind === 'home' ? (
+              <div
+                key={entry.key}
+                className={`fs-tab home-tab ${activeHomeTabId === entry.id ? 'active' : ''}`}
+                draggable
+                onClick={() => onActivateHome(entry.id)}
+                onContextMenu={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onActivateHome(entry.id)
+                  onOpenTabContext(event, {
+                    kind: 'home',
+                    id: entry.id,
+                    title: `${index + 1} 新建标签`
+                  })
+                }}
+                onDragEnd={onDragEnd}
+                onDragEnter={() => onDragEnter(entry.key)}
+                onDragOver={(event) => event.preventDefault()}
+                onDragStart={() => onDragStart(entry.key)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    onActivateHome(entry.id)
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+              >
+                <span>{index + 1}</span>
+                <strong>新建标签</strong>
+                <button aria-label="Close 新建标签" className="tab-close" onClick={(event) => onCloseHomeTab(event, entry.id)} type="button">×</button>
+              </div>
+            ) : (
+              <div
+                key={entry.key}
+                className={`fs-tab session-tab ${entry.tab.id === activeSessionTabId && !activeHomeTabId ? 'active' : ''}`}
+                draggable
+                onClick={() => onActivateSession(entry.tab.id)}
+                onContextMenu={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onActivateSession(entry.tab.id)
+                  onOpenTabContext(event, {
+                    kind: 'session',
+                    id: entry.tab.id,
+                    title: entry.tab.title,
+                    status: entry.tab.status
+                  })
+                }}
+                onDragEnd={onDragEnd}
+                onDragEnter={() => onDragEnter(entry.key)}
+                onDragOver={(event) => event.preventDefault()}
+                onDragStart={() => onDragStart(entry.key)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    onActivateSession(entry.tab.id)
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+              >
+                <span>{index + 1}</span>
+                <strong>{entry.tab.title}</strong>
+                <span className={`tab-dot ${tabStatusClass(entry.tab.status)}`} />
+                <button aria-label={`Close ${entry.tab.title}`} className="tab-close" onClick={(event) => onCloseSessionTab(event, entry.tab.id)} type="button">×</button>
+              </div>
+            )
+          ))}
+          <button className="add-tab" type="button" onClick={onAddHomeTab}>+</button>
+        </div>
+        <div className="window-tools">
+          <button title="Grid" type="button"><AppIcon name="grid" /></button>
+        </div>
+      </div>
+    </header>
+  )
+}

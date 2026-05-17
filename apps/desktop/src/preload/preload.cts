@@ -1,11 +1,26 @@
 const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron')
 
-import type { CreateProfileInput, LocalFileItem, WorkspaceSnapshot } from '@termdock/core'
+import type {
+  ConnectionFormMode,
+  CreateProfileInput,
+  DirectorySnapshot,
+  LocalFileItem,
+  TermdockDesktopApi,
+  TerminalDataPayload,
+  TerminalStatePayload,
+  WorkspaceSnapshot
+} from '@termdock/core'
 
-const api = {
+const api: TermdockDesktopApi = {
   platform: typeof process !== 'undefined' ? process.platform : 'unknown',
   appName: 'TermDock',
   isDesktop: true,
+  openConnectionManagerWindow: (): Promise<void> =>
+    ipcRenderer.invoke('app:openConnectionManagerWindow'),
+  openConnectionFormWindow: (mode: ConnectionFormMode, profileId?: string): Promise<void> =>
+    ipcRenderer.invoke('app:openConnectionFormWindow', mode, profileId),
+  closeCurrentWindow: (): Promise<void> =>
+    ipcRenderer.invoke('app:closeCurrentWindow'),
   getSnapshot: (): Promise<WorkspaceSnapshot> => ipcRenderer.invoke('workspace:getSnapshot'),
   createProfile: (input: CreateProfileInput): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('workspace:createProfile', input),
@@ -15,11 +30,17 @@ const api = {
     ipcRenderer.invoke('workspace:deleteProfile', profileId),
   openProfile: (profileId: string): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('workspace:openProfile', profileId),
+  openProfileFromManager: (profileId: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:openProfileFromManager', profileId),
   activateTab: (tabId: string): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('workspace:activateTab', tabId),
+  reconnectTab: (tabId: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:reconnectTab', tabId),
+  disconnectTab: (tabId: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:disconnectTab', tabId),
   closeTab: (tabId: string): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('workspace:closeTab', tabId),
-  listLocalDirectory: (dirPath?: string): Promise<{ path: string, items: LocalFileItem[] }> =>
+  listLocalDirectory: (dirPath?: string): Promise<DirectorySnapshot<LocalFileItem>> =>
     ipcRenderer.invoke('localFiles:listDirectory', dirPath),
   readLocalFile: (filePath: string): Promise<string> =>
     ipcRenderer.invoke('localFiles:readFile', filePath),
@@ -45,13 +66,13 @@ const api = {
     ipcRenderer.invoke('remoteFiles:readFile', tabId, targetPath),
   writeRemoteFile: (tabId: string, targetPath: string, content: string): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('remoteFiles:writeFile', tabId, targetPath, content),
-  onTerminalData: (listener: (payload: { tabId: string, chunk: string }) => void) => {
-    const wrapped = (_event: unknown, payload: { tabId: string, chunk: string }) => listener(payload)
+  onTerminalData: (listener: (payload: TerminalDataPayload) => void) => {
+    const wrapped = (_event: unknown, payload: TerminalDataPayload) => listener(payload)
     ipcRenderer.on('terminal:data', wrapped)
     return () => ipcRenderer.off('terminal:data', wrapped)
   },
-  onTerminalState: (listener: (payload: { tabId: string, summary: string, transcript: string, connected: boolean }) => void) => {
-    const wrapped = (_event: unknown, payload: { tabId: string, summary: string, transcript: string, connected: boolean }) => listener(payload)
+  onTerminalState: (listener: (payload: TerminalStatePayload) => void) => {
+    const wrapped = (_event: unknown, payload: TerminalStatePayload) => listener(payload)
     ipcRenderer.on('terminal:state', wrapped)
     return () => ipcRenderer.off('terminal:state', wrapped)
   },

@@ -1,0 +1,154 @@
+import type {
+  ConnectionProfile,
+  CreateProfileInput,
+  LocalFileItem,
+  WorkspaceSnapshot
+} from '@termdock/core'
+
+export const emptyState: WorkspaceSnapshot = {
+  profiles: [],
+  tabs: [],
+  activeTabId: null,
+  transfers: [],
+  sessions: {}
+}
+
+export const localPreviewFiles: LocalFileItem[] = [
+  { path: '/Users/stoffel', name: '..', type: 'folder', modified: '2026/05/15 18:44', size: '-' },
+  { path: '/Users/stoffel/Downloads', name: 'Downloads', type: 'folder', modified: '2026/05/15 18:44', size: '-' },
+  { path: '/Users/stoffel/Desktop', name: 'Desktop', type: 'folder', modified: '2026/05/15 18:32', size: '-' },
+  { path: '/Users/stoffel/release.tar.gz', name: 'release.tar.gz', type: 'file', modified: '2026/05/15 17:18', size: '742 MB' },
+  { path: '/Users/stoffel/backup.sql.gz', name: 'backup.sql.gz', type: 'file', modified: '2026/05/15 16:02', size: '1.1 GB' }
+]
+
+export const previewLocalPath = '/Users/stoffel'
+
+export const previewState: WorkspaceSnapshot = {
+  profiles: [
+    {
+      id: 'preview-profile-ssh',
+      type: 'ssh',
+      name: 'SynologyNAS',
+      host: '114.66.28.185',
+      port: 22,
+      username: 'Stoffel',
+      authType: 'privateKey',
+      privateKeyPath: '~/.ssh/id_ed25519',
+      group: '默认',
+      sftpEnabled: true,
+      remotePath: '/'
+    },
+    {
+      id: 'preview-profile-ftp',
+      type: 'ftp',
+      name: 'archive-ftp',
+      host: 'ftp.example.net',
+      port: 21,
+      username: 'deploy',
+      secure: false,
+      group: 'FTP',
+      remotePath: '/incoming'
+    }
+  ],
+  tabs: [
+    {
+      id: 'preview-tab-ssh',
+      sessionType: 'ssh',
+      profileId: 'preview-profile-ssh',
+      title: '123',
+      layout: 'terminal-file',
+      status: 'connected'
+    }
+  ],
+  activeTabId: 'preview-tab-ssh',
+  transfers: [],
+  sessions: {
+    'preview-tab-ssh': {
+      profileId: 'preview-profile-ssh',
+      summary: 'Connected to 192.168.3.197:22',
+      terminalTranscript:
+        'Linux fnOSNAS-CN 6.18.18-trim #473 SMP PREEMPT_DYNAMIC Thu Apr  9 09:34:02 UTC 2026 x86_64\r\nLast login: Fri May 15 21:57:26 2026 from 127.0.0.1\r\nCould not chdir to home directory /home/Stoffel: No such file or directory\r\nStoffel@fnOSNAS-CN:~$ ',
+      remotePath: '/',
+      remoteFiles: [
+        { path: '/boot', name: 'boot', type: 'folder', modified: '2026-05-11 17:46', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' },
+        { path: '/dev', name: 'dev', type: 'folder', modified: '2026-05-15 07:20', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' },
+        { path: '/etc', name: 'etc', type: 'folder', modified: '2026-05-11 17:46', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' },
+        { path: '/home', name: 'home', type: 'folder', modified: '2024-08-01 16:06', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' },
+        { path: '/run', name: 'run', type: 'folder', modified: '2026-05-15 07:20', size: '-', permission: 'drwxr-xr-x', ownerGroup: '0/0' }
+      ],
+      connected: true,
+      systemMetrics: {
+        ip: '192.168.3.197',
+        uptime: '4 天',
+        load: '0.44, 0.66, 0.62',
+        cpuPercent: 10,
+        memoryPercent: 68,
+        memoryUsage: '7.9G/11.6G',
+        swapPercent: 7,
+        swapUsage: '290M/4.0G',
+        diskRows: [
+          { path: '/dev', usage: '5.8G/5.8G' },
+          { path: '/run', usage: '1.1G/1.2G' },
+          { path: '/', usage: '44G/63G' },
+          { path: '/dev/shm', usage: '5.9G/5.9G' },
+          { path: '/run/lock', usage: '5.0M/5.0M' }
+        ],
+        networkInterfaces: ['enp3s0-ovs'],
+        activeNetworkInterface: 'enp3s0-ovs',
+        networkRates: { tx: '540B', rx: '233B' },
+        networkSamples: Array.from({ length: 18 }, (_, index) => ({
+          tx: [5, 11, 8, 14, 4, 9, 2, 12, 10, 6, 15, 7, 3, 8, 11, 4, 6, 9][index],
+          rx: [10, 19, 13, 22, 6, 24, 8, 15, 18, 12, 20, 9, 5, 13, 16, 8, 11, 14][index]
+        })),
+        topProcesses: [
+          { memory: '3171.4M', cpu: '3.0', command: 'python' },
+          { memory: '1309.4M', cpu: '1.0', command: 'next-server' },
+          { memory: '536.1M', cpu: '0.6', command: 'python3' },
+          { memory: '349.7M', cpu: '0.5', command: 'trim-photos' }
+        ]
+      }
+    }
+  }
+}
+
+export const defaultForm: CreateProfileInput = {
+  type: 'ssh',
+  name: '',
+  host: '',
+  port: 22,
+  username: '',
+  group: '默认',
+  remotePath: '/',
+  note: '',
+  password: '',
+  privateKeyPath: '',
+  passphrase: '',
+  authType: 'password',
+  encoding: 'UTF-8',
+  backspaceKey: 'ASCII',
+  deleteKey: 'VT220',
+  enableExecChannel: true,
+  secure: false
+}
+
+export function profileToForm(profile: ConnectionProfile): CreateProfileInput {
+  return {
+    type: profile.type,
+    name: profile.name,
+    host: profile.host,
+    port: profile.port,
+    username: profile.username,
+    group: profile.group,
+    remotePath: profile.remotePath,
+    note: profile.note ?? '',
+    password: profile.password ?? '',
+    authType: profile.type === 'ssh' ? profile.authType : 'password',
+    privateKeyPath: profile.type === 'ssh' ? profile.privateKeyPath ?? '' : '',
+    passphrase: profile.type === 'ssh' ? profile.passphrase ?? '' : '',
+    encoding: profile.type === 'ssh' ? profile.encoding ?? 'UTF-8' : 'UTF-8',
+    backspaceKey: profile.type === 'ssh' ? profile.backspaceKey ?? 'ASCII' : 'ASCII',
+    deleteKey: profile.type === 'ssh' ? profile.deleteKey ?? 'VT220' : 'VT220',
+    enableExecChannel: profile.type === 'ssh' ? profile.enableExecChannel ?? true : true,
+    secure: profile.type === 'ftp' ? profile.secure : false
+  }
+}
