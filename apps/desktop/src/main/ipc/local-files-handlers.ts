@@ -21,7 +21,7 @@ export function registerLocalFilesHandlers(services: IpcServices) {
     const window = BrowserWindow.fromWebContents(event.sender) ?? undefined
     const options: OpenDialogOptions = {
       defaultPath,
-      properties: ['openFile', 'multiSelections']
+      properties: ['openFile', 'openDirectory', 'multiSelections', 'createDirectory']
     }
     const result = window
       ? await dialog.showOpenDialog(window, options)

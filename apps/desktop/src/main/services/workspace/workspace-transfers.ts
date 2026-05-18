@@ -50,4 +50,8 @@ export class WorkspaceTransfersState {
       ...patch
     }
   }
+
+  get(transferId: string) {
+    return this.transfers.find((transfer) => transfer.id === transferId)
+  }
 }

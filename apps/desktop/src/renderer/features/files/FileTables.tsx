@@ -172,11 +172,11 @@ export function LocalFileTable({
           >
             <td>
               <span
-                className={`file-icon ${row.type === 'file' ? 'is-draggable' : ''}`}
-                draggable={row.type === 'file'}
+                className={`file-icon ${row.name !== '..' ? 'is-draggable' : ''}`}
+                draggable={row.name !== '..'}
                 onDragStart={(event) => onDragItem(event, row)}
                 onMouseDown={(event) => event.stopPropagation()}
-                title={row.type === 'file' ? '拖动传输' : undefined}
+                title={row.name !== '..' ? '拖动传输' : undefined}
               >
                 <AppIcon name={row.type === 'folder' ? 'folder' : 'file'} />
               </span>

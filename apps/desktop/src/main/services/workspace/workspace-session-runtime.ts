@@ -111,22 +111,6 @@ export class WorkspaceSessionRuntime {
       await controller.connect()
       this.liveControllers.set(tabId, controller)
 
-      let files = [] as Awaited<ReturnType<LiveSessionController['listRemoteFiles']>>
-      let remoteFilesError: string | null = null
-      try {
-        files = await controller.listRemoteFiles()
-      } catch (error) {
-        remoteFilesError = error instanceof Error ? error.message : '远程目录读取失败'
-      }
-
-      let systemMetrics
-      if (controller.type === 'ssh') {
-        systemMetrics = await controller.refreshSystemMetrics()
-        if (remoteFilesError) {
-          controller.pushClientNotice(`SFTP 初始化失败: ${remoteFilesError}`)
-        }
-      }
-
       const current = this.sessions.get(tabId)
       if (!current) {
         return
@@ -138,11 +122,44 @@ export class WorkspaceSessionRuntime {
         terminalTranscript:
           controller.type === 'ssh' ? controller.getTerminalTranscript() : undefined,
         remotePath: controller.getRemotePath(),
-        remoteFiles: files,
         connected: true,
-        systemMetrics: systemMetrics ? this.mergeNetworkHistory(undefined, systemMetrics) : undefined
+        remoteFiles: current.remoteFiles,
+        systemMetrics: current.systemMetrics
       })
       this.options.updateTabStatus(tabId, 'connected')
+      await this.emitSnapshotForTab(tabId)
+
+      let remoteFilesError: string | null = null
+      try {
+        const files = await controller.listRemoteFiles()
+        const latest = this.sessions.get(tabId)
+        if (latest) {
+          this.sessions.set(tabId, {
+            ...latest,
+            remotePath: controller.getRemotePath(),
+            remoteFiles: files
+          })
+          await this.emitSnapshotForTab(tabId)
+        }
+      } catch (error) {
+        remoteFilesError = error instanceof Error ? error.message : '远程目录读取失败'
+      }
+
+      if (controller.type === 'ssh') {
+        const systemMetrics = await controller.refreshSystemMetrics()
+        const latest = this.sessions.get(tabId)
+        if (latest && systemMetrics) {
+          this.sessions.set(tabId, {
+            ...latest,
+            systemMetrics: this.mergeNetworkHistory(undefined, systemMetrics)
+          })
+          await this.emitSnapshotForTab(tabId)
+        }
+        if (remoteFilesError) {
+          controller.pushClientNotice(`SFTP 初始化失败: ${remoteFilesError}`)
+        }
+      }
+
       if (controller.type === 'ssh') {
         const profile = controller['profile']
         if (profile.type !== 'ssh' || profile.enableExecChannel !== false) {

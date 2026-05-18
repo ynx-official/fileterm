@@ -78,7 +78,7 @@ export interface TransferTask {
   direction: 'upload' | 'download'
   name: string
   progress: number
-  status: 'queued' | 'running' | 'done' | 'failed'
+  status: 'queued' | 'running' | 'done' | 'failed' | 'canceled'
   message?: string
 }
 
@@ -213,9 +213,11 @@ export interface TermdockDesktopApi {
   listLocalDirectory(dirPath?: string): Promise<DirectorySnapshot<LocalFileItem>>
   readLocalFile(filePath: string): Promise<string>
   writeLocalFile(filePath: string, content: string): Promise<void>
+  getDroppedFilePaths(files: File[]): string[]
   selectLocalFiles(defaultPath?: string): Promise<string[]>
   selectLocalDirectory(defaultPath?: string): Promise<string | null>
   queueUpload(fileNames: string[]): Promise<WorkspaceSnapshot>
+  cancelTransfer(transferId: string): Promise<WorkspaceSnapshot>
   uploadFile(tabId: string, localPath: string, remoteDirectory: string): Promise<WorkspaceSnapshot>
   downloadFile(tabId: string, remotePath: string, localDirectory: string): Promise<WorkspaceSnapshot>
   writeTerminal(tabId: string, data: string): Promise<void>
@@ -249,6 +251,8 @@ export interface FileSessionController extends SessionController {
   openRemotePath(path: string): Promise<RemoteFileItem[]>
   readRemoteFile(path: string): Promise<string>
   writeRemoteFile(path: string, content: string): Promise<void>
+  ensureRemoteDirectory(path: string): Promise<void>
+  abortTransfer(): Promise<void>
   uploadFile(localPath: string, remotePath: string, onProgress: (progress: number) => void): Promise<void>
   downloadFile(remotePath: string, localPath: string, onProgress: (progress: number) => void): Promise<void>
 }

@@ -102,7 +102,7 @@ export function FileManager({
     const draggedLocalPath = event.dataTransfer.getData(localFileDragType)
     if (draggedLocalPath) {
       const draggedPaths = parseDraggedPaths(draggedLocalPath)
-      const items = localItems.filter((row) => draggedPaths.includes(row.path) && row.type === 'file')
+      const items = localItems.filter((row) => draggedPaths.includes(row.path) && row.name !== '..')
       if (items.length) {
         onUploadFiles(items)
       }
@@ -282,8 +282,10 @@ export function FileManager({
               selectedPaths={selectedLocalPaths}
               onDragItem={(event, item) => {
                 event.dataTransfer.effectAllowed = 'copy'
-                const payload = selectedLocalPaths.includes(item.path) ? selectedLocalPaths : [item.path]
-                const previewItems = localItems.filter((row) => payload.includes(row.path))
+                const payload = selectedLocalPaths.includes(item.path)
+                  ? selectedLocalPaths
+                  : [item.path]
+                const previewItems = localItems.filter((row) => payload.includes(row.path) && row.name !== '..')
                 event.dataTransfer.setData(localFileDragType, JSON.stringify(payload))
                 setFileDragPreview(event, previewItems.map((row) => row.name))
               }}
@@ -432,7 +434,16 @@ export function FileManager({
             setContextMenu(null)
           }}
           onUpload={() => {
-            onChooseUploadFiles()
+            if (contextLocalItem) {
+              const items = selectedLocalPaths.includes(contextLocalItem.path)
+                ? localItems.filter((item) => selectedLocalPaths.includes(item.path) && item.name !== '..')
+                : contextLocalItem.name === '..' ? [] : [contextLocalItem]
+              if (items.length) {
+                onUploadFiles(items)
+              }
+            } else {
+              onChooseUploadFiles()
+            }
             setContextMenu(null)
           }}
         />

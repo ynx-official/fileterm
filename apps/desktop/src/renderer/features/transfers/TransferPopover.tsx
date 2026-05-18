@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import type { TransferTask } from '@termdock/core'
-import { transferStatusText } from '../../app/app-utils'
+import { isActiveTransfer, isCompletedTransfer, transferStatusText } from '../../app/app-utils'
 
 export function TransferPopover({
+  onCancelTransfer,
   onClose,
   transfers
 }: {
+  onCancelTransfer(transferId: string): void
   onClose(): void
   transfers: TransferTask[]
 }) {
@@ -14,10 +16,10 @@ export function TransferPopover({
   const visibleTransfers = transfers
     .filter((transfer) => {
       if (statusFilter === 'running') {
-        return transfer.status === 'running' || transfer.status === 'queued'
+        return isActiveTransfer(transfer)
       }
       if (statusFilter === 'completed') {
-        return transfer.status === 'done' || transfer.status === 'failed'
+        return isCompletedTransfer(transfer)
       }
       return true
     })
@@ -47,7 +49,12 @@ export function TransferPopover({
           <div className={`transfer-row transfer-${transfer.status}`} key={transfer.id}>
             <div className="transfer-row-main">
               <strong title={transfer.name}>{transfer.name}</strong>
-              <span>{transferStatusText(transfer)}</span>
+              <div className="transfer-row-inline">
+                <span>{transferStatusText(transfer)}</span>
+                {isActiveTransfer(transfer) ? (
+                  <button className="transfer-cancel" onClick={() => onCancelTransfer(transfer.id)} type="button">终止</button>
+                ) : null}
+              </div>
             </div>
             <div className="transfer-row-meta">
               <span>{transfer.direction === 'upload' ? '上传' : '下载'}</span>

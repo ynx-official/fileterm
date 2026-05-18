@@ -136,14 +136,18 @@ function MemoryMeter({ metrics }: { metrics?: SystemMetrics }) {
         </div>
       </div>
       <div className="memory-details">
-        <span className="metric-chip">
-          <i className={`metric-dot ${memoryTone}`} />
-          <strong>{metrics?.memoryUsage ?? '0/0'}</strong>
+        <span className="metric-chip metric-chip-summary">
+          <span className="metric-chip-main">
+            <i className={`metric-dot ${memoryTone}`} />
+            <strong>{metrics?.memoryUsage ?? '0/0'}</strong>
+          </span>
+          <strong className="metric-percent">{metrics ? `${metrics.memoryPercent}%` : '0%'}</strong>
         </span>
         {segments.length ? segments.map((segment) => (
           <span className="metric-chip" key={segment.key}>
             <i className={`metric-dot ${segment.key}`} />
-            {segment.label} {segment.value}
+            <span>{segment.label}</span>
+            <strong>{segment.value}</strong>
           </span>
         )) : null}
       </div>
@@ -208,47 +212,10 @@ function buildLinePath(samples: NetworkSamplePoint[], key: 'rx' | 'tx', maxValue
   return path
 }
 
-function resampleSeries(samples: NetworkSamplePoint[], targetLength: number) {
-  if (!samples.length) {
-    return Array.from({ length: targetLength }, () => ({ rx: 0, tx: 0 }))
-  }
-
-  if (samples.length === targetLength) {
-    return samples
-  }
-
-  if (samples.length > targetLength) {
-    return Array.from({ length: targetLength }, (_value, index) => {
-      const start = Math.floor((index / targetLength) * samples.length)
-      const end = Math.floor(((index + 1) / targetLength) * samples.length)
-      const bucket = samples.slice(start, Math.max(start + 1, end))
-      const rx = bucket.reduce((sum, item) => sum + item.rx, 0) / bucket.length
-      const tx = bucket.reduce((sum, item) => sum + item.tx, 0) / bucket.length
-
-      return {
-        rx: Math.round(rx),
-        tx: Math.round(tx)
-      }
-    })
-  }
-
-  return Array.from({ length: targetLength }, (_value, index) => {
-    if (targetLength === 1) {
-      return samples[0]
-    }
-
-    const position = (index / (targetLength - 1)) * (samples.length - 1)
-    const leftIndex = Math.floor(position)
-    const rightIndex = Math.min(samples.length - 1, Math.ceil(position))
-    const progress = position - leftIndex
-    const left = samples[leftIndex]
-    const right = samples[rightIndex]
-
-    return {
-      rx: Math.round(left.rx + (right.rx - left.rx) * progress),
-      tx: Math.round(left.tx + (right.tx - left.tx) * progress)
-    }
-  })
+function buildScrollingWindow(samples: NetworkSamplePoint[], visibleCount: number) {
+  const windowSize = visibleCount + 1
+  const padded = Array.from({ length: Math.max(0, windowSize - samples.length) }, () => ({ rx: 0, tx: 0 }))
+  return [...padded, ...samples].slice(-windowSize)
 }
 
 function formatTrafficLabel(value: number) {
@@ -262,6 +229,8 @@ function formatTrafficLabel(value: number) {
 }
 
 function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
+  const visibleSampleCount = 64
+  const chartStep = 100 / Math.max(1, visibleSampleCount - 1)
   const [selectedInterface, setSelectedInterface] = useState(metrics?.activeNetworkInterface ?? '')
   const interfaceOptions = metrics?.networkInterfaces.length ? metrics.networkInterfaces : ['-']
   const currentRates = metrics?.networkRatesByInterface?.[selectedInterface] ?? metrics?.networkRates
@@ -269,11 +238,14 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
     ? metrics.networkSamplesByInterface[selectedInterface]
     : metrics?.networkSamples.length
       ? metrics.networkSamples
-      : Array.from({ length: 120 }, () => ({ rx: 0, tx: 0 }))
-  const samples = useMemo(() => resampleSeries(rawSamples, 64), [rawSamples])
+      : []
+  const samples = useMemo(() => buildScrollingWindow(rawSamples, visibleSampleCount), [rawSamples])
   const [displaySamples, setDisplaySamples] = useState(samples)
+  const [chartOffset, setChartOffset] = useState(-chartStep)
   const animationFrameRef = useRef<number | null>(null)
   const previousInterfaceRef = useRef(selectedInterface)
+  const previousLastSampleRef = useRef(rawSamples.at(-1))
+  const previousSampleCountRef = useRef(rawSamples.length)
 
   const activityValues = displaySamples.map((sample) => Math.max(sample.rx, sample.tx))
   const maxValue = Math.max(...activityValues, 1)
@@ -290,6 +262,14 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
   useEffect(() => {
     const interfaceChanged = previousInterfaceRef.current !== selectedInterface
     previousInterfaceRef.current = selectedInterface
+    const latestSample = rawSamples.at(-1)
+    const previousLastSample = previousLastSampleRef.current
+    const sampleAdvanced = previousSampleCountRef.current !== rawSamples.length
+      || previousLastSample?.rx !== latestSample?.rx
+      || previousLastSample?.tx !== latestSample?.tx
+
+    previousLastSampleRef.current = latestSample
+    previousSampleCountRef.current = rawSamples.length
 
     if (animationFrameRef.current !== null) {
       cancelAnimationFrame(animationFrameRef.current)
@@ -298,23 +278,26 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
 
     if (interfaceChanged) {
       setDisplaySamples(samples)
+      setChartOffset(-chartStep)
       return
     }
 
-    const fromSamples = displaySamples.length === samples.length ? displaySamples : samples
+    if (!sampleAdvanced) {
+      setDisplaySamples(samples)
+      setChartOffset(-chartStep)
+      return
+    }
+
     const startTime = performance.now()
-    const duration = 260
+    const duration = 420
+
+    setDisplaySamples(samples)
+    setChartOffset(0)
 
     const animate = (now: number) => {
       const progress = Math.min(1, (now - startTime) / duration)
       const eased = 1 - Math.pow(1 - progress, 3)
-
-      setDisplaySamples(
-        samples.map((sample, index) => ({
-          rx: Math.round(fromSamples[index].rx + (sample.rx - fromSamples[index].rx) * eased),
-          tx: Math.round(fromSamples[index].tx + (sample.tx - fromSamples[index].tx) * eased)
-        }))
-      )
+      setChartOffset(-chartStep * eased)
 
       if (progress < 1) {
         animationFrameRef.current = requestAnimationFrame(animate)
@@ -367,8 +350,10 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
             <path className="network-guide major" d="M 0 12 H 100" />
             <path className="network-guide minor" d="M 0 44 H 100" />
             <path className="network-guide minor" d="M 0 76 H 100" />
-            <path className="network-path tx-path" d={txPath} />
-            <path className="network-path rx-path" d={rxPath} />
+            <g transform={`translate(${chartOffset} 0)`}>
+              <path className="network-path tx-path" d={txPath} />
+              <path className="network-path rx-path" d={rxPath} />
+            </g>
           </svg>
         </div>
       </div>

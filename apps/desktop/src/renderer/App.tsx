@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useTransition, type CSSProperties, type DragEvent, type FormEvent, type MouseEvent } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type FormEvent, type MouseEvent } from 'react'
 import type {
   ConnectionFormMode,
   ConnectionProfile,
@@ -10,7 +10,7 @@ import type {
   WorkspaceTab
 } from '@termdock/core'
 import { defaultForm, emptyState, localPreviewFiles, previewLocalPath, previewState, profileToForm } from './app/app-data'
-import { homeTabKey, reorderTabKeys, sessionTabKey, withParentRow } from './app/app-utils'
+import { homeTabKey, isActiveTransfer, reorderTabKeys, sessionTabKey, withParentRow } from './app/app-utils'
 import { ConnectionManagerModal } from './features/connections/ConnectionManagerModal'
 import { ConnectionModal } from './features/connections/ConnectionModal'
 import { FileEditorModal } from './features/files/FileEditorModal'
@@ -37,7 +37,6 @@ export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(emptyState)
   const [error, setError] = useState<string | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
-  const [, startTransition] = useTransition()
   const [isBusy, setIsBusy] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [showConnectionManager, setShowConnectionManager] = useState(false)
@@ -135,7 +134,7 @@ export function App() {
   }, [formWindowMode, formWindowProfileId, isConnectionFormWindow, workspace.profiles])
 
   useEffect(() => {
-    const activeTransferCount = workspace.transfers.filter((transfer) => transfer.status === 'running' || transfer.status === 'queued').length
+    const activeTransferCount = workspace.transfers.filter(isActiveTransfer).length
     if (activeTransferCount > previousActiveTransferCountRef.current) {
       setShowTransfers(true)
     }
@@ -198,14 +197,12 @@ export function App() {
   const activeProfile = !activeHomeTabId && activeTab
     ? workspace.profiles.find((profile) => profile.id === activeTab.profileId) ?? null
     : null
-  const activeTransferCount = workspace.transfers.filter((transfer) => transfer.status === 'running' || transfer.status === 'queued').length
+  const activeTransferCount = workspace.transfers.filter(isActiveTransfer).length
 
   const applySnapshot = (snapshot: WorkspaceSnapshot) => {
-    startTransition(() => {
-      setWorkspace(snapshot)
-      setError(null)
-      setFormError(null)
-    })
+    setWorkspace(snapshot)
+    setError(null)
+    setFormError(null)
   }
 
   const updateForm = (
@@ -396,10 +393,8 @@ export function App() {
   }
 
   const handleActivateHome = (homeTabId: string) => {
-    startTransition(() => {
-      setError(null)
-      setActiveHomeTabId(homeTabId)
-    })
+    setError(null)
+    setActiveHomeTabId(homeTabId)
   }
 
   const handleAddHomeTab = () => {
@@ -593,9 +588,7 @@ export function App() {
 
   const handleDropUpload = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
-    const localPaths = Array.from(event.dataTransfer.files)
-      .map((file) => (file as File & { path?: string }).path)
-      .filter((filePath): filePath is string => Boolean(filePath))
+    const localPaths = extractDroppedLocalPaths(event)
 
     if (!localPaths.length || !desktopApi || !activeTab || !activeSession) {
       setError(t.desktopOnlyUpload)
@@ -604,10 +597,7 @@ export function App() {
 
     try {
       setIsBusy(true)
-      for (const localFilePath of localPaths) {
-        const snapshot = await desktopApi.uploadFile(activeTab.id, localFilePath, activeSession.remotePath)
-        applySnapshot(snapshot)
-      }
+      await uploadLocalPaths(localPaths)
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -683,6 +673,17 @@ export function App() {
       setFileEditorError((err as Error).message)
     } finally {
       setIsBusy(false)
+    }
+  }
+
+  const uploadLocalPaths = async (paths: string[]) => {
+    if (!desktopApi || !activeTab || !activeSession) {
+      return
+    }
+
+    for (const localPath of Array.from(new Set(paths))) {
+      const snapshot = await desktopApi.uploadFile(activeTab.id, localPath, activeSession.remotePath)
+      applySnapshot(snapshot)
     }
   }
 
@@ -865,10 +866,7 @@ export function App() {
                   void (async () => {
                     try {
                       setIsBusy(true)
-                      for (const item of items.filter((row) => row.type === 'file')) {
-                        const snapshot = await desktopApi.uploadFile(activeTab.id, item.path, activeSession.remotePath)
-                        applySnapshot(snapshot)
-                      }
+                      await uploadLocalPaths(items.map((item) => item.path))
                     } catch (err) {
                       setError((err as Error).message)
                     } finally {
@@ -883,10 +881,7 @@ export function App() {
                     if (!filePaths.length) return
                     try {
                       setIsBusy(true)
-                      for (const filePath of filePaths) {
-                        const snapshot = await desktopApi.uploadFile(activeTab.id, filePath, activeSession.remotePath)
-                        applySnapshot(snapshot)
-                      }
+                      await uploadLocalPaths(filePaths)
                     } catch (err) {
                       setError((err as Error).message)
                     } finally {
@@ -937,7 +932,18 @@ export function App() {
         />
 
         {showTransfers ? (
-          <TransferPopover transfers={workspace.transfers} onClose={() => setShowTransfers(false)} />
+          <TransferPopover
+            transfers={workspace.transfers}
+            onCancelTransfer={(transferId) => {
+              if (!desktopApi) return
+              void desktopApi.cancelTransfer(transferId).then((snapshot) => {
+                applySnapshot(snapshot)
+              }).catch((err: Error) => {
+                setError(err.message)
+              })
+            }}
+            onClose={() => setShowTransfers(false)}
+          />
         ) : null}
       </div>
 
@@ -1011,4 +1017,22 @@ export function App() {
       ) : null}
     </>
   )
+}
+
+function extractDroppedLocalPaths(event: DragEvent<HTMLDivElement>) {
+  const desktopApi = window.termdock
+  const fileList = Array.from(event.dataTransfer.files)
+  const filePaths = (
+    desktopApi?.getDroppedFilePaths?.(fileList)
+    ?? fileList.map((file) => (file as File & { path?: string }).path).filter(Boolean)
+  ).filter((filePath): filePath is string => Boolean(filePath))
+
+  if (filePaths.length) {
+    return filePaths
+  }
+
+  return Array.from(event.dataTransfer.items)
+    .map((item) => item.getAsFile() as (File & { path?: string }) | null)
+    .map((file) => file?.path)
+    .filter((filePath): filePath is string => Boolean(filePath))
 }

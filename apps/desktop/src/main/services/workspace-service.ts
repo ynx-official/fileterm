@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { readdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { WebContents } from 'electron'
 import {
@@ -18,6 +19,7 @@ export class WorkspaceService {
   private readonly profileRepository: ProfileRepository
   private readonly tabs = new WorkspaceTabsState()
   private readonly transfers = new WorkspaceTransfersState(seedTransfers)
+  private readonly transferCancels = new Map<string, () => Promise<void> | void>()
   private readonly sessionRuntime = new WorkspaceSessionRuntime({
     getSnapshot: () => this.getSnapshot(),
     updateTabStatus: (tabId, status) => {
@@ -144,6 +146,9 @@ export class WorkspaceService {
   }
 
   async activateTab(tabId: string): Promise<WorkspaceSnapshot> {
+    if (!this.tabs.has(tabId)) {
+      return this.getSnapshot()
+    }
     this.tabs.activate(tabId)
     return this.getSnapshot()
   }
@@ -177,23 +182,54 @@ export class WorkspaceService {
     return this.getSnapshot()
   }
 
-  async uploadFile(tabId: string, localPath: string, remoteDirectory: string, sender: WebContents): Promise<WorkspaceSnapshot> {
-    const controller = this.sessionRuntime.requireController(tabId)
-    const remotePath = path.posix.join(remoteDirectory, path.basename(localPath))
-    const transferId = this.addTransfer('upload', path.basename(localPath), sender)
+  async cancelTransfer(transferId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+    const transfer = this.transfers.get(transferId)
+    if (!transfer || (transfer.status !== 'running' && transfer.status !== 'queued')) {
+      return this.getSnapshot()
+    }
 
     try {
-      await controller.uploadFile(localPath, remotePath, (progress) => {
+      await this.transferCancels.get(transferId)?.()
+    } finally {
+      this.transferCancels.delete(transferId)
+      await this.updateTransfer(transferId, {
+        status: 'canceled',
+        message: '传输已终止'
+      }, sender)
+    }
+
+    return this.getSnapshot()
+  }
+
+  async uploadFile(tabId: string, localPath: string, remoteDirectory: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+    const controller = this.sessionRuntime.requireController(tabId)
+    const transferId = this.addTransfer('upload', path.basename(localPath), sender)
+    const transferState = { canceled: false }
+    this.setTransferCancel(transferId, async () => {
+      transferState.canceled = true
+      await controller.abortTransfer()
+    })
+
+    try {
+      await this.uploadLocalEntry(controller, localPath, remoteDirectory, transferState, (progress) => {
         void this.updateTransfer(transferId, { progress, status: 'running' }, sender)
       })
+      if (transferState.canceled) {
+        return this.getSnapshot()
+      }
       await this.updateTransfer(transferId, { progress: 100, status: 'done' }, sender)
       await this.refreshRemoteFiles(tabId)
     } catch (error) {
+      if (transferState.canceled) {
+        return this.getSnapshot()
+      }
       await this.updateTransfer(transferId, {
         status: 'failed',
         message: error instanceof Error ? error.message : '上传失败'
       }, sender)
       throw error
+    } finally {
+      this.transferCancels.delete(transferId)
     }
 
     return this.getSnapshot()
@@ -203,18 +239,31 @@ export class WorkspaceService {
     const controller = this.sessionRuntime.requireController(tabId)
     const localPath = path.join(localDirectory, path.posix.basename(remotePath))
     const transferId = this.addTransfer('download', path.posix.basename(remotePath), sender)
+    const transferState = { canceled: false }
+    this.setTransferCancel(transferId, async () => {
+      transferState.canceled = true
+      await controller.abortTransfer()
+    })
 
     try {
       await controller.downloadFile(remotePath, localPath, (progress) => {
         void this.updateTransfer(transferId, { progress, status: 'running' }, sender)
       })
+      if (transferState.canceled) {
+        return this.getSnapshot()
+      }
       await this.updateTransfer(transferId, { progress: 100, status: 'done' }, sender)
     } catch (error) {
+      if (transferState.canceled) {
+        return this.getSnapshot()
+      }
       await this.updateTransfer(transferId, {
         status: 'failed',
         message: error instanceof Error ? error.message : '下载失败'
       }, sender)
       throw error
+    } finally {
+      this.transferCancels.delete(transferId)
     }
 
     return this.getSnapshot()
@@ -256,6 +305,95 @@ export class WorkspaceService {
     return this.sessionRuntime.createController(tabId, profile)
   }
 
+  private async uploadLocalEntry(
+    controller: ReturnType<WorkspaceService['createController']>,
+    localPath: string,
+    remoteDirectory: string,
+    transferState: { canceled: boolean },
+    onProgress: (progress: number) => void
+  ) {
+    this.ensureTransferActive(transferState)
+    const info = await stat(localPath)
+    if (!info.isDirectory()) {
+      const remotePath = path.posix.join(remoteDirectory, path.basename(localPath))
+      await controller.uploadFile(localPath, remotePath, onProgress)
+      return
+    }
+
+    const { directories, files } = await this.collectLocalUploadEntries(localPath)
+    const remoteRoot = path.posix.join(remoteDirectory, path.basename(localPath))
+    onProgress(1)
+    this.ensureTransferActive(transferState)
+    await controller.ensureRemoteDirectory(remoteRoot)
+
+    if (directories.length) {
+      onProgress(3)
+    }
+    for (const directory of directories) {
+      this.ensureTransferActive(transferState)
+      await controller.ensureRemoteDirectory(path.posix.join(remoteRoot, ...directory.split(path.sep)))
+    }
+
+    if (!files.length) {
+      onProgress(100)
+      return
+    }
+
+    const totalBytes = Math.max(files.reduce((sum, file) => sum + Math.max(file.size, 1), 0), 1)
+    let uploadedBytes = 0
+
+    for (const file of files) {
+      this.ensureTransferActive(transferState)
+      const remotePath = path.posix.join(remoteRoot, ...file.relativePath.split(path.sep))
+      await controller.ensureRemoteDirectory(path.posix.dirname(remotePath))
+      await controller.uploadFile(file.fullPath, remotePath, (fileProgress) => {
+        const fileBytes = Math.max(file.size, 1)
+        const completedBytes = uploadedBytes + Math.round((fileProgress / 100) * fileBytes)
+        onProgress(Math.max(5, Math.min(99, Math.round((completedBytes / totalBytes) * 100))))
+      })
+      uploadedBytes += Math.max(file.size, 1)
+      onProgress(Math.max(5, Math.min(99, Math.round((uploadedBytes / totalBytes) * 100))))
+    }
+  }
+
+  private async collectLocalUploadEntries(rootPath: string, currentPath = rootPath): Promise<{
+    directories: string[]
+    files: Array<{
+      fullPath: string
+      relativePath: string
+      size: number
+    }>
+  }> {
+    const entries = await readdir(currentPath, { withFileTypes: true })
+    const directories: string[] = []
+    const files: Array<{ fullPath: string; relativePath: string; size: number }> = []
+
+    for (const entry of entries) {
+      const fullPath = path.join(currentPath, entry.name)
+      if (entry.isDirectory()) {
+        const relativeDirectory = path.relative(rootPath, fullPath)
+        directories.push(relativeDirectory)
+        const nestedEntries = await this.collectLocalUploadEntries(rootPath, fullPath)
+        directories.push(...nestedEntries.directories)
+        files.push(...nestedEntries.files)
+        continue
+      }
+
+      if (!entry.isFile()) {
+        continue
+      }
+
+      const info = await stat(fullPath)
+      files.push({
+        fullPath,
+        relativePath: path.relative(rootPath, fullPath),
+        size: info.size
+      })
+    }
+
+    return { directories, files }
+  }
+
   private async refreshRemoteFiles(tabId: string) {
     await this.sessionRuntime.refreshRemoteFiles(tabId)
   }
@@ -264,6 +402,16 @@ export class WorkspaceService {
     const transferId = this.transfers.add(direction, name)
     void this.sessionRuntime.emitSnapshot(sender)
     return transferId
+  }
+
+  private setTransferCancel(transferId: string, cancel: () => Promise<void> | void) {
+    this.transferCancels.set(transferId, cancel)
+  }
+
+  private ensureTransferActive(transferState: { canceled: boolean }) {
+    if (transferState.canceled) {
+      throw new Error('传输已终止')
+    }
   }
 
   private async updateTransfer(

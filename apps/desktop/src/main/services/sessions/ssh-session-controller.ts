@@ -1,3 +1,4 @@
+import path from 'node:path'
 import { readFile, stat, writeFile } from 'node:fs/promises'
 import type { ClientChannel, ConnectConfig, FileEntry, SFTPWrapper } from 'ssh2'
 import { Client } from 'ssh2'
@@ -112,8 +113,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
 
   override async disconnect(): Promise<void> {
     this.shellStream?.end()
-    this.sftp?.end?.()
-    this.sftp = undefined
+    this.closeSftpSession()
     this.ssh.end()
     this.sftpSsh.end()
     this.connected = false
@@ -129,6 +129,10 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
 
   getSystemMetrics(): SystemMetrics | undefined {
     return this.metrics
+  }
+
+  async abortTransfer(): Promise<void> {
+    this.closeSftpSession()
   }
 
   async write(data: string): Promise<void> {
@@ -190,6 +194,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   async writeRemoteFile(targetPath: string, content: string): Promise<void> {
     try {
       const sftp = await this.ensureSftp()
+      await this.ensureRemoteDirectory(path.posix.dirname(targetPath))
       await new Promise<void>((resolve, reject) => {
         sftp.writeFile(targetPath, content, 'utf8', (error) => {
           if (error) {
@@ -204,11 +209,58 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     }
   }
 
+  async ensureRemoteDirectory(targetPath: string): Promise<void> {
+    const normalized = path.posix.normalize(targetPath || '.')
+    if (!normalized || normalized === '.' || normalized === '/') {
+      return
+    }
+
+    try {
+      const sftp = await this.ensureSftp()
+      const parts = normalized.split('/').filter(Boolean)
+      let currentPath = normalized.startsWith('/') ? '/' : ''
+
+      for (const part of parts) {
+        currentPath = currentPath === '/' ? `/${part}` : currentPath ? `${currentPath}/${part}` : part
+
+        const exists = await new Promise<boolean>((resolve) => {
+          sftp.stat(currentPath, (error, stats) => {
+            if (!error && stats?.isDirectory?.()) {
+              resolve(true)
+              return
+            }
+            resolve(false)
+          })
+        })
+
+        if (exists) {
+          continue
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          sftp.mkdir(currentPath, (error) => {
+            if (error && !/failure/i.test(error.message)) {
+              reject(error)
+              return
+            }
+            resolve()
+          })
+        })
+      }
+    } catch (error) {
+      await this.execCommand(`sh -lc 'mkdir -p ${shellQuote(normalized)}'`, { allowNonZeroWithStdout: true })
+      if (error && !this.sftpUnavailableReason) {
+        throw error
+      }
+    }
+  }
+
   async uploadFile(localPath: string, remotePath: string, onProgress: (progress: number) => void): Promise<void> {
     try {
       const sftp = await this.ensureSftp()
       const info = await stat(localPath)
       const total = Math.max(info.size, 1)
+      await this.ensureRemoteDirectory(path.posix.dirname(remotePath))
       await new Promise<void>((resolve, reject) => {
         sftp.fastPut(localPath, remotePath, {
           step: (transferred) => onProgress(Math.min(99, Math.round((transferred / total) * 100)))
@@ -334,6 +386,12 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
         resolve(sftp)
       })
     })
+  }
+
+  private closeSftpSession() {
+    this.sftp?.end?.()
+    this.sftp = undefined
+    this.sftpSsh.end()
   }
 
   private async readRemoteDirectory(targetPath: string): Promise<RemoteFileItem[]> {

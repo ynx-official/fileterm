@@ -128,7 +128,7 @@ load=$(awk '{printf "%s, %s, %s", $1, $2, $3}' /proc/loadavg 2>/dev/null)
 if [ -z "$load" ]; then
   load=$(uptime 2>/dev/null | sed -n 's/.*load averages\\{0,1\\}: *//p; s/.*load average: *//p' | awk -F',' 'NF>=3 {gsub(/^ +| +$/, "", $1); gsub(/^ +| +$/, "", $2); gsub(/^ +| +$/, "", $3); printf "%s, %s, %s", $1, $2, $3; exit}')
 fi
-mem=$(awk 'BEGIN { total=available=memfree=buffers=cached=shmem=sreclaimable=slab=kernelstack=pagetables=active_anon=inactive_anon=unevictable=0 }
+mem=$(awk 'BEGIN { total=available=memfree=buffers=cached=shmem=sreclaimable=slab=kernelstack=pagetables=0 }
   /^MemTotal:/ { total=int($2/1024) }
   /^MemAvailable:/ { available=int($2/1024) }
   /^MemFree:/ { memfree=int($2/1024) }
@@ -139,9 +139,6 @@ mem=$(awk 'BEGIN { total=available=memfree=buffers=cached=shmem=sreclaimable=sla
   /^Slab:/ { slab=int($2/1024) }
   /^KernelStack:/ { kernelstack=int($2/1024) }
   /^PageTables:/ { pagetables=int($2/1024) }
-  /^Active\\(anon\\):/ { active_anon=int($2/1024) }
-  /^Inactive\\(anon\\):/ { inactive_anon=int($2/1024) }
-  /^Unevictable:/ { unevictable=int($2/1024) }
   END {
     if (available == 0) available=memfree+buffers+cached+sreclaimable-shmem
     if (available < 0) available=0
@@ -149,11 +146,12 @@ mem=$(awk 'BEGIN { total=available=memfree=buffers=cached=shmem=sreclaimable=sla
       used=total-available
       if (used < 0) used=0
       percent=int(used*100/total)
-      app=active_anon+inactive_anon+unevictable
       cache=buffers+cached+sreclaimable-shmem
       if (cache < 0) cache=0
       kernel=slab-sreclaimable+kernelstack+pagetables
       if (kernel < 0) kernel=0
+      app=used-cache-kernel
+      if (app < 0) app=0
       printf "%d|%d|%d|%d|%d|%d", used, total, percent, app, cache, kernel
     }
   }' /proc/meminfo 2>/dev/null)

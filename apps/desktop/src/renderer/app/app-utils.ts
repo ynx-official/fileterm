@@ -4,6 +4,14 @@ import type { LocalFileItem, TransferTask, WorkspaceTab } from '@termdock/core'
 export const localFileDragType = 'application/x-termdock-local-file'
 export const remoteFileDragType = 'application/x-termdock-remote-file'
 
+export function isActiveTransfer(transfer: TransferTask) {
+  return transfer.status === 'running' || transfer.status === 'queued'
+}
+
+export function isCompletedTransfer(transfer: TransferTask) {
+  return transfer.status === 'done' || transfer.status === 'failed' || transfer.status === 'canceled'
+}
+
 export function copyText(value: string) {
   if (navigator.clipboard?.writeText) {
     void navigator.clipboard.writeText(value)
@@ -22,7 +30,7 @@ export function copyText(value: string) {
 }
 
 export function runningTransfers(transfers: TransferTask[]) {
-  return transfers.filter((transfer) => transfer.status === 'running').length
+  return transfers.filter(isActiveTransfer).length
 }
 
 export function homeTabKey(id: string) {
@@ -154,6 +162,9 @@ export function transferStatusText(transfer: TransferTask) {
   const direction = transfer.direction === 'upload' ? '上传' : '下载'
   if (transfer.status === 'failed') {
     return `${direction}失败: ${transfer.name}`
+  }
+  if (transfer.status === 'canceled') {
+    return `${direction}已终止: ${transfer.name}`
   }
   if (transfer.status === 'done') {
     return `${direction}完成: ${transfer.name}`
