@@ -147,7 +147,7 @@ textarea:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin: -12px -12px 14px;
+  margin: -12px -12px 6px;
   padding: 14px 16px;
   min-width: 0;
   overflow: hidden;
@@ -227,7 +227,7 @@ textarea:focus-visible,
 
 .system-title {
   height: 28px;
-  margin: 14px 0 10px;
+  margin: 6px 0 10px;
   border: 1px solid transparent;
   border-radius: 5px;
   font-size: 12px;
@@ -270,9 +270,9 @@ textarea:focus-visible,
 }
 
 .process-table {
-  height: 120px;
-  min-height: 120px;
-  max-height: 120px;
+  height: 96px;
+  min-height: 96px;
+  max-height: 96px;
   margin: 0 -12px;
   border: 0;
   overflow: hidden auto;
@@ -301,7 +301,7 @@ textarea:focus-visible,
 
 .network-panel {
   height: 30px;
-  margin-top: 8px;
+  margin-top: 4px;
   font-family: "SF Mono", Menlo, Consolas, monospace;
   font-size: 11px;
 }

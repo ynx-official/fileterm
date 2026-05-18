@@ -2,8 +2,8 @@
 :root[data-theme='default-dark'] {
   color-scheme: dark;
 
-  --bg-main: #222222;
-  --bg-sidebar: #282828;
+  --bg-main: #151515;
+  --bg-sidebar: #242424;
   --bg-card: #1f1f1f;
   --bg-hover: #303030;
   --bg-active: #3a3d42;
@@ -37,7 +37,7 @@
   --terminal-text: #e0e0e0;
   --terminal-cmd-bg: rgba(148, 163, 184, 0.16);
   --terminal-cmd-text: #f1f5f9;
-  --terminal-frame-shadow: inset 0 0 10px rgba(0, 0, 0, 0.45);
+  --terminal-frame-shadow: inset 0 0 14px rgba(0, 0, 0, 0.3);
   --button-primary-bg: #1687e8;
   --button-primary-hover: #1179d4;
 }
@@ -45,8 +45,8 @@
 :root[data-theme='default'] {
   color-scheme: dark;
 
-  --bg-main: #222222;
-  --bg-sidebar: #282828;
+  --bg-main: #151515;
+  --bg-sidebar: #242424;
   --bg-card: #1f1f1f;
   --bg-hover: #303030;
   --bg-active: #3a3d42;
@@ -80,7 +80,7 @@
   --terminal-text: #e0e0e0;
   --terminal-cmd-bg: rgba(148, 163, 184, 0.16);
   --terminal-cmd-text: #f1f5f9;
-  --terminal-frame-shadow: inset 0 0 10px rgba(0, 0, 0, 0.45);
+  --terminal-frame-shadow: inset 0 0 14px rgba(0, 0, 0, 0.3);
   --button-primary-bg: #1687e8;
   --button-primary-hover: #1179d4;
 }
@@ -476,7 +476,7 @@
 
 /* session.css */
 .session-workspace {
-  background: #2a2a2a;
+  background: #242424;
 }
 
 .terminal-area {
@@ -624,7 +624,7 @@
 
 .transfer-segments button {
   border: 1px solid rgba(255, 255, 255, 0.08);
-  background: #2a2a2a;
+  background: #242424;
   color: var(--text-muted);
 }
 
@@ -636,7 +636,7 @@
 }
 
 .transfer-segments-sub button {
-  background: #242424;
+  background: #1e1e1e;
 }
 
 .transfer-row {
@@ -859,7 +859,7 @@
 html,
 body,
 #root {
-  background: #222222;
+  background: #151515;
 }
 
 button,
@@ -870,28 +870,28 @@ textarea {
 }
 
 .fs-shell {
-  background: #222222;
+  background: #151515;
 }
 
 .fs-sidebar {
-  background: #242424;
+  background: #1e1e1e;
   border-right: 1px solid #363636;
   box-shadow: none;
 }
 
 .fs-main {
-  background: #222222;
+  background: #151515;
 }
 
 .fs-tabbar {
-  background: #2d2d2d;
+  background: #272727;
   --titlebar-divider: #3b3b3b;
   border-bottom: 1px solid #363636;
   box-shadow: none;
 }
 
 .titlebar-brand {
-  background: #2a2a2a;
+  background: #242424;
   border-right: 1px solid #363636;
 }
 
@@ -900,7 +900,7 @@ textarea {
 }
 
 .titlebar-tabarea {
-  background: #2a2a2a;
+  background: #242424;
 }
 
 .tabbar-folder-button {
@@ -959,7 +959,7 @@ textarea {
 }
 
 .workspace-stage {
-  background: #222222;
+  background: #151515;
 }
 
 .sys-card {
@@ -1124,7 +1124,7 @@ textarea {
 }
 
 .session-workspace {
-  background: #222222;
+  background: #151515;
 }
 
 .terminal-area {
@@ -1149,12 +1149,12 @@ textarea {
 }
 
 .file-manager {
-  background: #242424;
+  background: #191919;
   border-top: 1px solid #363636;
 }
 
 .file-tabs {
-  background: #2a2a2a;
+  background: #242424;
   border-bottom: 1px solid #303030;
 }
 
@@ -1198,11 +1198,11 @@ textarea {
 
 .local-pane,
 .remote-pane {
-  background: #242424;
+  background: #1e1e1e;
 }
 
 .local-pane {
-  background: #242424;
+  background: #1d1d1d;
 }
 
 .file-split-resizer {
@@ -1241,7 +1241,7 @@ textarea {
 }
 
 .fs-file-table th {
-  background: #1a1a1a;
+  background: #101010;
   color: #a6a6a6;
 }
 
@@ -1260,17 +1260,17 @@ textarea {
 
 .transfer-strip {
   border-top: 1px solid #363636;
-  background: #222222;
+  background: #151515;
   color: #9a9a9a;
   box-shadow: none;
 }
 
 .home-workspace {
-  background: #222222;
+  background: #151515;
 }
 
 .system-info-workspace {
-  background: linear-gradient(180deg, #1e1e1e 0%, #1a1a1a 100%);
+  background: linear-gradient(180deg, #161616 0%, #131313 100%);
 }
 
 .system-info-empty {
@@ -1377,7 +1377,7 @@ textarea {
 }
 
 .flat-button {
-  background: #2d2d2d;
+  background: #272727;
   border-color: #454545;
 }
 
@@ -1413,7 +1413,7 @@ textarea {
 .ssh-grid textarea,
 .connection-form input,
 .connection-form select {
-  background: #222222;
+  background: #151515;
   border-color: rgba(255, 255, 255, 0.12);
   color: #e7e7e7;
 }
