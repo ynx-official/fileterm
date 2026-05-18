@@ -66,9 +66,22 @@ export function SystemSidebar({
         <button className="system-title" onClick={onOpenSystemInfo} type="button">{t.systemInfo}</button>
         <div className="metric-line"><span>{t.running}</span><strong>{metrics?.uptime ?? '-'}</strong></div>
         <div className="metric-line"><span>{t.load}</span><strong>{metrics?.load ?? '-'}</strong></div>
-        <Meter label={t.cpu} value={metrics?.cpuPercent ?? 0} tone="green" caption={metrics ? `${metrics.cpuPercent}%` : '0%'} />
+        <Meter
+          label={t.cpu}
+          value={metrics?.cpuPercent ?? 0}
+          tone="green"
+          caption=""
+          percent={metrics ? `${metrics.cpuPercent}%` : '0%'}
+        />
         <MemoryMeter metrics={metrics} />
-        <Meter label={t.swap} value={metrics?.swapPercent ?? 0} tone="yellow" caption={metrics?.swapUsage ?? '0/0'} />
+        <Meter
+          label={t.swap}
+          value={metrics?.swapPercent ?? 0}
+          tone={getMetricTone(metrics?.swapPercent ?? 0).replace('status-', '')}
+          caption={metrics?.swapUsage ?? '0/0'}
+          percent={metrics ? `${metrics.swapPercent}%` : '0%'}
+          dotTone={getMetricTone(metrics?.swapPercent ?? 0)}
+        />
         <div className="mini-tabs">
           <span className={sortMode === 'memory' ? 'active' : ''} onClick={() => setSortMode('memory')}>{t.memory}</span>
           <span className={sortMode === 'cpu' ? 'active' : ''} onClick={() => setSortMode('cpu')}>{t.cpu}</span>
@@ -110,12 +123,18 @@ function AddressLine({ label, value }: { label: string; value: string }) {
   )
 }
 
-function Meter({ label, value, tone, caption }: { label: string; value: number; tone: string; caption: string }) {
+function Meter({ label, value, tone, caption, percent, dotTone }: { label: string; value: number; tone: string; caption: string; percent?: string; dotTone?: string }) {
   return (
-    <div className="meter-row">
-      <span>{label}</span>
+    <div className="meter-group">
+      <div className="meter-header">
+        <span>{label}</span>
+        <strong className="metric-chip-summary">
+          {dotTone && <i className={`metric-dot ${dotTone}`} />}
+          <span>{caption}</span>
+          {percent && <span className="metric-percent">{percent}</span>}
+        </strong>
+      </div>
       <div className="meter-track"><i className={`meter-fill ${tone}`} style={{ width: `${value}%` }} /></div>
-      <strong>{caption}</strong>
     </div>
   )
 }
@@ -125,7 +144,7 @@ function MemoryMeter({ metrics }: { metrics?: SystemMetrics }) {
   const app = parseMemory(metrics?.memoryAppUsage ?? '')
   const cache = parseMemory(metrics?.memoryCacheUsage ?? '')
   const kernel = parseMemory(metrics?.memoryKernelUsage ?? '')
-  const memoryTone = getMemoryTone(metrics?.memoryPercent ?? 0)
+  const memoryTone = getMetricTone(metrics?.memoryPercent ?? 0)
   const segments = total > 0
     ? [
         { key: 'app', label: t.app, value: metrics?.memoryAppUsage ?? '-', width: Math.max(0, Math.min(100, (app / total) * 100)) },
@@ -135,36 +154,37 @@ function MemoryMeter({ metrics }: { metrics?: SystemMetrics }) {
     : []
 
   return (
-    <>
-      <div className="meter-row meter-row-memory">
+    <div className="meter-group memory-meter-group">
+      <div className="meter-header">
         <span>{t.memory}</span>
-        <div className="meter-track meter-track-stacked">
-          {segments.length ? segments.map((segment) => (
-            <i
-              className={`meter-fill stacked ${segment.key}`}
-              key={segment.key}
-              style={{ width: `${segment.width}%` }}
-            />
-          )) : <i className="meter-fill orange" style={{ width: `${metrics?.memoryPercent ?? 0}%` }} />}
-        </div>
+        <strong className="metric-chip-summary">
+          <i className={`metric-dot ${memoryTone}`} />
+          <span>{metrics?.memoryUsage ?? '0/0'}</span>
+          <span className="metric-percent">{metrics ? `${metrics.memoryPercent}%` : '0%'}</span>
+        </strong>
       </div>
-      <div className="memory-details">
-        <span className="metric-chip metric-chip-summary">
-          <span className="metric-chip-main">
-            <i className={`metric-dot ${memoryTone}`} />
-            <strong>{metrics?.memoryUsage ?? '0/0'}</strong>
-          </span>
-          <strong className="metric-percent">{metrics ? `${metrics.memoryPercent}%` : '0%'}</strong>
-        </span>
+      <div className="meter-track meter-track-stacked">
         {segments.length ? segments.map((segment) => (
-          <span className="metric-chip" key={segment.key}>
-            <i className={`metric-dot ${segment.key}`} />
-            <span>{segment.label}</span>
-            <strong>{segment.value}</strong>
-          </span>
-        )) : null}
+          <i
+            className={`meter-fill stacked ${segment.key}`}
+            key={segment.key}
+            style={{ width: `${segment.width}%` }}
+          />
+        )) : <i className="meter-fill orange" style={{ width: `${metrics?.memoryPercent ?? 0}%` }} />}
+
+        {segments.length ? (
+          <div className="memory-hover-popover">
+            {segments.map((segment) => (
+              <div className="memory-hover-row" key={segment.key}>
+                <i className={`metric-dot ${segment.key}`} />
+                <span className="label">{segment.label}</span>
+                <span className="value">{segment.value}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
-    </>
+    </div>
   )
 }
 
@@ -173,7 +193,7 @@ function parseUsageTotal(usage?: string) {
   return parseMemory(usage.split('/')[1] ?? '')
 }
 
-function getMemoryTone(percent: number) {
+function getMetricTone(percent: number) {
   if (percent >= 85) return 'status-red'
   if (percent >= 60) return 'status-yellow'
   return 'status-green'
@@ -334,11 +354,11 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
       <div className="network-panel">
         <div className="network-rates">
           <span className="network-rate up">
-            <i>{t.uploadShort}</i>
+            <i>↑</i>
             <strong>{currentRates?.tx ?? '0B'}</strong>
           </span>
           <span className="network-rate down">
-            <i>{t.downloadShort}</i>
+            <i>↓</i>
             <strong>{currentRates?.rx ?? '0B'}</strong>
           </span>
         </div>
