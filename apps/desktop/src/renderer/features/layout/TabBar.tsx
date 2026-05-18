@@ -1,7 +1,11 @@
+import { useState } from 'react'
 import type { WorkspaceTab } from '@termdock/core'
 import { tabStatusClass } from '../../app/app-utils'
+import type { AppLocale } from '../../i18n'
 import { t } from '../../i18n'
+import type { ThemeMode } from '../../hooks/useThemeMode'
 import { AppIcon } from '../common/AppIcon'
+import { ContextMenu } from '../common/ContextMenu'
 
 export type OrderedTabEntry =
   | { key: string; kind: 'local'; id: string; title: string; tabKind: 'home' | 'system' }
@@ -14,6 +18,7 @@ export type TabContextTarget =
 export function TabBar({
   activeHomeTabId,
   activeSessionTabId,
+  locale,
   onAddHomeTab,
   onActivateHome,
   onActivateSession,
@@ -24,10 +29,14 @@ export function TabBar({
   onDragStart,
   onOpenConnectionManager,
   onOpenTabContext,
-  orderedTabs
+  onSetLocale,
+  onSetTheme,
+  orderedTabs,
+  theme
 }: {
   activeHomeTabId: string | null
   activeSessionTabId: string | null
+  locale: AppLocale
   onAddHomeTab(): void
   onActivateHome(id: string): void
   onActivateSession(id: string): void
@@ -38,8 +47,13 @@ export function TabBar({
   onDragStart(tabKey: string): void
   onOpenConnectionManager(): void
   onOpenTabContext(event: React.MouseEvent<HTMLDivElement>, target: TabContextTarget): void
+  onSetLocale(locale: AppLocale): void
+  onSetTheme(theme: ThemeMode): void
   orderedTabs: OrderedTabEntry[]
+  theme: ThemeMode
 }) {
+  const [toolsMenu, setToolsMenu] = useState<{ x: number; y: number } | null>(null)
+
   return (
     <header className="fs-tabbar">
       <div className="titlebar-brand">
@@ -122,8 +136,36 @@ export function TabBar({
           <button className="add-tab" type="button" onClick={onAddHomeTab}>+</button>
         </div>
         <div className="window-tools">
-          <button title="Grid" type="button"><AppIcon name="grid" /></button>
+          <button
+            aria-label={t.settings}
+            title={t.settings}
+            type="button"
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect()
+              setToolsMenu({ x: rect.right - 180, y: rect.bottom + 6 })
+            }}
+          >
+            <AppIcon name="menu" />
+          </button>
         </div>
+        {toolsMenu ? (
+          <ContextMenu
+            className="tools-menu"
+            items={[
+              { label: `${t.theme}: ${t.defaultDark}`, disabled: theme === 'default-dark', action: () => onSetTheme('default-dark') },
+              { label: `${t.theme}: ${t.defaultLight}`, disabled: theme === 'default-light', action: () => onSetTheme('default-light') },
+              { separator: true },
+              { label: '简体中文', disabled: locale === 'zhCN', action: () => onSetLocale('zhCN') },
+              { label: 'English', disabled: locale === 'enUS', action: () => onSetLocale('enUS') },
+              { separator: true },
+              { label: t.commandManager, action: () => window.alert(t.notReady) },
+              { label: t.connectionManager, action: onOpenConnectionManager },
+              { label: t.settings, action: () => window.alert(t.notReady) }
+            ]}
+            onClose={() => setToolsMenu(null)}
+            position={toolsMenu}
+          />
+        ) : null}
       </div>
     </header>
   )

@@ -21,20 +21,22 @@ export function TerminalView({
       return
     }
 
+    const styles = getComputedStyle(document.documentElement)
+    const readColor = (name: string, fallback: string) => styles.getPropertyValue(name).trim() || fallback
     const terminal = new Terminal({
       fontFamily: '"SF Mono", Menlo, Consolas, monospace',
       fontSize: 14,
       lineHeight: 1.45,
       cursorBlink: true,
       theme: {
-        background: '#151515',
-        foreground: '#d8d8d8',
-        cursor: '#d8d8d8',
-        green: '#39d98a',
-        brightGreen: '#52f2a0',
-        blue: '#4da3ff',
-        brightBlue: '#7fb9ff',
-        selectionBackground: 'rgba(77, 163, 255, 0.24)'
+        background: readColor('--terminal-bg', '#151515'),
+        foreground: readColor('--terminal-text', '#d8d8d8'),
+        cursor: readColor('--terminal-text', '#d8d8d8'),
+        green: readColor('--success', '#39d98a'),
+        brightGreen: readColor('--success', '#52f2a0'),
+        blue: readColor('--accent-text', '#c8d0da'),
+        brightBlue: readColor('--text-main', '#f1f5f9'),
+        selectionBackground: readColor('--terminal-cmd-bg', 'rgba(148, 163, 184, 0.24)')
       }
     })
     const fitAddon = new FitAddon()

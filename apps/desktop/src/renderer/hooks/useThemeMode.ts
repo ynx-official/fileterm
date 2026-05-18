@@ -1,6 +1,8 @@
 import { useEffect } from 'react'
 
-export function useThemeMode(themeName = 'default') {
+export type ThemeMode = 'default-dark' | 'default-light'
+
+export function useThemeMode(themeName: ThemeMode = 'default-dark') {
   useEffect(() => {
     document.documentElement.dataset.theme = themeName
     return () => {

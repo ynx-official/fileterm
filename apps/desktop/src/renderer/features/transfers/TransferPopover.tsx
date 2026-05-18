@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { TransferTask } from '@termdock/core'
 import { isActiveTransfer, isCompletedTransfer, transferStatusText } from '../../app/app-utils'
+import { t } from '../../i18n'
 
 export function TransferPopover({
   onCancelTransfer,
@@ -29,19 +30,19 @@ export function TransferPopover({
   return (
     <section className="transfer-popover">
       <div className="transfer-popover-head">
-        <strong>传输详情</strong>
+        <strong>{t.transferDetails}</strong>
         <button className="icon-button" onClick={onClose} type="button">×</button>
       </div>
       <div className="transfer-filters">
         <div className="transfer-segments">
-          <button className={statusFilter === 'running' ? 'active' : ''} onClick={() => setStatusFilter('running')} type="button">进行中</button>
-          <button className={statusFilter === 'completed' ? 'active' : ''} onClick={() => setStatusFilter('completed')} type="button">已完成</button>
-          <button className={statusFilter === 'all' ? 'active' : ''} onClick={() => setStatusFilter('all')} type="button">全部</button>
+          <button className={statusFilter === 'running' ? 'active' : ''} onClick={() => setStatusFilter('running')} type="button">{t.inProgress}</button>
+          <button className={statusFilter === 'completed' ? 'active' : ''} onClick={() => setStatusFilter('completed')} type="button">{t.completed}</button>
+          <button className={statusFilter === 'all' ? 'active' : ''} onClick={() => setStatusFilter('all')} type="button">{t.all}</button>
         </div>
         <div className="transfer-segments transfer-segments-sub">
-          <button className={directionFilter === 'all' ? 'active' : ''} onClick={() => setDirectionFilter('all')} type="button">全部</button>
-          <button className={directionFilter === 'download' ? 'active' : ''} onClick={() => setDirectionFilter('download')} type="button">下载</button>
-          <button className={directionFilter === 'upload' ? 'active' : ''} onClick={() => setDirectionFilter('upload')} type="button">上传</button>
+          <button className={directionFilter === 'all' ? 'active' : ''} onClick={() => setDirectionFilter('all')} type="button">{t.all}</button>
+          <button className={directionFilter === 'download' ? 'active' : ''} onClick={() => setDirectionFilter('download')} type="button">{t.download}</button>
+          <button className={directionFilter === 'upload' ? 'active' : ''} onClick={() => setDirectionFilter('upload')} type="button">{t.upload}</button>
         </div>
       </div>
       <div className="transfer-popover-list">
@@ -52,19 +53,19 @@ export function TransferPopover({
               <div className="transfer-row-inline">
                 <span>{transferStatusText(transfer)}</span>
                 {isActiveTransfer(transfer) ? (
-                  <button className="transfer-cancel" onClick={() => onCancelTransfer(transfer.id)} type="button">终止</button>
+                  <button className="transfer-cancel" onClick={() => onCancelTransfer(transfer.id)} type="button">{t.stop}</button>
                 ) : null}
               </div>
             </div>
             <div className="transfer-row-meta">
-              <span>{transfer.direction === 'upload' ? '上传' : '下载'}</span>
+              <span>{transfer.direction === 'upload' ? t.upload : t.download}</span>
               <b>{transfer.progress}%</b>
             </div>
             <i className="transfer-progress"><b style={{ width: `${transfer.progress}%` }} /></i>
             {transfer.message ? <small title={transfer.message}>{transfer.message}</small> : null}
           </div>
         )) : (
-          <div className="transfer-empty">暂无传输任务</div>
+          <div className="transfer-empty">{t.noTransferTasks}</div>
         )}
       </div>
     </section>

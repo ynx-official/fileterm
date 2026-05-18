@@ -1,0 +1,1377 @@
+:root,
+:root[data-theme='default-dark'] {
+  color-scheme: dark;
+
+  --bg-main: #151515;
+  --bg-sidebar: #242424;
+  --bg-card: #1f1f1f;
+  --bg-hover: #303030;
+  --bg-active: #3a3d42;
+
+  --border-light: rgba(255, 255, 255, 0.08);
+  --border-dark: rgba(255, 255, 255, 0.16);
+
+  --text-main: #e7e7e7;
+  --text-muted: #a4a4a4;
+
+  --primary: #6b737d;
+  --primary-hover: #7f8894;
+  --accent-text: #c8d0da;
+  --selection-bg: #383f48;
+  --danger: #ff5f57;
+  --success: #39d98a;
+  --warning: #ffcc00;
+
+  --meter-track: rgba(148, 163, 184, 0.16);
+
+  --terminal-bg: #1a1a1a;
+  --terminal-text: #d8d8d8;
+  --terminal-cmd-bg: rgba(148, 163, 184, 0.16);
+  --terminal-cmd-text: #f1f5f9;
+}
+
+:root[data-theme='default'] {
+  color-scheme: dark;
+
+  --bg-main: #151515;
+  --bg-sidebar: #242424;
+  --bg-card: #1f1f1f;
+  --bg-hover: #303030;
+  --bg-active: #3a3d42;
+
+  --border-light: rgba(255, 255, 255, 0.08);
+  --border-dark: rgba(255, 255, 255, 0.16);
+
+  --text-main: #e7e7e7;
+  --text-muted: #a4a4a4;
+
+  --primary: #6b737d;
+  --primary-hover: #7f8894;
+  --accent-text: #c8d0da;
+  --selection-bg: #383f48;
+  --danger: #ff5f57;
+  --success: #39d98a;
+  --warning: #ffcc00;
+
+  --meter-track: rgba(148, 163, 184, 0.16);
+
+  --terminal-bg: #1a1a1a;
+  --terminal-text: #d8d8d8;
+  --terminal-cmd-bg: rgba(148, 163, 184, 0.16);
+  --terminal-cmd-text: #f1f5f9;
+}
+
+/* Extracted dark theme overrides */
+/* shell.css */
+.fs-shell {
+  background: var(--bg-main);
+}
+
+.fs-sidebar {
+  background: var(--bg-sidebar);
+}
+
+.sidebar-resizer {
+  background: transparent;
+}
+
+.sidebar-resizer:hover,
+.sidebar-resizer.is-active {
+  background: linear-gradient(180deg, var(--border-dark), var(--border-light));
+}
+
+.sidebar-empty-state {
+  border: 1px dashed rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.sidebar-empty-state strong {
+  color: #d9d9d9;
+}
+
+.sidebar-empty-state p {
+  color: #8f949d;
+}
+
+.sync-dot {
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+}
+
+.copy-link {
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.copy-link:hover {
+  color: var(--primary);
+  background: var(--bg-hover);
+}
+
+.system-title {
+  color: var(--text-main);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+}
+
+.metric-line {
+  color: var(--text-muted);
+}
+
+.metric-line strong {
+  color: var(--text-main);
+}
+
+.metric-subline {
+  color: var(--text-soft);
+}
+
+.memory-details {
+  color: #d0d0d0;
+}
+
+.memory-details strong {
+  color: #d0d0d0;
+}
+
+.metric-chip strong {
+  color: #d0d0d0;
+}
+
+.metric-dot.app {
+  background: #f6bf26;
+}
+
+.metric-dot.cache {
+  background: #54c772;
+}
+
+.metric-dot.kernel {
+  background: var(--accent-text);
+}
+
+.metric-dot.status-green {
+  background: #54c772;
+}
+
+.metric-dot.status-yellow {
+  background: #f6bf26;
+}
+
+.metric-dot.status-red {
+  background: #ea5b5b;
+}
+
+.meter-row {
+  color: var(--text-muted);
+}
+
+.meter-row strong {
+  color: var(--text-main);
+}
+
+.meter-track {
+  background: var(--meter-track);
+}
+
+.meter-fill.green {
+  background: var(--success);
+}
+
+.meter-fill.orange {
+  background: var(--warning);
+}
+
+.meter-fill.yellow {
+  background: #eab308;
+}
+
+.meter-fill.app {
+  background: #f6bf26;
+}
+
+.meter-fill.cache {
+  background: #54c772;
+}
+
+.meter-fill.kernel {
+  background: var(--accent-text);
+}
+
+.mini-tabs {
+  color: #fff;
+}
+
+.mini-tabs span {
+  background: #3a3a3a;
+  color: var(--text-muted);
+}
+
+.mini-tabs span.active {
+  background: var(--primary);
+  color: #fff;
+}
+
+.up {
+  color: var(--danger);
+}
+
+.down {
+  color: var(--success);
+}
+
+.network-select {
+  background: var(--bg-card);
+  color: var(--text-main);
+}
+
+.network-scale {
+  color: var(--text-muted);
+}
+
+.grid-chart {
+  background: linear-gradient(to bottom, rgba(91, 141, 239, 0.04), rgba(91, 141, 239, 0)),
+    var(--bg-card);
+}
+
+.network-guide {
+  fill: none;
+  stroke: var(--border-light);
+}
+
+.network-path {
+  fill: none;
+}
+
+.tx-path {
+  stroke: rgba(230, 121, 93, 0.42);
+}
+
+.rx-path {
+  stroke: var(--accent-text);
+}
+
+.process-table {
+  background: var(--bg-card);
+}
+
+.disk-table {
+  background: var(--bg-card);
+}
+
+.disk-head {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+.disk-row {
+  color: var(--text-main);
+}
+
+.disk-row:nth-child(even) {
+  background: var(--bg-main);
+}
+
+.disk-row:hover {
+  background: var(--bg-hover);
+}
+
+.fs-main {
+  background: var(--bg-main);
+}
+
+.fs-tabbar {
+  background: var(--bg-sidebar);
+}
+
+.fs-tabbar::after {
+  background: var(--titlebar-divider, var(--border-light));
+}
+
+.titlebar-brand strong {
+  color: var(--text-main);
+}
+
+.tabbar-folder-button,
+.add-tab,
+.window-tools span,
+.flat-button,
+.file-toolbar button,
+.terminal-tools button,
+.tab-close,
+.row-delete,
+.icon-button {
+  background: var(--bg-card);
+  color: var(--text-main);
+}
+
+.tabbar-folder-button {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.tabbar-folder-button:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.fs-tab {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.fs-tab:hover:not(.active) {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.fs-tab.active {
+  background: var(--bg-card);
+  border-bottom-color: var(--bg-card);
+  color: var(--text-main);
+}
+
+.tab-dot {
+  background: var(--text-muted);
+}
+
+.tab-dot.connected {
+  background: var(--success);
+  box-shadow: 0 0 4px rgba(57, 217, 138, 0.9), 0 0 10px rgba(57, 217, 138, 0.68);
+}
+
+.tab-dot.disconnected {
+  background: var(--danger);
+  box-shadow: 0 0 6px rgba(226, 91, 91, 0.35);
+}
+
+.tab-dot.connecting {
+  background: var(--warning);
+  box-shadow: 0 0 6px rgba(231, 198, 91, 0.35);
+}
+
+.tab-dot.idle {
+  background: var(--text-muted);
+}
+
+.tab-close,
+.row-delete,
+.icon-button {
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.tab-close:hover,
+.row-delete:hover,
+.icon-button:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--danger);
+}
+
+.add-tab {
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.add-tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.window-tools {
+  color: var(--text-muted);
+}
+
+.window-tools span,
+.window-tools button {
+  background: transparent;
+}
+
+.window-tools button {
+  color: inherit;
+}
+
+.tabbar-folder-button:hover,
+.window-tools span:hover,
+.window-tools button:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.status-message {
+  color: var(--warning);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+/* home.css */
+.home-workspace {
+  background: var(--bg-main);
+}
+
+.quick-panel {
+  background: var(--bg-card);
+  box-shadow: var(--shadow-md);
+}
+
+.quick-header {
+  background: var(--bg-sidebar);
+}
+
+.quick-header strong {
+  color: var(--text-main);
+}
+
+.flat-button {
+  color: var(--text-main);
+  border-color: var(--border-dark);
+}
+
+.flat-button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.quick-row {
+  color: var(--text-muted);
+}
+
+.quick-row strong {
+  color: var(--text-main);
+}
+
+.quick-row:hover,
+.fs-file-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+.host-icon {
+  color: var(--text-muted);
+}
+
+/* session.css */
+.session-workspace {
+  background: var(--bg-main);
+}
+
+.terminal-area {
+  background: var(--terminal-bg);
+}
+
+.session-split-resizer {
+  background: transparent;
+}
+
+.session-split-resizer:hover {
+  background: transparent;
+}
+
+.file-manager {
+  background: var(--bg-card);
+}
+
+.file-tabs {
+  background: var(--bg-sidebar);
+}
+
+.file-tabs button {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.file-tabs button:hover:not(.active) {
+  background: var(--bg-active);
+  color: var(--text-main);
+}
+
+.file-tabs button.active {
+  background: var(--bg-card);
+  border-bottom-color: var(--bg-card);
+  color: var(--text-main);
+}
+
+.file-toolbar {
+  color: var(--text-muted);
+  background: var(--bg-card);
+}
+
+.file-toolbar button {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.file-toolbar button:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-main);
+}
+
+.local-pane,
+.remote-pane {
+  background: var(--bg-card);
+}
+
+.local-pane {
+  background: var(--bg-main);
+}
+
+.file-split-resizer {
+  background: var(--bg-card);
+}
+
+.file-split-resizer:hover {
+  background: var(--bg-active);
+}
+
+.pane-title {
+  color: var(--text-main);
+  background: transparent;
+}
+
+.pane-path-bar {
+  background: var(--bg-card);
+  color: var(--text-main);
+}
+
+.pane-path-bar input {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.pane-path-bar input:hover,
+.pane-path-bar input:focus {
+  border-color: var(--border-light);
+  background: var(--bg-main);
+  color: var(--text-main);
+}
+
+.pane-path-bar span {
+  color: var(--text-muted);
+}
+
+.pane-title span {
+  color: var(--text-muted);
+}
+
+.fs-file-table th {
+  color: var(--text-muted);
+  background: var(--bg-hover);
+}
+
+.fs-file-table tbody tr.is-selected {
+  background: var(--selection-bg);
+}
+
+.fs-file-table tbody tr.is-selected:nth-child(even) {
+  background: var(--selection-bg);
+}
+
+.file-drag-preview {
+  background: rgba(35, 44, 58, 0.96);
+  color: var(--text-main);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.38);
+}
+
+.file-drag-preview-icon {
+  color: var(--accent-text);
+}
+
+.transfer-strip {
+  color: var(--text-muted);
+  background: var(--bg-sidebar);
+}
+
+.transfer-summary-button {
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.transfer-summary-button:hover {
+  border-color: var(--border-light);
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.transfer-popover {
+  background: var(--bg-card);
+  box-shadow: var(--shadow-lg);
+}
+
+.transfer-segments button {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #242424;
+  color: var(--text-muted);
+}
+
+.transfer-segments button:hover,
+.transfer-segments button.active {
+  background: var(--selection-bg);
+  color: var(--text-main);
+  border-color: var(--border-dark);
+}
+
+.transfer-segments-sub button {
+  background: #1d1d1d;
+}
+
+.transfer-row {
+  color: var(--text-main);
+}
+
+.transfer-row:hover {
+  background: var(--bg-hover);
+}
+
+.transfer-row-main span,
+.transfer-row small,
+.transfer-row-meta span {
+  color: var(--text-muted);
+}
+
+.transfer-cancel {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: #262626;
+  color: #d8d8d8;
+}
+
+.transfer-cancel:hover {
+  background: #313131;
+  color: #ffffff;
+}
+
+.transfer-progress {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.transfer-progress b {
+  background: var(--primary);
+}
+
+.transfer-failed .transfer-progress b {
+  background: var(--danger);
+}
+
+.transfer-done .transfer-progress b {
+  background: var(--success);
+}
+
+.transfer-empty {
+  color: var(--text-muted);
+}
+
+.context-menu {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(30, 32, 37, 0.96);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.34);
+  color: #eef3fa;
+}
+
+.context-menu button {
+  background: transparent;
+  color: inherit;
+}
+
+.context-menu button:hover:not(:disabled) {
+  background: var(--selection-bg);
+  color: var(--text-main);
+}
+
+.context-menu button:disabled {
+  color: rgba(194, 202, 213, 0.42);
+}
+
+.context-menu button.is-danger:not(:disabled) {
+  color: #ffb7b7;
+}
+
+.context-menu button.is-danger:hover:not(:disabled) {
+  background: rgba(255, 90, 90, 0.18);
+  color: #ffd5d5;
+}
+
+.context-menu-separator {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.file-editor-path {
+  color: var(--text-muted);
+}
+
+.file-editor-textarea {
+  background: var(--bg-main);
+  color: var(--text-main);
+}
+
+.manager-window {
+  background: #1b1b1b;
+}
+
+.modal-card.manager-modal.standalone {
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal-card.manager-modal.standalone .modal-header {
+  color: #999;
+}
+
+.manager-table {
+  background: var(--bg-main);
+}
+
+.manager-head {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+.manager-row {
+  background: transparent;
+  color: var(--text-main);
+}
+
+.manager-row:hover {
+  background: var(--bg-hover);
+}
+
+.manager-row.dragging {
+  background: var(--bg-hover);
+}
+
+.manager-row.drop-inside {
+  background: var(--selection-bg);
+}
+
+.folder-row {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.flat-button.danger {
+  color: var(--danger);
+}
+
+/* modals.css */
+.modal-backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.modal-card {
+  background: var(--bg-card);
+  box-shadow: var(--shadow-lg);
+}
+
+.connection-form-window {
+  background: #1b1b1b;
+}
+
+.modal-card.ssh-modal.standalone {
+  background: transparent;
+  box-shadow: none;
+}
+
+.modal-header {
+  color: var(--text-main);
+}
+
+.ssh-modal-nav {
+  background: var(--bg-main);
+}
+
+.ssh-modal-nav button {
+  background: transparent;
+}
+
+.ssh-modal-nav button.active {
+  background: var(--bg-hover);
+}
+
+.ssh-grid input,
+.ssh-grid select,
+.ssh-grid textarea {
+  background: var(--bg-main);
+}
+
+.ssh-placeholder {
+  color: var(--text-muted);
+  background: var(--bg-main);
+}
+
+.modal-error {
+  border: 1px solid rgba(226, 91, 91, 0.28);
+  color: var(--danger);
+  background: rgba(226, 91, 91, 0.08);
+}
+
+.connection-form label {
+  color: var(--text-main);
+}
+
+.connection-form input,
+.connection-form select {
+  background: var(--bg-main);
+  color: var(--text-main);
+}
+
+.connection-form input:focus,
+.connection-form select:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  background: var(--bg-card);
+}
+
+.primary-button {
+  color: #ffffff;
+  background: var(--primary);
+  box-shadow: var(--shadow-sm);
+}
+
+.primary-button:hover:not(:disabled) {
+  background: var(--primary-hover);
+  box-shadow: var(--shadow-md);
+}
+
+/* workstation-skin.css */
+html,
+body,
+#root {
+  background: #151515;
+}
+
+button,
+input,
+select,
+textarea {
+  color: inherit;
+}
+
+.fs-shell {
+  background: #151515;
+}
+
+.fs-sidebar {
+  background: #1e1e1e;
+  border-right: 1px solid #363636;
+  box-shadow: none;
+}
+
+.fs-main {
+  background: #151515;
+}
+
+.fs-tabbar {
+  background: #272727;
+  --titlebar-divider: #3b3b3b;
+  border-bottom: 1px solid #363636;
+  box-shadow: none;
+}
+
+.titlebar-brand {
+  background: #242424;
+  border-right: 1px solid #363636;
+}
+
+.titlebar-brand strong {
+  color: #e7e7e7;
+}
+
+.titlebar-tabarea {
+  background: #242424;
+}
+
+.tabbar-folder-button {
+  border-right: 1px solid #363636;
+  color: #aeb7c2;
+}
+
+.tabbar-folder-button:hover {
+  background: #34363a;
+  color: #b8d4ff;
+}
+
+.fs-tab {
+  background: rgba(255, 255, 255, 0.025);
+  color: #9b9b9b;
+}
+
+.fs-tab span:first-child {
+  color: #e9e9e9;
+}
+
+.fs-tab.home-tab.active {
+  background: #202020;
+  color: #f5f5f5;
+  box-shadow: none;
+}
+
+.fs-tab.system-tab.active,
+.fs-tab.session-tab.active {
+  background: #202020;
+  color: #f5f5f5;
+  box-shadow: none;
+}
+
+.fs-tab:hover:not(.active),
+.add-tab:hover,
+.tabbar-folder-button:hover,
+.window-tools span:hover,
+.window-tools button:hover {
+  background: #34363a;
+}
+
+.add-tab {
+  color: #8e8e8e;
+}
+
+.window-tools span,
+.window-tools button {
+  color: #c2c7ce;
+}
+
+.status-message {
+  border-bottom-color: #332f22;
+  background: rgba(255, 204, 0, 0.08);
+  color: #e7c65b;
+}
+
+.workspace-stage {
+  background: #151515;
+}
+
+.sys-card {
+  background: transparent;
+}
+
+.connection-summary {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+  background: #202020;
+}
+
+.sync-row {
+  color: #d5d5d5;
+}
+
+.connection-status {
+  color: #f0f0f0;
+}
+
+.sync-dot.online {
+  background: var(--success);
+  box-shadow: 0 0 4px rgba(57, 217, 138, 0.9), 0 0 10px rgba(57, 217, 138, 0.68);
+}
+
+.sync-dot.offline {
+  background: var(--danger);
+  box-shadow: 0 0 8px rgba(226, 91, 91, 0.48);
+}
+
+.address-row,
+.metric-line,
+.meter-row {
+  color: #9f9f9f;
+}
+
+.address-row {
+  color: #a9adb6;
+}
+
+.address-row strong {
+  color: #d8d8d8;
+}
+
+.metric-line strong,
+.meter-row strong {
+  color: #d0d0d0;
+}
+
+.copy-link {
+  color: var(--accent-text);
+}
+
+.system-title {
+  background: rgba(255, 255, 255, 0.04);
+  color: #d8d8d8;
+  box-shadow: none;
+}
+
+.system-title:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.meter-track {
+  background: #3a3a3a;
+}
+
+.meter-fill.green {
+  background: #39d98a;
+}
+
+.meter-fill.orange,
+.meter-fill.yellow {
+  background: #ffcc00;
+}
+
+.mini-tabs span {
+  background: #303030;
+  color: #bdbdbd;
+  border-top: 1px solid #393939;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.mini-tabs span.active {
+  background: var(--selection-bg);
+  color: var(--text-main);
+}
+
+.process-table {
+  background: #202020;
+}
+
+.process-row {
+  color: #c3c3c3;
+}
+
+.process-row span:nth-child(2) {
+  color: var(--accent-text);
+}
+
+.up {
+  color: #ff7474;
+}
+
+.down {
+  color: #54e58e;
+}
+
+.network-select {
+  border-color: #474747;
+  background: #303030;
+  color: #c9c9c9;
+}
+
+.network-scale {
+  color: #9d9d9d;
+}
+
+.grid-chart {
+  background: transparent;
+}
+
+.network-guide {
+  stroke: rgba(255, 255, 255, 0.16);
+}
+
+.network-guide.minor {
+  stroke: rgba(255, 255, 255, 0.08);
+}
+
+.tx-path {
+  stroke: rgba(255, 168, 150, 0.45);
+}
+
+.rx-path {
+  stroke: var(--accent-text);
+}
+
+.disk-table {
+  background: #202020;
+}
+
+.disk-head,
+.disk-row {
+  border-bottom-color: rgba(255, 255, 255, 0.045);
+}
+
+.disk-head {
+  background: #252525;
+  border-top: 1px solid #363636;
+  color: #aaa;
+}
+
+.disk-row {
+  color: #c2c2c2;
+}
+
+.disk-row:nth-child(even) {
+  background: #222;
+}
+
+.session-workspace {
+  background: #151515;
+}
+
+.terminal-area {
+  background: #151515;
+  box-shadow: none;
+}
+
+.session-split-resizer {
+  background: transparent;
+}
+
+.session-split-resizer:hover {
+  background: transparent;
+}
+
+.terminal-host .xterm-viewport {
+  background: transparent !important;
+}
+
+.terminal-host .xterm-screen {
+  background: transparent;
+}
+
+.file-manager {
+  background: #191919;
+  border-top: 1px solid #363636;
+}
+
+.file-tabs {
+  background: #242424;
+  border-bottom: 1px solid #303030;
+}
+
+.file-tabs button {
+  color: #9ca0aa;
+}
+
+.file-tabs button.active {
+  border: 1px solid #3d3d3d;
+  background: #2d2d2d;
+  color: #f0f0f0;
+  box-shadow: none;
+}
+
+.file-current-path {
+  color: #d9d9d9;
+}
+
+.file-tab-actions button {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #2b2b2b;
+  color: #cfcfcf;
+}
+
+.file-tab-actions button:hover {
+  background: #343434;
+  color: #f0f0f0;
+}
+
+.file-toolbar {
+  background: linear-gradient(180deg, #242424 0%, #1f1f1f 100%);
+  border-bottom: 1px solid #303030;
+  color: #8f8f8f;
+}
+
+.file-toolbar button {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: #2b2b2b;
+  color: #cfcfcf;
+}
+
+.local-pane,
+.remote-pane {
+  background: #191919;
+}
+
+.local-pane {
+  background: #1d1d1d;
+}
+
+.file-split-resizer {
+  background: transparent;
+}
+
+.file-split-resizer::before {
+  background: #363636;
+}
+
+.file-split-resizer:hover {
+  background: transparent;
+}
+
+.file-split-resizer:hover::before {
+  background: #454545;
+}
+
+.pane-title {
+  border-bottom-color: #2f2f2f;
+  background: linear-gradient(180deg, #262626 0%, #212121 100%);
+  color: #d1d1d1;
+}
+
+.pane-title span {
+  color: #7f8794;
+}
+
+.fs-file-table {
+  color: #c5c5c5;
+}
+
+.fs-file-table th,
+.fs-file-table td {
+  border-bottom-color: rgba(255, 255, 255, 0.045);
+}
+
+.fs-file-table th {
+  background: #101010;
+  color: #a6a6a6;
+}
+
+.fs-file-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.quick-row:hover,
+.fs-file-table tbody tr:hover {
+  background: var(--selection-bg);
+}
+
+.file-icon {
+  color: var(--accent-text);
+}
+
+.transfer-strip {
+  border-top: 1px solid #363636;
+  background: #151515;
+  color: #9a9a9a;
+  box-shadow: none;
+}
+
+.home-workspace {
+  background: #151515;
+}
+
+.system-info-workspace {
+  background: linear-gradient(180deg, #161616 0%, #131313 100%);
+}
+
+.system-info-empty {
+  color: #c7c7c7;
+}
+
+.system-info-empty p {
+  color: #8f949c;
+}
+
+.system-info-header strong {
+  color: #f1f3f6;
+}
+
+.system-info-header p {
+  color: #8e96a3;
+}
+
+.system-info-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(32, 32, 32, 0.92);
+}
+
+.system-info-card-head {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.system-info-card-head strong {
+  color: #ecf0f6;
+}
+
+.system-description-row {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.system-description-row span {
+  color: #9098a4;
+}
+
+.system-description-row strong {
+  color: #eef2f7;
+}
+
+.system-table th,
+.system-table td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.system-table th {
+  color: #8c95a2;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.system-table td {
+  color: #d7dce4;
+}
+
+.system-table tbody tr:nth-child(even) {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.quick-panel,
+.modal-card,
+.manager-table {
+  border-color: rgba(255, 255, 255, 0.1);
+  background: #202020;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.42);
+}
+
+.quick-header,
+.modal-header {
+  background: transparent;
+}
+
+.quick-panel {
+  box-shadow: none;
+}
+
+.host-icon .app-icon {
+  color: var(--accent-text);
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border, var(--border-light));
+}
+
+.scrollbar-hover::-webkit-scrollbar-thumb,
+.scrollbar-scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.group:hover .scrollbar-hover::-webkit-scrollbar-thumb,
+.scrollbar-scroll:hover::-webkit-scrollbar-thumb,
+.scrollbar-scroll.is-scrolling::-webkit-scrollbar-thumb {
+  background: var(--border, var(--border-light));
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground, var(--text-muted));
+}
+
+.flat-button {
+  background: #2d2d2d;
+  border-color: #454545;
+}
+
+.primary-button {
+  background: var(--primary);
+}
+
+.modal-backdrop {
+  background: rgba(0, 0, 0, 0.62);
+}
+
+.ssh-modal-nav,
+.ssh-fieldset,
+.terminal-key-box,
+.ssh-placeholder {
+  background: #1b1b1b;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.ssh-grid input,
+.ssh-grid select,
+.ssh-grid textarea,
+.connection-form input,
+.connection-form select {
+  background: #151515;
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #e7e7e7;
+}

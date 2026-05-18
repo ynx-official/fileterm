@@ -1,0 +1,250 @@
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  z-index: 100;
+}
+
+.modal-card {
+  width: min(540px, 100%);
+  padding: 16px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+}
+
+.modal-card.ssh-modal {
+  width: min(900px, 88vw);
+  min-height: 560px;
+}
+
+.connection-form-window {
+  min-height: 100vh;
+  padding: 12px;
+}
+
+.modal-card.ssh-modal.standalone {
+  width: 100%;
+  min-height: calc(100vh - 24px);
+  border: 0;
+  border-radius: 0;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 32px;
+  font-weight: 600;
+  font-size: 15px;
+  margin-bottom: 16px;
+}
+
+.ssh-modal-body {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.ssh-modal-nav {
+  border: 1px solid var(--border-light);
+  overflow: hidden;
+}
+
+.ssh-modal-nav button {
+  display: block;
+  width: 100%;
+  height: 38px;
+  border: 0;
+  border-bottom: 1px solid var(--border-light);
+  text-align: left;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
+.ssh-modal-nav button.active {
+  font-weight: 600;
+}
+
+.ssh-form-shell {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.ssh-form-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ssh-fieldset {
+  border: 1px solid var(--border-dark);
+  padding: 10px 10px 12px;
+}
+
+.ssh-fieldset legend {
+  padding: 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ssh-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+}
+
+.ssh-grid.single {
+  grid-template-columns: 1fr;
+}
+
+.ssh-grid-general {
+  grid-template-columns: minmax(0, 1fr) 160px;
+}
+
+.ssh-grid label {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.ssh-grid label.span-2,
+.ssh-grid label.full {
+  grid-column: 1 / -1;
+}
+
+.ssh-grid label.narrow {
+  max-width: 240px;
+}
+
+.ssh-grid label.full {
+  align-items: start;
+}
+
+.ssh-grid input,
+.ssh-grid select,
+.ssh-grid textarea {
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-dark);
+  border-radius: 4px;
+}
+
+.ssh-grid textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.terminal-key-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border-dark);
+}
+
+.terminal-key-box strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.terminal-key-box label {
+  grid-template-columns: 132px 1fr;
+  font-size: 13px;
+}
+
+.ssh-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.ssh-checkbox input {
+  width: 18px;
+  height: 18px;
+  margin-top: 2px;
+}
+
+.ssh-placeholder {
+  display: grid;
+  place-items: center;
+  min-height: 320px;
+  border: 1px solid var(--border-dark);
+}
+
+.modal-error {
+  margin-top: 8px;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+}
+
+.ssh-actions {
+  margin-top: 14px;
+}
+
+.connection-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px 16px;
+}
+
+.connection-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.connection-form input,
+.connection-form select {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--border-dark);
+  border-radius: var(--radius-md);
+  transition: all 0.2s;
+}
+
+.connection-form input:focus,
+.connection-form select:focus {
+  outline: none;
+}
+
+.checkbox-row {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 10px !important;
+  align-self: end;
+  height: 40px;
+}
+
+.checkbox-row input {
+  width: auto;
+  height: auto;
+}
+
+.primary-button {
+  height: 36px;
+  padding: 0 20px;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  grid-column: 1 / -1;
+  margin-top: 16px;
+}

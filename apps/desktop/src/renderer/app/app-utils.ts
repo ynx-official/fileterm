@@ -1,5 +1,6 @@
 import type { DragEvent, MouseEvent } from 'react'
 import type { LocalFileItem, TransferTask, WorkspaceTab } from '@termdock/core'
+import { t } from '../i18n'
 
 export const localFileDragType = 'application/x-termdock-local-file'
 export const remoteFileDragType = 'application/x-termdock-remote-file'
@@ -151,7 +152,7 @@ export function setFileDragPreview(event: DragEvent<HTMLElement>, names: string[
   const visibleNames = names.slice(0, 2)
   preview.innerHTML = `
     <span class="file-drag-preview-icon">□</span>
-    <span>${escapeHtml(visibleNames.join(names.length > 1 ? ', ' : ''))}${names.length > 2 ? ` 等 ${names.length} 项` : ''}</span>
+    <span>${escapeHtml(visibleNames.join(names.length > 1 ? ', ' : ''))}${names.length > 2 ? ` ${t.moreItemsPrefix ? `${t.moreItemsPrefix} ` : ''}${names.length} ${t.itemsSuffix}` : ''}</span>
   `
   document.body.appendChild(preview)
   event.dataTransfer.setDragImage(preview, 10, 10)
@@ -159,20 +160,20 @@ export function setFileDragPreview(event: DragEvent<HTMLElement>, names: string[
 }
 
 export function transferStatusText(transfer: TransferTask) {
-  const direction = transfer.direction === 'upload' ? '上传' : '下载'
+  const direction = transfer.direction === 'upload' ? t.upload : t.download
   if (transfer.status === 'failed') {
-    return `${direction}失败: ${transfer.name}`
+    return `${transfer.direction === 'upload' ? t.uploadFailed : t.downloadFailed}: ${transfer.name}`
   }
   if (transfer.status === 'canceled') {
-    return `${direction}已终止: ${transfer.name}`
+    return `${transfer.direction === 'upload' ? t.uploadCanceled : t.downloadCanceled}: ${transfer.name}`
   }
   if (transfer.status === 'done') {
-    return `${direction}完成: ${transfer.name}`
+    return `${transfer.direction === 'upload' ? t.uploadDone : t.downloadDone}: ${transfer.name}`
   }
   if (transfer.status === 'queued') {
-    return `等待${direction}: ${transfer.name}`
+    return `${transfer.direction === 'upload' ? t.waitingUpload : t.waitingDownload}: ${transfer.name}`
   }
-  return `${direction}中 ${transfer.progress}%: ${transfer.name}`
+  return `${transfer.direction === 'upload' ? t.uploading : t.downloading} ${transfer.progress}%: ${transfer.name}`
 }
 
 function escapeHtml(value: string) {

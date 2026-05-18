@@ -1,5 +1,6 @@
 import type { ConnectionProfile, ConnectionFolder } from '@termdock/core'
 import { useState, useMemo, type MouseEvent, type DragEvent } from 'react'
+import { t } from '../../i18n'
 
 export function ConnectionManagerModal({
   profiles,
@@ -223,7 +224,7 @@ export function ConnectionManagerModal({
           <span>{isFolder ? '--' : node.host}</span>
           <span>{isFolder ? '--' : node.port}</span>
           <span>{isFolder ? '--' : node.username}</span>
-          <span>{isFolder ? 'FOLDER' : node.type.toUpperCase()}</span>
+          <span>{isFolder ? t.homeFolderType : node.type.toUpperCase()}</span>
           <span>{isFolder ? '--' : (node.note || '/')}</span>
           <span className="manager-actions">
             {!isFolder && (
@@ -235,7 +236,7 @@ export function ConnectionManagerModal({
                   onEditProfile(node)
                 }}
               >
-                编辑
+                {t.edit}
               </button>
             )}
             <button
@@ -247,7 +248,7 @@ export function ConnectionManagerModal({
                 else onDeleteProfile(e, node.id)
               }}
             >
-              删除
+              {t.delete}
             </button>
           </span>
         </div>
@@ -256,7 +257,7 @@ export function ConnectionManagerModal({
             {node.children.map((child: any) => renderNode(child, depth + 1))}
             {node.children.length === 0 && (
               <div className="manager-row empty-folder" style={{ paddingLeft: `${(depth + 1) * 20 + 14}px`, color: '#666' }}>
-                <span style={{ gridColumn: '1 / -1' }}>空文件夹</span>
+                <span style={{ gridColumn: '1 / -1' }}>{t.emptyFolder}</span>
               </div>
             )}
           </div>
@@ -268,7 +269,7 @@ export function ConnectionManagerModal({
   const content = (
     <div className={`modal-card manager-modal ${standalone ? 'standalone' : ''}`}>
       <div className="modal-header">
-        <span>连接管理器</span>
+        <span>{t.connectionManager}</span>
         {!standalone ? <button className="icon-button" onClick={onClose} type="button">×</button> : null}
       </div>
       <div className="manager-toolbar" style={{ gap: '10px' }}>
@@ -280,19 +281,19 @@ export function ConnectionManagerModal({
             setNewFolderName('')
           }}
         >
-          新建文件夹
+          {t.newFolder}
         </button>
-        <button className="primary-button" type="button" onClick={onCreate}>新建连接</button>
+        <button className="primary-button" type="button" onClick={onCreate}>{t.newConnection}</button>
       </div>
       <div className="manager-table">
         <div className="manager-head">
-          <span>名称</span>
-          <span>主机</span>
-          <span>端口</span>
-          <span>用户</span>
-          <span>类型</span>
-          <span>备注</span>
-          <span>操作</span>
+          <span>{t.name}</span>
+          <span>{t.host}</span>
+          <span>{t.port}</span>
+          <span>{t.userColumn}</span>
+          <span>{t.type}</span>
+          <span>{t.note}</span>
+          <span>{t.actions}</span>
         </div>
         <div className="manager-body" style={{ flex: 1, overflowY: 'auto' }}>
           {isCreatingFolder && (
@@ -317,13 +318,13 @@ export function ConnectionManagerModal({
                     setIsCreatingFolder(false)
                   }}
                   style={{ background: 'var(--bg-active)', border: 'none', color: 'inherit', padding: '2px 4px', outline: 'none' }}
-                  placeholder="文件夹名称"
+                  placeholder={t.folderName}
                 />
               </span>
               <span>--</span>
               <span>--</span>
               <span>--</span>
-              <span>FOLDER</span>
+              <span>{t.homeFolderType}</span>
               <span>--</span>
               <span></span>
             </div>
@@ -331,7 +332,7 @@ export function ConnectionManagerModal({
           {tree.roots.map((node) => renderNode(node, 0))}
           {tree.roots.length === 0 && !isCreatingFolder && (
             <div style={{ padding: '20px', textAlign: 'center', color: '#666' }}>
-              暂无连接
+              {t.noConnections}
             </div>
           )}
         </div>

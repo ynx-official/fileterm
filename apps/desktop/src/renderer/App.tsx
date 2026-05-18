@@ -16,22 +16,18 @@ import { ConnectionModal } from './features/connections/ConnectionModal'
 import { FileEditorModal } from './features/files/FileEditorModal'
 import { TabBar, type OrderedTabEntry, type TabContextTarget } from './features/layout/TabBar'
 import { TabContextMenu } from './features/layout/TabContextMenu'
-import { SystemInfoWorkspace } from './features/system/SystemInfoWorkspace'
 import { SystemSidebar } from './features/system/SystemSidebar'
 import { TransferBar } from './features/transfers/TransferBar'
 import { TransferPopover } from './features/transfers/TransferPopover'
-import { HomeWorkspace } from './features/workspace/HomeWorkspace'
-import { SessionWorkspace } from './features/workspace/SessionWorkspace'
-import { useThemeMode } from './hooks/useThemeMode'
-import { t } from './i18n'
+import { WorkspaceStage } from './features/workspace/WorkspaceStage'
+import { useThemeMode, type ThemeMode } from './hooks/useThemeMode'
+import { defaultLocale, setLocale, t, type AppLocale } from './i18n'
 
 type LocalTab =
   | { id: string; kind: 'home'; title: string }
   | { id: string; kind: 'system'; title: string; sessionTabId: string }
 
 export function App() {
-  useThemeMode('default')
-
   const searchParams = new URLSearchParams(window.location.search)
   const windowMode = searchParams.get('window') ?? 'main'
   const isConnectionManagerWindow = windowMode === 'connection-manager'
@@ -64,6 +60,10 @@ export function App() {
   const [fileEditor, setFileEditor] = useState<FileContentSnapshot | null>(null)
   const [fileEditorError, setFileEditorError] = useState<string | null>(null)
   const [showTransfers, setShowTransfers] = useState(false)
+  const [themeMode, setThemeMode] = useState<ThemeMode>('default-dark')
+  const [locale, setLocaleState] = useState<AppLocale>(defaultLocale)
+
+  useThemeMode(themeMode)
 
   const localTabsRef = useRef(localTabs)
   const previousActiveTransferCountRef = useRef(0)
@@ -74,6 +74,16 @@ export function App() {
   useEffect(() => {
     localTabsRef.current = localTabs
   }, [localTabs])
+
+  useEffect(() => {
+    setLocale(locale)
+    setLocalTabs((prev) => prev.map((tab) => {
+      if (tab.kind === 'home') {
+        return { ...tab, title: t.untitledTab }
+      }
+      return { ...tab, title: t.systemInfoTabTitle }
+    }))
+  }, [locale])
 
   useEffect(() => {
     if (!desktopApi) {
@@ -749,6 +759,132 @@ export function App() {
     })
     .filter((item): item is OrderedTabEntry => item !== null)
 
+  const handleOpenRemoteItem = (item: RemoteFileItem) => {
+    if (!desktopApi || !activeTab) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setIsBusy(true)
+        if (item.type === 'folder') {
+          await openRemoteDirectory(activeTab.id, item.path)
+        } else {
+          await openRemoteFileForEdit(activeTab.id, item)
+        }
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleOpenRemotePath = (targetPath: string) => {
+    if (!activeTab) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setIsBusy(true)
+        await openRemoteDirectory(activeTab.id, targetPath)
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleRefreshWorkspace = () => {
+    if (!activeTab || !activeSession) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setIsBusy(true)
+        await openLocalDirectory(localPath)
+        await openRemoteDirectory(activeTab.id, activeSession.remotePath)
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleUploadFiles = (items: LocalFileItem[]) => {
+    if (!desktopApi) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setIsBusy(true)
+        await uploadLocalPaths(items.map((item) => item.path))
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleChooseUploadFiles = () => {
+    if (!desktopApi) {
+      return
+    }
+
+    void (async () => {
+      const filePaths = await desktopApi.selectLocalFiles(localPath)
+      if (!filePaths.length) {
+        return
+      }
+
+      try {
+        setIsBusy(true)
+        await uploadLocalPaths(filePaths)
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleDownloadFiles = (items: RemoteFileItem[], targetDirectory?: string) => {
+    if (!desktopApi || !activeTab) {
+      return
+    }
+
+    void (async () => {
+      const files = items.filter((row) => row.type === 'file')
+      if (!files.length) {
+        return
+      }
+
+      const downloadDirectory = targetDirectory ?? await desktopApi.selectLocalDirectory()
+      if (!downloadDirectory) {
+        return
+      }
+
+      try {
+        setIsBusy(true)
+        for (const item of files) {
+          const snapshot = await desktopApi.downloadFile(activeTab.id, item.path, downloadDirectory)
+          applySnapshot(snapshot)
+        }
+        await openLocalDirectory(downloadDirectory)
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
   if (isConnectionManagerWindow) {
     return (
       <>
@@ -814,6 +950,7 @@ export function App() {
         <TabBar
           activeHomeTabId={activeLocalTabId}
           activeSessionTabId={workspace.activeTabId}
+          locale={locale}
           onAddHomeTab={handleAddHomeTab}
           onActivateHome={handleActivateHome}
           onActivateSession={(tabId) => {
@@ -838,7 +975,13 @@ export function App() {
           onOpenTabContext={(event, target) => {
             setTabContextMenu({ x: event.clientX, y: event.clientY, target })
           }}
+          onSetLocale={(nextLocale) => {
+            setLocale(nextLocale)
+            setLocaleState(nextLocale)
+          }}
+          onSetTheme={setThemeMode}
           orderedTabs={orderedTabs}
+          theme={themeMode}
         />
 
         <aside className="fs-sidebar" style={{ position: 'relative' }}>
@@ -854,123 +997,30 @@ export function App() {
         <main className={`fs-main ${error ? 'has-status' : 'no-status'}`}>
           {error ? <div className="status-message">{error}</div> : null}
           <div className="workspace-stage">
-            {activeLocalTab?.kind === 'system' ? (
-              <SystemInfoWorkspace activeProfile={activeProfile} activeSession={activeSession} />
-            ) : activeTab && activeSession && !activeLocalTab ? (
-              <SessionWorkspace
-                activeTab={activeTab}
-                activeSession={activeSession}
-                localItems={localItems}
-                localPath={localPath}
-                onOpenLocalItem={handleOpenLocalItem}
-                onOpenLocalPath={(targetPath) => {
-                  void openLocalDirectory(targetPath).catch((err: Error) => setError(err.message))
-                }}
-                onOpenRemoteItem={(item) => {
-                  if (!desktopApi) {
-                    return
-                  }
-
-                  void (async () => {
-                    try {
-                      setIsBusy(true)
-                      if (item.type === 'folder') {
-                        await openRemoteDirectory(activeTab.id, item.path)
-                      } else {
-                        await openRemoteFileForEdit(activeTab.id, item)
-                      }
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onOpenRemotePath={(targetPath) => {
-                  void (async () => {
-                    try {
-                      setIsBusy(true)
-                      await openRemoteDirectory(activeTab.id, targetPath)
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onRefresh={() => {
-                  void (async () => {
-                    try {
-                      setIsBusy(true)
-                      await openLocalDirectory(localPath)
-                      await openRemoteDirectory(activeTab.id, activeSession.remotePath)
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onUploadFiles={(items) => {
-                  if (!desktopApi) return
-                  void (async () => {
-                    try {
-                      setIsBusy(true)
-                      await uploadLocalPaths(items.map((item) => item.path))
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onChooseUploadFiles={() => {
-                  if (!desktopApi) return
-                  void (async () => {
-                    const filePaths = await desktopApi.selectLocalFiles(localPath)
-                    if (!filePaths.length) return
-                    try {
-                      setIsBusy(true)
-                      await uploadLocalPaths(filePaths)
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onDownloadFiles={(items, targetDirectory) => {
-                  if (!desktopApi) return
-                  void (async () => {
-                    const files = items.filter((row) => row.type === 'file')
-                    if (!files.length) return
-                    const downloadDirectory = targetDirectory ?? await desktopApi.selectLocalDirectory()
-                    if (!downloadDirectory) return
-                    try {
-                      setIsBusy(true)
-                      for (const item of files) {
-                        const snapshot = await desktopApi.downloadFile(activeTab.id, item.path, downloadDirectory)
-                        applySnapshot(snapshot)
-                      }
-                      await openLocalDirectory(downloadDirectory)
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onDropUpload={handleDropUpload}
-              />
-            ) : (
-              <HomeWorkspace
-                profiles={workspace.profiles}
-                folders={workspace.folders || []}
-                isDesktopRuntime={isDesktopRuntime}
-                onCreate={openCreateConnection}
-                onOpen={handleOpenProfile}
-              />
-            )}
+            <WorkspaceStage
+              activeLocalTab={activeLocalTab}
+              activeProfile={activeProfile}
+              activeSession={activeSession}
+              activeTab={activeTab}
+              folders={workspace.folders || []}
+              isDesktopRuntime={isDesktopRuntime}
+              localItems={localItems}
+              localPath={localPath}
+              profiles={workspace.profiles}
+              onChooseUploadFiles={handleChooseUploadFiles}
+              onCreateConnection={openCreateConnection}
+              onDownloadFiles={handleDownloadFiles}
+              onDropUpload={handleDropUpload}
+              onOpenLocalItem={handleOpenLocalItem}
+              onOpenLocalPath={(targetPath) => {
+                void openLocalDirectory(targetPath).catch((err: Error) => setError(err.message))
+              }}
+              onOpenProfile={handleOpenProfile}
+              onOpenRemoteItem={handleOpenRemoteItem}
+              onOpenRemotePath={handleOpenRemotePath}
+              onRefresh={handleRefreshWorkspace}
+              onUploadFiles={handleUploadFiles}
+            />
           </div>
         </main>
 

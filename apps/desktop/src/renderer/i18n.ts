@@ -117,6 +117,10 @@ const zhCN = {
   dragTransfer: '拖动传输',
   refresh: '刷新',
   downloadTo: '下载到...',
+  uploadToRemote: '上传到远程',
+  uploadMore: '上传...',
+  open: '打开',
+  copyPath: '复制路径',
   copyTab: '复制标签',
   connect: '连接',
   connectAll: '连接全部',
@@ -125,7 +129,58 @@ const zhCN = {
   closeAll: '关闭全部',
   homeFolderType: 'FOLDER',
   emptyFolder: '空文件夹',
-  noConnections: '暂无连接'
+  noConnections: '暂无连接',
+  editConnection: '编辑连接',
+  sshConnection: 'SSH连接',
+  proxyServer: '代理服务器',
+  tunnel: '隧道',
+  general: '常规',
+  auth: '认证',
+  advanced: '高级',
+  method: '方法',
+  note: '备注',
+  useFtps: '使用 FTPS',
+  enableExecChannel: '启用Exec Channel(若连接上就被断开,请关闭该项,比如跳板机)',
+  characterEncoding: '字符编码',
+  keySequence: '按键序列(解决退格/删除键失效,乱码问题):',
+  backspaceKey: 'Backspace退格键',
+  deleteKey: 'Delete删除键',
+  proxyComingSoon: '代理服务器功能稍后接入',
+  tunnelComingSoon: '隧道功能稍后接入',
+  saveChanges: '保存修改',
+  save: '保存',
+  editRemoteFile: '编辑远程文件',
+  editLocalFile: '编辑本地文件',
+  transferDetails: '传输详情',
+  inProgress: '进行中',
+  completed: '已完成',
+  all: '全部',
+  stop: '终止',
+  noTransferTasks: '暂无传输任务',
+  uploadFailed: '上传失败',
+  downloadFailed: '下载失败',
+  uploadCanceled: '上传已终止',
+  downloadCanceled: '下载已终止',
+  uploadDone: '上传完成',
+  downloadDone: '下载完成',
+  waitingUpload: '等待上传',
+  waitingDownload: '等待下载',
+  uploading: '上传中',
+  downloading: '下载中',
+  moreItemsPrefix: '等',
+  itemsSuffix: '项',
+  newFolder: '新建文件夹',
+  folderName: '文件夹名称',
+  actions: '操作',
+  edit: '编辑',
+  delete: '删除',
+  userColumn: '用户',
+  theme: '切换主题',
+  defaultDark: 'Default Dark',
+  defaultLight: 'Default Light',
+  commandManager: '命令管理器',
+  settings: '设置',
+  notReady: '稍后接入'
 }
 
 const enUS: typeof zhCN = {
@@ -223,6 +278,10 @@ const enUS: typeof zhCN = {
   dragTransfer: 'Drag to transfer',
   refresh: 'Refresh',
   downloadTo: 'Download to...',
+  uploadToRemote: 'Upload to Remote',
+  uploadMore: 'Upload...',
+  open: 'Open',
+  copyPath: 'Copy Path',
   copyTab: 'Copy Tab',
   connect: 'Connect',
   connectAll: 'Connect All',
@@ -231,7 +290,58 @@ const enUS: typeof zhCN = {
   closeAll: 'Close All',
   homeFolderType: 'FOLDER',
   emptyFolder: 'Empty Folder',
-  noConnections: 'No connections yet'
+  noConnections: 'No connections yet',
+  editConnection: 'Edit Connection',
+  sshConnection: 'SSH Connection',
+  proxyServer: 'Proxy Server',
+  tunnel: 'Tunnel',
+  general: 'General',
+  auth: 'Authentication',
+  advanced: 'Advanced',
+  method: 'Method',
+  note: 'Note',
+  useFtps: 'Use FTPS',
+  enableExecChannel: 'Enable Exec Channel',
+  characterEncoding: 'Character Encoding',
+  keySequence: 'Key sequence:',
+  backspaceKey: 'Backspace',
+  deleteKey: 'Delete',
+  proxyComingSoon: 'Proxy server support is coming later',
+  tunnelComingSoon: 'Tunnel support is coming later',
+  saveChanges: 'Save Changes',
+  save: 'Save',
+  editRemoteFile: 'Edit Remote File',
+  editLocalFile: 'Edit Local File',
+  transferDetails: 'Transfer Details',
+  inProgress: 'In Progress',
+  completed: 'Completed',
+  all: 'All',
+  stop: 'Stop',
+  noTransferTasks: 'No transfer tasks',
+  uploadFailed: 'Upload Failed',
+  downloadFailed: 'Download Failed',
+  uploadCanceled: 'Upload Canceled',
+  downloadCanceled: 'Download Canceled',
+  uploadDone: 'Upload Done',
+  downloadDone: 'Download Done',
+  waitingUpload: 'Waiting to Upload',
+  waitingDownload: 'Waiting to Download',
+  uploading: 'Uploading',
+  downloading: 'Downloading',
+  moreItemsPrefix: '',
+  itemsSuffix: 'items',
+  newFolder: 'New Folder',
+  folderName: 'Folder Name',
+  actions: 'Actions',
+  edit: 'Edit',
+  delete: 'Delete',
+  userColumn: 'User',
+  theme: 'Theme',
+  defaultDark: 'Default Dark',
+  defaultLight: 'Default Light',
+  commandManager: 'Command Manager',
+  settings: 'Settings',
+  notReady: 'Coming later'
 }
 
 export const messages = {
@@ -243,4 +353,18 @@ export type AppLocale = keyof typeof messages
 export type LocaleMessages = (typeof messages)[AppLocale]
 
 export const defaultLocale: AppLocale = 'zhCN'
-export const t = messages[defaultLocale]
+let activeLocale: AppLocale = defaultLocale
+
+export function setLocale(locale: AppLocale) {
+  activeLocale = locale
+}
+
+export function getLocale() {
+  return activeLocale
+}
+
+export const t = new Proxy({} as LocaleMessages, {
+  get(_target, property: keyof LocaleMessages) {
+    return messages[activeLocale][property]
+  }
+})

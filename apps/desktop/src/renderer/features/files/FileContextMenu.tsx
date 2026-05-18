@@ -1,4 +1,5 @@
 import type { LocalFileItem, RemoteFileItem } from '@termdock/core'
+import { t } from '../../i18n'
 import { ContextMenu } from '../common/ContextMenu'
 
 export function FileContextMenu({
@@ -24,14 +25,14 @@ export function FileContextMenu({
 }) {
   const canDownload = pane === 'remote' && item?.type === 'file'
   const canUpload = pane === 'remote' || pane === 'local'
-  const uploadLabel = pane === 'local' ? '上传到远程' : '上传...'
+  const uploadLabel = pane === 'local' ? t.uploadToRemote : t.uploadMore
   const items = [
-    { label: '刷新', action: onRefresh },
+    { label: t.refresh, action: onRefresh },
     { separator: true },
-    { label: '打开', disabled: !item, action: onOpen },
+    { label: t.open, disabled: !item, action: onOpen },
     { separator: true },
-    { label: '复制路径', disabled: !item, action: onCopyPath },
-    ...(canDownload ? [{ separator: true }, { label: '下载', action: onDownload }] : []),
+    { label: t.copyPath, disabled: !item, action: onCopyPath },
+    ...(canDownload ? [{ separator: true }, { label: t.download, action: onDownload }] : []),
     ...(canUpload ? [{ separator: true }, { label: uploadLabel, action: onUpload }] : [])
   ]
 
