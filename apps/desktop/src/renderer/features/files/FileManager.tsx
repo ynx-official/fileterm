@@ -242,8 +242,8 @@ export function FileManager({
         <button type="button">{t.command}</button>
         <span className="file-current-path">{activeSession.remotePath}</span>
         <div className="file-tab-actions">
-          <button title="刷新" type="button" onClick={onRefresh}><AppIcon name="refresh" /></button>
-          <button title="下载到..." type="button" disabled={!selectedRemoteFileItems.length} onClick={() => onDownloadFiles(selectedRemoteFileItems)}>
+          <button title={t.refresh} type="button" onClick={onRefresh}><AppIcon name="refresh" /></button>
+          <button title={t.downloadTo} type="button" disabled={!selectedRemoteFileItems.length} onClick={() => onDownloadFiles(selectedRemoteFileItems)}>
             <AppIcon name="download" />
           </button>
           <button title={t.upload} type="button" onClick={onChooseUploadFiles}><AppIcon name="upload" /></button>

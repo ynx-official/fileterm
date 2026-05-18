@@ -111,23 +111,81 @@ export interface NetworkRates {
   tx: string
 }
 
+export interface SystemIdentity {
+  osName: string
+  kernelName: string
+  kernelVersion: string
+  architecture: string
+  hostname: string
+}
+
+export interface CpuInfoRow {
+  model: string
+  cores: number
+  frequencyMHz: string
+  cache: string
+  bogomips: string
+}
+
+export interface CpuUsageBreakdown {
+  user: number
+  system: number
+  nice: number
+  idle: number
+  ioWait: number
+  irq: number
+  softIrq: number
+  steal: number
+}
+
+export interface ResourceUsageBreakdown {
+  total: string
+  used: string
+  available: string
+  percent: number
+}
+
+export interface NetworkInterfaceRow {
+  name: string
+  txTotal: string
+  rxTotal: string
+  txRate: string
+  rxRate: string
+}
+
+export interface FileSystemRow {
+  name: string
+  size: string
+  used: string
+  usagePercent: string
+  available: string
+  mountPoint: string
+}
+
 export interface SystemMetrics {
   ip: string
   uptime: string
   load: string
+  identity: SystemIdentity
   cpuPercent: number
+  cpuUsage: CpuUsageBreakdown
+  cpuInfoRows: CpuInfoRow[]
   memoryPercent: number
   memoryUsage: string
   memoryAppUsage?: string
   memoryCacheUsage?: string
   memoryKernelUsage?: string
+  memoryBreakdown: ResourceUsageBreakdown
   swapPercent: number
   swapUsage: string
+  swapBreakdown: ResourceUsageBreakdown
   diskRows: Array<{ path: string; usage: string }>
+  fileSystemRows: FileSystemRow[]
   networkInterfaces: string[]
   activeNetworkInterface: string
   networkRates: NetworkRates
   networkSamples: NetworkSamplePoint[]
+  networkInterfaceRows: NetworkInterfaceRow[]
   networkRatesByInterface?: Record<string, NetworkRates>
   networkSamplesByInterface?: Record<string, NetworkSamplePoint[]>
   topProcesses: SidebarProcessItem[]

@@ -96,7 +96,7 @@ export function FileTable({
                 draggable={row.type === 'file'}
                 onDragStart={(event) => onDragItem?.(event, row)}
                 onMouseDown={(event) => event.stopPropagation()}
-                title={row.type === 'file' ? '拖动传输' : undefined}
+                title={row.type === 'file' ? t.dragTransfer : undefined}
               >
                 <AppIcon name={row.type === 'folder' ? 'folder' : 'file'} />
               </span>
@@ -176,7 +176,7 @@ export function LocalFileTable({
                 draggable={row.name !== '..'}
                 onDragStart={(event) => onDragItem(event, row)}
                 onMouseDown={(event) => event.stopPropagation()}
-                title={row.name !== '..' ? '拖动传输' : undefined}
+                title={row.name !== '..' ? t.dragTransfer : undefined}
               >
                 <AppIcon name={row.type === 'folder' ? 'folder' : 'file'} />
               </span>

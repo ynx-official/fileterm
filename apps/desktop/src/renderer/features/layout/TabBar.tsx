@@ -1,13 +1,14 @@
 import type { WorkspaceTab } from '@termdock/core'
 import { tabStatusClass } from '../../app/app-utils'
+import { t } from '../../i18n'
 import { AppIcon } from '../common/AppIcon'
 
 export type OrderedTabEntry =
-  | { key: string; kind: 'home'; id: string }
+  | { key: string; kind: 'local'; id: string; title: string; tabKind: 'home' | 'system' }
   | { key: string; kind: 'session'; tab: WorkspaceTab }
 
 export type TabContextTarget =
-  | { kind: 'home'; id: string; title: string }
+  | { kind: 'local'; id: string; title: string }
   | { kind: 'session'; id: string; title: string; status: WorkspaceTab['status'] }
 
 export function TabBar({
@@ -42,18 +43,18 @@ export function TabBar({
   return (
     <header className="fs-tabbar">
       <div className="titlebar-brand">
-        <strong>TermDock</strong>
+        <strong>{t.appTitle}</strong>
       </div>
       <div className="titlebar-tabarea">
-        <button aria-label="Open connection manager" className="tabbar-folder-button" onClick={onOpenConnectionManager} title="连接管理器" type="button">
+        <button aria-label={t.connectionManager} className="tabbar-folder-button" onClick={onOpenConnectionManager} title={t.connectionManager} type="button">
           <AppIcon name="connections" size={16} />
         </button>
         <div className="fs-tabs">
           {orderedTabs.map((entry, index) => (
-            entry.kind === 'home' ? (
+            entry.kind === 'local' ? (
               <div
                 key={entry.key}
-                className={`fs-tab home-tab ${activeHomeTabId === entry.id ? 'active' : ''}`}
+                className={`fs-tab ${entry.tabKind === 'home' ? 'home-tab' : 'system-tab'} ${activeHomeTabId === entry.id ? 'active' : ''}`}
                 draggable
                 onClick={() => onActivateHome(entry.id)}
                 onContextMenu={(event) => {
@@ -61,9 +62,9 @@ export function TabBar({
                   event.stopPropagation()
                   onActivateHome(entry.id)
                   onOpenTabContext(event, {
-                    kind: 'home',
+                    kind: 'local',
                     id: entry.id,
-                    title: `${index + 1} 新建标签`
+                    title: entry.title
                   })
                 }}
                 onDragEnd={onDragEnd}
@@ -79,8 +80,8 @@ export function TabBar({
                 tabIndex={0}
               >
                 <span>{index + 1}</span>
-                <strong>新建标签</strong>
-                <button aria-label="Close 新建标签" className="tab-close" onClick={(event) => onCloseHomeTab(event, entry.id)} type="button">×</button>
+                <strong>{entry.title}</strong>
+                <button aria-label={`${t.closeTab} ${entry.title}`} className="tab-close" onClick={(event) => onCloseHomeTab(event, entry.id)} type="button">×</button>
               </div>
             ) : (
               <div
@@ -114,7 +115,7 @@ export function TabBar({
                 <span>{index + 1}</span>
                 <strong>{entry.tab.title}</strong>
                 <span className={`tab-dot ${tabStatusClass(entry.tab.status)}`} />
-                <button aria-label={`Close ${entry.tab.title}`} className="tab-close" onClick={(event) => onCloseSessionTab(event, entry.tab.id)} type="button">×</button>
+                <button aria-label={`${t.closeTab} ${entry.tab.title}`} className="tab-close" onClick={(event) => onCloseSessionTab(event, entry.tab.id)} type="button">×</button>
               </div>
             )
           ))}

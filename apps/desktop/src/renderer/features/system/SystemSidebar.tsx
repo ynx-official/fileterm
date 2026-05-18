@@ -14,11 +14,24 @@ function parseMemory(memStr: string): number {
 
 export function SystemSidebar({
   activeProfile,
-  activeSession
+  activeSession,
+  onOpenSystemInfo
 }: {
   activeProfile: ConnectionProfile | null
   activeSession: SessionSnapshot | null
+  onOpenSystemInfo(): void
 }) {
+  if (!activeSession) {
+    return (
+      <section className="sys-card sys-card-empty">
+        <div className="sidebar-empty-state">
+          <strong>{t.noConnection}</strong>
+          <p>{t.noConnectionDescription}</p>
+        </div>
+      </section>
+    )
+  }
+
   const [sortMode, setSortMode] = useState<'memory' | 'cpu' | 'command'>('cpu')
   const metrics = activeSession?.systemMetrics
   const internalIp = metrics?.ip || '-'
@@ -50,7 +63,7 @@ export function SystemSidebar({
           <AddressLine label={t.privateIp} value={internalIp} />
           <AddressLine label={t.accessAddress} value={accessAddress} />
         </div>
-        <button className="system-title" type="button">{t.systemInfo}</button>
+        <button className="system-title" onClick={onOpenSystemInfo} type="button">{t.systemInfo}</button>
         <div className="metric-line"><span>{t.running}</span><strong>{metrics?.uptime ?? '-'}</strong></div>
         <div className="metric-line"><span>{t.load}</span><strong>{metrics?.load ?? '-'}</strong></div>
         <Meter label={t.cpu} value={metrics?.cpuPercent ?? 0} tone="green" caption={metrics ? `${metrics.cpuPercent}%` : '0%'} />
@@ -91,7 +104,7 @@ function AddressLine({ label, value }: { label: string; value: string }) {
         }}
         type="button"
       >
-        复制
+        {t.copy}
       </button>
     </div>
   )
@@ -115,9 +128,9 @@ function MemoryMeter({ metrics }: { metrics?: SystemMetrics }) {
   const memoryTone = getMemoryTone(metrics?.memoryPercent ?? 0)
   const segments = total > 0
     ? [
-        { key: 'app', label: '应用', value: metrics?.memoryAppUsage ?? '-', width: Math.max(0, Math.min(100, (app / total) * 100)) },
-        { key: 'cache', label: '缓存', value: metrics?.memoryCacheUsage ?? '-', width: Math.max(0, Math.min(100, (cache / total) * 100)) },
-        { key: 'kernel', label: '内核', value: metrics?.memoryKernelUsage ?? '-', width: Math.max(0, Math.min(100, (kernel / total) * 100)) }
+        { key: 'app', label: t.app, value: metrics?.memoryAppUsage ?? '-', width: Math.max(0, Math.min(100, (app / total) * 100)) },
+        { key: 'cache', label: t.cacheLabel, value: metrics?.memoryCacheUsage ?? '-', width: Math.max(0, Math.min(100, (cache / total) * 100)) },
+        { key: 'kernel', label: t.kernelLabel, value: metrics?.memoryKernelUsage ?? '-', width: Math.max(0, Math.min(100, (kernel / total) * 100)) }
       ].filter((segment) => parseMemory(segment.value) > 0)
     : []
 
@@ -321,11 +334,11 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
       <div className="network-panel">
         <div className="network-rates">
           <span className="network-rate up">
-            <i>UP</i>
+            <i>{t.uploadShort}</i>
             <strong>{currentRates?.tx ?? '0B'}</strong>
           </span>
           <span className="network-rate down">
-            <i>DN</i>
+            <i>{t.downloadShort}</i>
             <strong>{currentRates?.rx ?? '0B'}</strong>
           </span>
         </div>
@@ -335,7 +348,7 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
           onChange={(event) => setSelectedInterface(event.target.value)}
         >
           {interfaceOptions.map((name) => (
-            <option key={name} value={name}>{name === 'all' ? '总计' : name}</option>
+            <option key={name} value={name}>{name === 'all' ? t.total : name}</option>
           ))}
         </select>
       </div>

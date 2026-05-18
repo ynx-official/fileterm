@@ -112,6 +112,20 @@ idle2sum=$((idle2+iowait2))
 diff_total=$((total2-total1))
 diff_idle=$((idle2sum-idle1))
 if [ "$diff_total" -gt 0 ]; then cpu_pct=$((100*(diff_total-diff_idle)/diff_total)); else cpu_pct=0; fi
+cpu_user_pct=$(awk -v diff_total="$diff_total" -v before="$user" -v after="$user2" 'BEGIN { if (diff_total > 0) printf "%.1f", (after-before) * 100 / diff_total; else print "0.0" }')
+cpu_system_pct=$(awk -v diff_total="$diff_total" -v before="$system" -v after="$system2" 'BEGIN { if (diff_total > 0) printf "%.1f", (after-before) * 100 / diff_total; else print "0.0" }')
+cpu_nice_pct=$(awk -v diff_total="$diff_total" -v before="$nice" -v after="$nice2" 'BEGIN { if (diff_total > 0) printf "%.1f", (after-before) * 100 / diff_total; else print "0.0" }')
+cpu_idle_pct=$(awk -v diff_total="$diff_total" -v before="$idle1" -v after="$idle2sum" 'BEGIN { if (diff_total > 0) printf "%.1f", (after-before) * 100 / diff_total; else print "0.0" }')
+cpu_iowait_pct=$(awk -v diff_total="$diff_total" -v before="$iowait" -v after="$iowait2" 'BEGIN { if (diff_total > 0) printf "%.1f", (after-before) * 100 / diff_total; else print "0.0" }')
+cpu_irq_pct=$(awk -v diff_total="$diff_total" -v before="$irq" -v after="$irq2" 'BEGIN { if (diff_total > 0) printf "%.1f", (after-before) * 100 / diff_total; else print "0.0" }')
+cpu_softirq_pct=$(awk -v diff_total="$diff_total" -v before="$softirq" -v after="$softirq2" 'BEGIN { if (diff_total > 0) printf "%.1f", (after-before) * 100 / diff_total; else print "0.0" }')
+cpu_steal_pct=$(awk -v diff_total="$diff_total" -v before="$steal" -v after="$steal2" 'BEGIN { if (diff_total > 0) printf "%.1f", (after-before) * 100 / diff_total; else print "0.0" }')
+os_name=$( ( . /etc/os-release >/dev/null 2>&1 && printf "%s" "$PRETTY_NAME" ) 2>/dev/null )
+[ -z "$os_name" ] && os_name=$(uname -s 2>/dev/null)
+kernel_name=$(uname -s 2>/dev/null)
+kernel_version=$(uname -r 2>/dev/null)
+architecture=$(uname -m 2>/dev/null)
+hostname_value=$(hostname 2>/dev/null)
 ip=$(hostname -I 2>/dev/null | awk '{print $1}')
 [ -z "$ip" ] && ip=$(ip route get 1 2>/dev/null | awk 'NR==1 {for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
 if [ -z "$ip" ]; then
@@ -186,6 +200,42 @@ if [ -z "$swap" ]; then
     exit
   }')
 fi
+cpu_info=$(awk -F: '
+  /^model name[[:space:]]*:/ {
+    current=$2
+    sub(/^[[:space:]]+/, "", current)
+    model_order[++model_count]=current
+    seen[current]=1
+  }
+  /^cpu cores[[:space:]]*:/ {
+    value=$2
+    sub(/^[[:space:]]+/, "", value)
+    if (cores[current] == "") cores[current]=value
+  }
+  /^cpu MHz[[:space:]]*:/ {
+    value=$2
+    sub(/^[[:space:]]+/, "", value)
+    if (mhz[current] == "") mhz[current]=sprintf("%.3f", value + 0)
+  }
+  /^cache size[[:space:]]*:/ {
+    value=$2
+    sub(/^[[:space:]]+/, "", value)
+    if (cache[current] == "") cache[current]=value
+  }
+  /^bogomips[[:space:]]*:/ {
+    value=$2
+    sub(/^[[:space:]]+/, "", value)
+    if (bogomips[current] == "") bogomips[current]=value
+  }
+  END {
+    for (index = 1; index <= model_count; index++) {
+      model=model_order[index]
+      if (printed[model]) continue
+      printed[model]=1
+      printf "%s|%s|%s|%s|%s\\n", model, (cores[model] == "" ? "0" : cores[model]), (mhz[model] == "" ? "-" : mhz[model]), (cache[model] == "" ? "-" : cache[model]), (bogomips[model] == "" ? "-" : bogomips[model])
+    }
+  }
+' /proc/cpuinfo 2>/dev/null)
 ifaces=$(awk -F: 'NR>2 {name=$1; gsub(/[[:space:]]/,"",name); if (name != "lo") print name}' /proc/net/dev 2>/dev/null | paste -sd, -)
 active_iface=$(awk '$2 == 00000000 {print $1; exit}' /proc/net/route 2>/dev/null)
 [ -z "$active_iface" ] && active_iface=$(echo "$ifaces" | awk -F, '{print $1}')
@@ -204,15 +254,25 @@ rx_rate=$(awk -v before="$rx1" -v after="$rx2" -v ms="$sample_ms" 'BEGIN { if (m
 tx_rate=$(awk -v before="$tx1" -v after="$tx2" -v ms="$sample_ms" 'BEGIN { if (ms > 0) printf "%d", (after-before) * 1000 / ms; else print 0 }')
 disk=$(df -hP 2>/dev/null | awk 'NR>1 {printf "%s|%s/%s\\n", $6, $4, $2}' | head -n 12)
 [ -z "$disk" ] && disk=$(df -h 2>/dev/null | awk 'NR>1 {printf "%s|%s/%s\\n", $NF, $(NF-2), $(NF-4)}' | head -n 12)
+filesystems=$(df -hP 2>/dev/null | awk 'NR>1 {printf "%s|%s|%s|%s|%s|%s\\n", $1, $2, $3, $5, $4, $6}' | head -n 20)
 procs=$(ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {printf "%.1fM|%s|%s|%s\\n", $1/1024, $2, $3, $4}')
 [ -z "$procs" ] && procs=$(ps -eo rss=,pcpu=,comm= 2>/dev/null | awk 'NF >= 3 {printf "%.1fM|%s|0|%s\\n", $1/1024, $2, $3}')
 [ -z "$procs" ] && procs=$(ps 2>/dev/null | awk 'NR>1 && NF >= 4 {printf "0.0M|0|0|%s\\n", $NF}')
+echo "__OS__$os_name"
+echo "__KERNEL_NAME__$kernel_name"
+echo "__KERNEL_VERSION__$kernel_version"
+echo "__ARCH__$architecture"
+echo "__HOSTNAME__$hostname_value"
 echo "__IP__$ip"
 echo "__UPTIME__$uptime_days"
 echo "__LOAD__$load"
 echo "__CPU__$cpu_pct"
+echo "__CPU_USAGE__$cpu_user_pct|$cpu_system_pct|$cpu_nice_pct|$cpu_idle_pct|$cpu_iowait_pct|$cpu_irq_pct|$cpu_softirq_pct|$cpu_steal_pct"
 echo "__MEM__$mem"
 echo "__SWAP__$swap"
+echo "__CPUINFO_START__"
+echo "$cpu_info"
+echo "__CPUINFO_END__"
 echo "__IFACES__$ifaces"
 echo "__ACTIVE_IFACE__$active_iface"
 echo "__RATES__$rx_rate|$tx_rate"
@@ -226,7 +286,7 @@ awk -F'|' -v sample_ms="$sample_ms" '
     curr_tx=$3
     rx_rate=(curr_rx-prev_rx) * 1000 / sample_ms
     tx_rate=(curr_tx-prev_tx) * 1000 / sample_ms
-    printf "%s|%d|%d\\n", $1, rx_rate, tx_rate
+    printf "%s|%.0f|%.0f|%d|%d\\n", $1, curr_rx, curr_tx, rx_rate, tx_rate
   }
 ' "$before_file" "$after_file"
 rm -f "$before_file" "$after_file"
@@ -234,6 +294,9 @@ echo "__IFACE_RATES_END__"
 echo "__DISK_START__"
 echo "$disk"
 echo "__DISK_END__"
+echo "__FILESYSTEMS_START__"
+echo "$filesystems"
+echo "__FILESYSTEMS_END__"
 echo "__PROCS_START__"
 echo "$procs"
 echo "__PROCS_END__"
@@ -257,16 +320,27 @@ export function parseSystemMetrics(raw: string): SystemMetrics {
 
   const [memUsed, memTotal, memPercent, memApp, memCache, memKernel] = readLine('__MEM__').split('|')
   const [swapUsed, swapTotal, swapPercent] = readLine('__SWAP__').split('|')
+  const [cpuUser, cpuSystem, cpuNice, cpuIdle, cpuIoWait, cpuIrq, cpuSoftIrq, cpuSteal] = readLine('__CPU_USAGE__').split('|')
   const [rxRate, txRate] = readLine('__RATES__').split('|')
   const interfaces = readLine('__IFACES__').split(',').filter(Boolean)
-  const networkRatesByInterface = readBlock('__IFACE_RATES_START__', '__IFACE_RATES_END__').reduce<Record<string, { rx: string; tx: string }>>((acc, line) => {
-    const [name, rx, tx] = line.split('|')
+  const networkInterfaceRows = readBlock('__IFACE_RATES_START__', '__IFACE_RATES_END__').map((line) => {
+    const [name, rxTotal, txTotal, rx, tx] = line.split('|')
+    return {
+      name,
+      txTotal: formatNetworkBytes(Number(txTotal) || 0),
+      rxTotal: formatNetworkBytes(Number(rxTotal) || 0),
+      txRate: formatRate(Number(tx) || 0),
+      rxRate: formatRate(Number(rx) || 0)
+    }
+  }).filter((row) => row.name)
+  const networkRatesByInterface = networkInterfaceRows.reduce<Record<string, { rx: string; tx: string }>>((acc, row) => {
+    const { name, rxRate: rowRxRate, txRate: rowTxRate } = row
     if (!name) {
       return acc
     }
     acc[name] = {
-      rx: formatRate(Number(rx) || 0),
-      tx: formatRate(Number(tx) || 0)
+      rx: rowRxRate,
+      tx: rowTxRate
     }
     return acc
   }, {})
@@ -283,6 +357,20 @@ export function parseSystemMetrics(raw: string): SystemMetrics {
     const [diskPath, usage] = line.split('|')
     return { path: diskPath, usage }
   })
+  const fileSystemRows = readBlock('__FILESYSTEMS_START__', '__FILESYSTEMS_END__').map((line) => {
+    const [name, size, used, usagePercent, available, mountPoint] = line.split('|')
+    return { name, size, used, usagePercent, available, mountPoint }
+  })
+  const cpuInfoRows = readBlock('__CPUINFO_START__', '__CPUINFO_END__').map((line) => {
+    const [model, cores, frequencyMHz, cache, bogomips] = line.split('|')
+    return {
+      model,
+      cores: Number(cores) || 0,
+      frequencyMHz,
+      cache,
+      bogomips
+    }
+  }).filter((row) => row.model)
   const transientCollectorCommands = new Set(['ps', 'awk', 'bash', 'sleep', 'sh'])
   const groupedProcesses = new Map<string, {
     memoryMb: number
@@ -325,15 +413,46 @@ export function parseSystemMetrics(raw: string): SystemMetrics {
     ip: readLine('__IP__'),
     uptime: readLine('__UPTIME__') || '-',
     load: readLine('__LOAD__') || '-',
+    identity: {
+      osName: readLine('__OS__') || '-',
+      kernelName: readLine('__KERNEL_NAME__') || '-',
+      kernelVersion: readLine('__KERNEL_VERSION__') || '-',
+      architecture: readLine('__ARCH__') || '-',
+      hostname: readLine('__HOSTNAME__') || '-'
+    },
     cpuPercent: Number(readLine('__CPU__')) || 0,
+    cpuUsage: {
+      user: Number(cpuUser) || 0,
+      system: Number(cpuSystem) || 0,
+      nice: Number(cpuNice) || 0,
+      idle: Number(cpuIdle) || 0,
+      ioWait: Number(cpuIoWait) || 0,
+      irq: Number(cpuIrq) || 0,
+      softIrq: Number(cpuSoftIrq) || 0,
+      steal: Number(cpuSteal) || 0
+    },
+    cpuInfoRows,
     memoryPercent: Number(memPercent) || 0,
     memoryUsage: memTotal ? `${formatMegabytes(memUsed)}/${formatMegabytes(memTotal)}` : '0/0',
     memoryAppUsage: Number(memApp) > 0 ? formatMegabytes(memApp) : undefined,
     memoryCacheUsage: Number(memCache) > 0 ? formatMegabytes(memCache) : undefined,
     memoryKernelUsage: Number(memKernel) > 0 ? formatMegabytes(memKernel) : undefined,
+    memoryBreakdown: {
+      total: formatMegabytes(memTotal),
+      used: formatMegabytes(memUsed),
+      available: formatMegabytes(Math.max((Number(memTotal) || 0) - (Number(memUsed) || 0), 0)),
+      percent: Number(memPercent) || 0
+    },
     swapPercent: Number(swapPercent) || 0,
     swapUsage: swapTotal ? `${formatMegabytes(swapUsed)}/${formatMegabytes(swapTotal)}` : '0/0',
+    swapBreakdown: {
+      total: formatMegabytes(swapTotal),
+      used: formatMegabytes(swapUsed),
+      available: formatMegabytes(Math.max((Number(swapTotal) || 0) - (Number(swapUsed) || 0), 0)),
+      percent: Number(swapPercent) || 0
+    },
     diskRows,
+    fileSystemRows,
     networkInterfaces: ['all', ...interfaces],
     activeNetworkInterface: 'all',
     networkRates: {
@@ -344,6 +463,7 @@ export function parseSystemMetrics(raw: string): SystemMetrics {
       rx: Number(rxRate) || 0,
       tx: Number(txRate) || 0
     }],
+    networkInterfaceRows,
     networkRatesByInterface: {
       all: {
         rx: formatRate(Number(rxRate) || 0),
@@ -362,7 +482,7 @@ export function parseSystemMetrics(raw: string): SystemMetrics {
   }
 }
 
-function formatMegabytes(value?: string) {
+function formatMegabytes(value?: string | number) {
   const numeric = Number(value) || 0
   if (numeric >= 1024) {
     return `${(numeric / 1024).toFixed(1)}G`
@@ -378,6 +498,22 @@ function formatRate(bytesPerSecond: number) {
     return `${Math.round(bytesPerSecond / 1024)}K`
   }
   return `${bytesPerSecond}B`
+}
+
+function formatNetworkBytes(bytes: number) {
+  if (bytes >= 1024 * 1024 * 1024 * 1024) {
+    return `${(bytes / 1024 / 1024 / 1024 / 1024).toFixed(1)} TB`
+  }
+  if (bytes >= 1024 * 1024 * 1024) {
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 * 1024 ? 0 : 1)} GB`
+  }
+  if (bytes >= 1024 * 1024) {
+    return `${(bytes / 1024 / 1024).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`
+  }
+  if (bytes >= 1024) {
+    return `${Math.round(bytes / 1024)} KB`
+  }
+  return `${bytes} B`
 }
 
 function formatProcessMegabytes(value: number) {
