@@ -1,111 +1,215 @@
-# TermDock
+<a id="readme-top"></a>
 
-TermDock 是一个面向开发者与运维场景的现代化跨平台远程工作台。
+<div align="center">
+  <br />
+  <img alt="TermDock" src="https://readme-typing-svg.demolab.com?font=JetBrains+Mono&weight=800&size=34&duration=2600&pause=900&color=38BDF8&center=true&vCenter=true&width=760&lines=TermDock;SSH+%2B+SFTP+%2B+FTP+Workspace;A+Modern+Remote+Desktop+Workbench" />
+  <br />
+  <br />
 
-产品方向参考 FinalShell 的高效率布局体验，协议能力借鉴 electerm 的成熟经验，但整体以全 TypeScript 技术栈重新设计，优先服务 macOS 和 Windows 桌面端，Linux 桌面同步兼容，移动端先保留在规划中。
+  <p>
+    <strong>一个为开发者和运维场景打造的现代桌面远程工作台。</strong>
+  </p>
+  <p>
+    SSH 终端、SFTP 文件、FTP 文件、多标签工作区和传输任务中心，收束到一个顺手的桌面客户端里。
+  </p>
 
-## 愿景
+  <p>
+    <a href="#中文"><img alt="中文" src="https://img.shields.io/badge/中文-当前语言-111827?style=for-the-badge"></a>
+    <a href="#english"><img alt="English" src="https://img.shields.io/badge/English-Switch-0F172A?style=for-the-badge"></a>
+  </p>
 
-把常见远程操作收敛到一个统一工作区中：
+  <p>
+    <a href="./LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-111827?style=for-the-badge"></a>
+    <img alt="Status" src="https://img.shields.io/badge/status-MVP%20in%20progress-22C55E?style=for-the-badge">
+    <img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-6366F1?style=for-the-badge">
+  </p>
+</div>
 
-- SSH 远程终端
-- SFTP 文件管理
-- FTP 文件管理
-- 多标签并行工作
-- 文件上传下载
-- 连接配置保存
+---
 
-第一版目标不是“支持所有协议”，而是先把最常用、最顺手、最像真正工作台的核心链路打磨出来。
+<a id="中文"></a>
 
-## 产品边界
+## 中文
 
-### 第一版支持
+## 技术栈
 
-- SSH
-- SFTP
-- FTP
-- 标签页
-- 上传下载
-- 连接配置保存
-- 基础文件操作
-- 基础终端操作
+| Desktop | Renderer | Language | Terminal | Protocols | Tooling |
+| --- | --- | --- | --- | --- | --- |
+| <img src="https://img.shields.io/badge/Electron-38-47848F?style=flat-square&logo=electron&logoColor=white" alt="Electron" /> | <img src="https://img.shields.io/badge/React-19-149ECA?style=flat-square&logo=react&logoColor=white" alt="React" /> <img src="https://img.shields.io/badge/Vite-7-646CFF?style=flat-square&logo=vite&logoColor=white" alt="Vite" /> | <img src="https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript" /> | <img src="https://img.shields.io/badge/xterm.js-111827?style=flat-square" alt="xterm.js" /> | <img src="https://img.shields.io/badge/ssh2-0F766E?style=flat-square" alt="ssh2" /> <img src="https://img.shields.io/badge/basic--ftp-2563EB?style=flat-square" alt="basic-ftp" /> | <img src="https://img.shields.io/badge/npm%20workspaces-CB3837?style=flat-square&logo=npm&logoColor=white" alt="npm workspaces" /> |
 
-### 第一版暂不支持
+```txt
+main process  ████████████████████  Electron services, IPC, protocol lifecycle
+preload bridge ████████████████░░░░  Secure API boundary for renderer
+renderer UI   ███████████████████░  React workspace, tabs, files, terminal
+protocols     ███████████████░░░░░  SSH shell, SFTP, FTP adapters
+theme system  ████████████████░░░░  tokens -> vars -> skins -> terminal colors
+```
 
-- Telnet
-- Serial
-- RDP
-- VNC
-- 脚本自动化
-- 云同步
-- AI
-- 手机端正式适配
+## 为什么做 TermDock
 
-## 关键架构判断
+远程工作每天都在发生，但工具常常被割裂成终端、文件管理器、传输窗口和连接配置。TermDock 想做的是一个真正面向日常工作的桌面 remote workspace：
 
-虽然 SFTP 和 FTP 都涉及文件传输，但两者不能在架构上混成同一种会话：
+- 开 SSH 时，终端和 SFTP 文件面板自然联动。
+- 开 FTP 时，界面直接进入 file-only 工作流。
+- 多个连接通过 tabs 并行存在，不互相打断。
+- 上传、下载、进度和错误状态进入统一 transfer system。
+- 连接配置、工作区状态和主题体验都为长期使用而设计。
 
-- SFTP 依附 SSH，属于 SSH 工作流的一部分
-- FTP 是独立协议，不具备 SSH 终端联动关系
+第一版目标不是“支持所有协议”，而是把 `SSH / SFTP / FTP` 这条最高频链路做稳、做顺、做漂亮。
 
-因此 TermDock 从第一天开始就分成两种会话模型：
+## 核心能力
 
-- `SshSession`
-  - `shell`
-  - `sftp`
-- `FtpSession`
-  - `ftpClient`
+| 能力 | 状态 | 说明 |
+| --- | --- | --- |
+| SSH profile 管理 | 进行中 | 新增、编辑、删除、文件持久化 |
+| FTP profile 管理 | 进行中 | 独立于 SSH 的连接模型 |
+| SSH shell | 进行中 | xterm.js 渲染、输入、输出、resize |
+| SFTP 文件管理 | 进行中 | 远程目录浏览、读取、写回 |
+| FTP 文件管理 | 进行中 | FTP 会话与远程文件能力 |
+| Transfer center | 进行中 | 上传下载任务队列与进度状态 |
+| Workspace tabs | 进行中 | 多标签工作区模型 |
+| Theme system | 进行中 | tokens、theme vars、component skins、terminal colors |
 
-对应的 UI 也分为两类：
+## 架构原则
 
-- `SSH/SFTP` 会话：默认打开终端 + 远程文件面板
-- `FTP` 会话：仅打开文件管理，不显示终端
+TermDock 从第一天就避免把远程协议揉成一个模糊的大对象。
 
-这能避免未来在状态管理、布局切换和功能扩展上出现大量扭曲分支。
+```txt
+Renderer UI
+  -> Application State
+    -> Preload API
+      -> IPC
+        -> Desktop Services
+          -> Session Controllers
+            -> Protocol Clients
+```
 
-## 设计原则
+硬性边界：
 
-- 以桌面工作流为核心，而不是网页管理后台思路
-- 保留 FinalShell 的高效率布局，不继承其年代感
-- 借鉴 electerm 的协议覆盖经验，但不沿用其历史结构包袱
-- 所有新代码使用 TypeScript
-- 协议层、状态层、UI 层明确解耦
-- 先把常用路径做顺，再扩协议和高级能力
+- `packages/core` 是领域模型的 single source of truth。
+- Renderer 不直接访问 SSH / SFTP / FTP protocol clients。
+- 所有系统能力必须走 `main -> preload -> renderer`。
+- SSH/SFTP 与 FTP 在 controller/protocol 层保持分离。
+- Transfer 进度统一进入 transfer system，不在组件里零散维护。
 
-## 平台策略
+更完整的说明见 [docs/architecture.md](./docs/architecture.md)。
 
-- `P0`：macOS、Windows
-- `P1`：Linux 桌面
-- `P2`：移动端 companion / 简化客户端
+## 快速开始
 
-## 技术方向
+要求：
 
-- Electron
-- React
-- TypeScript
-- Vite
-- xterm.js
-- ssh2
-- basic-ftp
-- SQLite
+- Node.js >= 20
+- npm
 
-详细架构见：
+```bash
+npm install
+npm run dev
+```
 
-- [架构文档](./docs/architecture.md)
-- [路线图](./docs/roadmap.md)
+常用命令：
 
-## 当前状态
+```bash
+npm run dev
+npm run typecheck
+npm run build
+```
 
-当前仓库已经进入第一轮脚手架阶段，仓库内已放入：
+## 仓库结构
 
-- 根级 workspace 结构
-- `apps/desktop` Electron + React + Vite + TypeScript 骨架
-- `packages/core`、`packages/shared`、`packages/storage` 占位包
-- 初版桌面工作台布局页面
+```txt
+termdock/
+  apps/
+    desktop/                 # Electron + React desktop app
+      src/
+        main/                # main process, IPC, services
+        preload/             # secure renderer API
+        renderer/            # React workspace UI
+  packages/
+    core/                    # domain types
+    storage/                 # repository abstractions
+    shared/                  # shared constants and utilities
+  docs/
+    architecture.md          # architecture map
+    roadmap.md               # product roadmap
+    plans/                   # active and completed execution plans
+    decisions/               # architecture decisions
+    quality/                 # quality and release checks
+  AGENTS.md                  # short map for human/AI collaborators
+```
 
-接下来将继续进入：
+## 路线图
 
-1. 连接管理与标签状态落地
-2. SSH/SFTP 会话抽象实现
-3. FTP 独立会话实现
-4. 传输任务中心接入
+当前重点：
+
+1. 稳住 `SSH / SFTP / FTP` MVP 主链路。
+2. 拆分 `ipc.ts`、`workspace-service.ts`、`session-controllers.ts`、`App.tsx`。
+3. 把领域类型继续收敛到 `packages/core`。
+4. 完善 transfer center、错误提示、主题和桌面体验。
+5. 准备 macOS / Windows 可分发版本。
+
+完整计划见 [docs/roadmap.md](./docs/roadmap.md)。
+
+## 协作方式
+
+这个仓库把代码库本身当作记录系统：
+
+- `AGENTS.md` 是入口地图，不是百科全书。
+- 稳定架构事实写入 `docs/architecture.md`。
+- 跨层任务写入 `docs/plans/active/`。
+- 已确认的架构选择写入 `docs/decisions/`。
+- `.agents/extensions/` 用于功能草案和扩展设计。
+
+如果你要贡献一个较大的功能，建议先补一份 active plan，再开始改代码。
+
+## 贡献者
+
+感谢每一位让 TermDock 变得更好的贡献者。
+
+<p align="center">
+  <a href="https://github.com/St0ff3l/termdock/graphs/contributors">
+    <img alt="Contributors" src="https://contrib.rocks/image?repo=St0ff3l/termdock" />
+  </a>
+</p>
+
+<a id="english"></a>
+
+---
+
+## English
+
+<p>
+  <a href="#中文"><img alt="中文" src="https://img.shields.io/badge/中文-Switch-111827?style=for-the-badge"></a>
+  <a href="#english"><img alt="English" src="https://img.shields.io/badge/English-Current-0F172A?style=for-the-badge"></a>
+</p>
+
+TermDock is a modern desktop remote workspace for developers and operations teams. It brings SSH terminals, SFTP files, FTP files, workspace tabs, and transfer tasks into one focused desktop client.
+
+### Highlights
+
+- SSH sessions with terminal and SFTP file panels.
+- FTP sessions with a clean file-only workflow.
+- Workspace tabs for parallel remote work.
+- Unified transfer center for uploads, downloads, progress, and errors.
+- A layered Electron architecture: `main -> preload -> renderer`.
+- MIT licensed and open for collaboration.
+
+### Quick Start
+
+```bash
+npm install
+npm run dev
+```
+
+### Docs
+
+- [Architecture](./docs/architecture.md)
+- [Roadmap](./docs/roadmap.md)
+- [Agent Guide](./AGENTS.md)
+
+<p align="right">
+  <a href="#readme-top">Back to top</a>
+</p>
+
+## 开源协议
+
+TermDock 使用 [MIT License](./LICENSE) 开源。

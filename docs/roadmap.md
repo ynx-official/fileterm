@@ -144,10 +144,11 @@
 
 ## 近期待办
 
-下一步建议直接开始以下任务：
+当前仓库已经完成基础初始化，下一步建议围绕“核心链路稳定 + 结构边界整理”推进：
 
-1. 初始化 workspace
-2. 创建 `apps/desktop`
-3. 创建 `packages/core`、`packages/shared`、`packages/storage`
-4. 搭建 Electron + Vite + React + TS 基础运行链路
-5. 先实现主窗口、连接侧栏、标签栏、工作区骨架
+1. 拆分 `apps/desktop/src/main/ipc.ts`，按领域建立 IPC 模块。
+2. 拆分 `workspace-service.ts` 中的 tabs、sessions、transfers 职责。
+3. 拆分 `session-controllers.ts`，让 SSH/SFTP 与 FTP controller 独立演进。
+4. 拆分 `renderer/App.tsx`，把连接管理、文件面板、传输面板、顶部标签沉到 feature 组件。
+5. 继续收敛 `packages/core` 中的共享领域类型。
+6. 稳定主题系统，让 token、theme vars、组件皮肤和终端配色保持一致。
