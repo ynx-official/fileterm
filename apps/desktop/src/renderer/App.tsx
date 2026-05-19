@@ -13,6 +13,7 @@ import type {
 } from '@termdock/core'
 import { defaultForm, emptyState, localPreviewFiles, previewLocalPath, previewState, profileToForm } from './app/app-data'
 import { homeTabKey, isActiveTransfer, reorderTabKeys, sessionTabKey, withParentRow } from './app/app-utils'
+import { CommandEditorModal, emptyCommandForm, toCommandTemplateInput } from './features/commands/CommandEditorModal'
 import { CommandManagerModal } from './features/commands/CommandManagerModal'
 import { ConnectionManagerModal } from './features/connections/ConnectionManagerModal'
 import { ConnectionModal } from './features/connections/ConnectionModal'
@@ -36,8 +37,11 @@ export function App() {
   const isConnectionManagerWindow = windowMode === 'connection-manager'
   const isCommandManagerWindow = windowMode === 'command-manager'
   const isConnectionFormWindow = windowMode === 'connection-form'
+  const isCommandFormWindow = windowMode === 'command-form'
   const formWindowMode = (searchParams.get('mode') as ConnectionFormMode | null) ?? 'create'
   const formWindowProfileId = searchParams.get('profileId')
+  const formWindowCommandId = searchParams.get('commandId')
+  const formWindowFolderId = searchParams.get('folderId')
 
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(emptyState)
   const [error, setError] = useState<string | null>(null)
@@ -115,7 +119,7 @@ export function App() {
       applySnapshot(snapshot)
     })
 
-    if (!isConnectionManagerWindow && !isConnectionFormWindow && !isCommandManagerWindow) {
+    if (!isConnectionManagerWindow && !isConnectionFormWindow && !isCommandManagerWindow && !isCommandFormWindow) {
       desktopApi
         .listLocalDirectory()
         .then(({ path, items }) => {
@@ -128,7 +132,7 @@ export function App() {
     return () => {
       offSnapshot()
     }
-  }, [desktopApi, isCommandManagerWindow, isConnectionFormWindow, isConnectionManagerWindow])
+  }, [desktopApi, isCommandFormWindow, isCommandManagerWindow, isConnectionFormWindow, isConnectionManagerWindow])
 
   useEffect(() => {
     if (!isConnectionFormWindow) {
@@ -327,6 +331,9 @@ export function App() {
         ? await desktopApi.updateCommandTemplate(commandId, input)
         : await desktopApi.createCommandTemplate(input)
       applySnapshot(snapshot)
+      if (isCommandFormWindow) {
+        closeCurrentWindow()
+      }
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -1090,6 +1097,30 @@ export function App() {
         }}
         onDeleteCommand={(commandId) => {
           void deleteCommandTemplate(commandId)
+        }}
+      />
+    )
+  }
+
+  if (isCommandFormWindow) {
+    const editingCommand = formWindowMode === 'edit'
+      ? workspace.commandTemplates.find((item) => item.id === formWindowCommandId) ?? null
+      : null
+
+    return (
+      <CommandEditorModal
+        folders={workspace.commandFolders || []}
+        initialValue={editingCommand
+          ? toCommandTemplateInput(editingCommand)
+          : {
+              ...emptyCommandForm,
+              parentId: formWindowFolderId || undefined
+            }}
+        mode={editingCommand ? 'edit' : formWindowMode}
+        standalone
+        onClose={closeCurrentWindow}
+        onSubmit={(input) => {
+          void saveCommandTemplate(editingCommand?.id ?? null, input)
         }}
       />
     )

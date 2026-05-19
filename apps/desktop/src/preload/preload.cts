@@ -24,6 +24,8 @@ const api: TermdockDesktopApi = {
     ipcRenderer.invoke('app:openCommandManagerWindow'),
   openConnectionFormWindow: (mode: ConnectionFormMode, profileId?: string): Promise<void> =>
     ipcRenderer.invoke('app:openConnectionFormWindow', mode, profileId),
+  openCommandFormWindow: (mode: ConnectionFormMode, commandId?: string, folderId?: string): Promise<void> =>
+    ipcRenderer.invoke('app:openCommandFormWindow', mode, commandId, folderId),
   closeCurrentWindow: (): Promise<void> =>
     ipcRenderer.invoke('app:closeCurrentWindow'),
   getSnapshot: (): Promise<WorkspaceSnapshot> => ipcRenderer.invoke('workspace:getSnapshot'),

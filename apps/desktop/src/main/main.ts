@@ -9,6 +9,7 @@ let mainWindow: BrowserWindow | null = null
 let connectionManagerWindow: BrowserWindow | null = null
 let connectionFormWindow: BrowserWindow | null = null
 let commandManagerWindow: BrowserWindow | null = null
+let commandFormWindow: BrowserWindow | null = null
 
 const isMac = process.platform === 'darwin'
 
@@ -89,7 +90,7 @@ function createNativeChildWindow(options: {
     autoHideMenuBar: true,
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
-    minimizable: true,
+    minimizable: false,
     vibrancy: isMac ? 'sidebar' : undefined,
     visualEffectState: isMac ? 'active' : undefined,
     webPreferences: {
@@ -188,12 +189,45 @@ function openConnectionFormWindow(parent: BrowserWindow, mode: 'create' | 'edit'
   })
 }
 
+function openCommandFormWindow(parent: BrowserWindow, mode: 'create' | 'edit', commandId?: string, folderId?: string) {
+  void parent
+  if (commandFormWindow && !commandFormWindow.isDestroyed()) {
+    commandFormWindow.close()
+  }
+
+  const win = createNativeChildWindow({
+    title: mode === 'edit' ? '编辑命令' : '新建命令',
+    width: 960,
+    height: 760,
+    minWidth: 760,
+    minHeight: 620
+  })
+
+  commandFormWindow = win
+  win.once('ready-to-show', () => {
+    win.show()
+  })
+  win.on('closed', () => {
+    if (commandFormWindow === win) {
+      commandFormWindow = null
+    }
+  })
+
+  loadAppWindow(win, {
+    window: 'command-form',
+    mode,
+    ...(commandId ? { commandId } : {}),
+    ...(folderId ? { folderId } : {})
+  })
+}
+
 app.whenReady().then(() => {
   registerIpcHandlers(app.getPath('userData'), {
     getMainWindow: () => mainWindow,
     openConnectionManagerWindow,
     openCommandManagerWindow,
-    openConnectionFormWindow
+    openConnectionFormWindow,
+    openCommandFormWindow
   })
   createMainWindow()
 

@@ -24,6 +24,13 @@ export function registerAppHandlers(options: IpcWindowOptions) {
     }
   })
 
+  ipcMain.handle('app:openCommandFormWindow', (event, mode: ConnectionFormMode, commandId?: string, folderId?: string) => {
+    const senderWindow = BrowserWindow.fromWebContents(event.sender) ?? options.getMainWindow()
+    if (senderWindow) {
+      options.openCommandFormWindow(senderWindow, mode, commandId, folderId)
+    }
+  })
+
   ipcMain.handle('app:closeCurrentWindow', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close()
   })

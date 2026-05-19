@@ -698,19 +698,32 @@
 }
 
 .command-dialog {
-  width: min(760px, calc(100vw - 80px));
+  width: min(700px, calc(100vw - 64px));
   overflow: hidden;
   border: 1px solid var(--border-light);
-  border-radius: 22px;
+  border-radius: 18px;
   background: var(--bg-card);
   box-shadow: var(--shadow-lg);
   display: grid;
-  grid-template-rows: 70px minmax(0, 1fr);
+  grid-template-rows: 58px minmax(0, 1fr);
 }
 
 .command-editor-page {
-  width: min(1120px, calc(100vw - 96px));
-  max-height: calc(100vh - 72px);
+  width: min(920px, calc(100vw - 48px));
+  max-height: calc(100vh - 24px);
+}
+
+.command-editor-page.standalone {
+  width: 100%;
+  max-width: none;
+  max-height: calc(100vh - 24px);
+}
+
+.command-editor-window {
+  min-height: 100vh;
+  padding: 12px;
+  display: flex;
+  align-items: stretch;
 }
 
 .command-dialog-titlebar {
@@ -718,12 +731,14 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 70px;
+  height: 58px;
   border-bottom: 1px solid var(--border-light);
+  -webkit-app-region: drag;
 }
 
 .command-dialog-titlebar strong {
-  font-size: 18px;
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .command-dialog-lights {
@@ -731,11 +746,12 @@
   left: 18px;
   display: flex;
   gap: 10px;
+  -webkit-app-region: no-drag;
 }
 
 .command-dialog-lights span {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border-radius: 999px;
   border: 1px solid rgba(0, 0, 0, 0.15);
 }
@@ -753,22 +769,23 @@
 }
 
 .command-dialog-body {
-  padding: 22px 24px 24px;
+  padding: 16px 18px 18px;
   min-height: 0;
   overflow-y: auto;
+  -webkit-app-region: no-drag;
 }
 
 .command-editor-dialog-form,
 .command-folder-dialog-form {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
 .command-editor-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px 20px;
+  gap: 14px 16px;
 }
 
 .command-editor-field {
@@ -784,7 +801,7 @@
 
 .command-editor-dialog-form label,
 .command-folder-dialog-form label {
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -797,62 +814,69 @@
   border-radius: var(--radius-sm);
   background: var(--bg-main);
   color: var(--text-main);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .command-editor-dialog-form input,
 .command-editor-dialog-form select,
 .command-folder-dialog-form input {
-  height: 38px;
-  padding: 0 12px;
+  height: 34px;
+  padding: 0 10px;
 }
 
 .command-editor-dialog-textarea textarea {
-  min-height: 320px;
-  padding: 12px;
+  min-height: 240px;
+  padding: 10px;
   resize: vertical;
   font-family: "SF Mono", Menlo, Consolas, monospace;
+  line-height: 1.55;
 }
 
 .command-editor-dialog-params {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .command-editor-dialog-params > span {
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
 }
 
 .command-editor-dialog-params > small {
   color: var(--text-muted);
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.5;
+}
+
+.command-editor-dialog-params .command-param-hints button {
+  height: 26px;
+  padding: 0 10px;
+  font-size: 11px;
 }
 
 .command-editor-checkbox-row {
   flex-direction: row;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .command-editor-checkbox-row input {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
 }
 
 .command-editor-checkbox-row span {
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
 }
 
 .command-dialog-actions {
   display: flex;
   justify-content: flex-end;
-  gap: 14px;
-  padding-top: 6px;
+  gap: 10px;
+  padding-top: 4px;
 }
 
 .command-preview span {
@@ -911,6 +935,21 @@
 
 .command-manager-modal .modal-header {
   margin-bottom: 12px;
+}
+
+.command-manager-modal.standalone .modal-header {
+  -webkit-app-region: drag;
+}
+
+.command-manager-modal.standalone .modal-header button,
+.command-manager-modal.standalone .manager-toolbar,
+.command-manager-modal.standalone .command-manager-panel-grid,
+.command-manager-modal.standalone input,
+.command-manager-modal.standalone select,
+.command-manager-modal.standalone textarea,
+.command-manager-modal.standalone button,
+.command-manager-modal.standalone table {
+  -webkit-app-region: no-drag;
 }
 
 .command-manager-modal .modal-header h2,

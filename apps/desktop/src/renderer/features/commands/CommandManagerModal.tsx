@@ -1,151 +1,10 @@
-import { useMemo, useState, type DragEvent, type ReactNode } from 'react'
+import { useMemo, useState, type DragEvent } from 'react'
 import type { CommandFolder, CommandTemplate, CommandTemplateInput } from '@termdock/core'
 import { t } from '../../i18n'
-import { extractCommandParams, sortByOrder } from './command-utils'
-
-const emptyCommandForm: CommandTemplateInput = {
-  name: '',
-  command: '',
-  description: '',
-  parentId: undefined,
-  appendCarriageReturn: true
-}
+import { sortByOrder } from './command-utils'
+import { CommandEditorModal, emptyCommandForm, toCommandTemplateInput } from './CommandEditorModal'
 
 type FolderNode = CommandFolder & { children: FolderNode[] }
-
-function CommandDialogShell({
-  title,
-  onClose,
-  children
-}: {
-  title: string
-  onClose(): void
-  children: ReactNode
-}) {
-  return (
-    <div className="modal-backdrop command-dialog-backdrop" onClick={onClose}>
-      <div className="command-dialog command-editor-page" onClick={(event) => event.stopPropagation()}>
-        <div className="command-dialog-titlebar">
-          <div className="command-dialog-lights" aria-hidden="true">
-            <span className="is-red" />
-            <span className="is-muted" />
-            <span className="is-green" />
-          </div>
-          <strong>{title}</strong>
-        </div>
-        <div className="command-dialog-body">
-          {children}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function CommandEditorPage({
-  folders,
-  initialValue,
-  onClose,
-  onSubmit
-}: {
-  folders: CommandFolder[]
-  initialValue: CommandTemplateInput
-  onClose(): void
-  onSubmit(input: CommandTemplateInput): void
-}) {
-  const [form, setForm] = useState<CommandTemplateInput>(initialValue)
-
-  return (
-    <CommandDialogShell title={initialValue.name ? `${t.commandEdit}-${initialValue.name}` : t.commandCreate} onClose={onClose}>
-      <div className="command-editor-dialog-form">
-        <div className="command-editor-grid">
-          <label className="command-editor-field full">
-            <span>{t.name}</span>
-            <input
-              type="text"
-              value={form.name}
-              onChange={(event) => setForm((prev) => ({ ...prev, name: event.currentTarget.value }))}
-            />
-          </label>
-          <label className="command-editor-field">
-            <span>{t.commandCategory}</span>
-            <select
-              value={form.parentId ?? ''}
-              onChange={(event) => setForm((prev) => ({ ...prev, parentId: event.currentTarget.value || undefined }))}
-            >
-              <option value="">{t.commandUncategorized}</option>
-              {folders.map((folder) => (
-                <option key={folder.id} value={folder.id}>{folder.name}</option>
-              ))}
-            </select>
-          </label>
-          <label className="command-editor-field">
-            <span>{t.note}</span>
-            <input
-              type="text"
-              value={form.description ?? ''}
-              onChange={(event) => setForm((prev) => ({ ...prev, description: event.currentTarget.value }))}
-            />
-          </label>
-          <label className="command-editor-field full command-editor-dialog-textarea">
-            <span>{t.commandTemplate}</span>
-            <textarea
-              rows={12}
-              value={form.command}
-              onChange={(event) => setForm((prev) => ({ ...prev, command: event.currentTarget.value }))}
-            />
-          </label>
-          <div className="command-editor-field full command-editor-dialog-params">
-            <span>{t.commandParamHint}</span>
-            <div className="command-param-hints">
-              {[1, 2, 3, 4, 5].map((index) => (
-                <button
-                  key={index}
-                  type="button"
-                  onClick={() => setForm((prev) => ({ ...prev, command: `${prev.command}[p#${index}]` }))}
-                >
-                  {`${t.commandParam}${index}`}
-                </button>
-              ))}
-            </div>
-            <small>{t.commandParamExplain}</small>
-          </div>
-          <label className="command-editor-field full command-editor-checkbox-row">
-            <input
-              checked={form.appendCarriageReturn ?? true}
-              type="checkbox"
-              onChange={(event) => setForm((prev) => ({ ...prev, appendCarriageReturn: event.currentTarget.checked }))}
-            />
-            <span>{t.commandAppendCr}</span>
-          </label>
-          <div className="command-editor-field full command-preview">
-            <span>{t.commandDetectedParams}</span>
-            <code>{extractCommandParams(form.command).join(', ') || '-'}</code>
-          </div>
-        </div>
-        <div className="command-dialog-actions">
-          <button
-            className="flat-button compact"
-            type="button"
-            onClick={() => {
-              if (!form.name?.trim() || !form.command?.trim()) {
-                return
-              }
-              onSubmit({
-                ...form,
-                name: form.name.trim(),
-                command: form.command.trim(),
-                description: form.description?.trim() || undefined
-              })
-            }}
-          >
-            {t.save}
-          </button>
-          <button className="flat-button compact" type="button" onClick={onClose}>{t.cancel}</button>
-        </div>
-      </div>
-    </CommandDialogShell>
-  )
-}
 
 export function CommandManagerModal({
   commandFolders,
@@ -238,20 +97,12 @@ export function CommandManagerModal({
     })
   }
 
+  const desktopApi = window.termdock
+
   const editorInitialValue = editorState?.mode === 'edit'
     ? (() => {
         const command = commandTemplates.find((item) => item.id === editorState.commandId)
-        if (!command) {
-          return emptyCommandForm
-        }
-        return {
-          name: command.name,
-          command: command.command,
-          description: command.description ?? '',
-          parentId: command.parentId,
-          order: command.order,
-          appendCarriageReturn: command.appendCarriageReturn
-        }
+        return command ? toCommandTemplateInput(command) : emptyCommandForm
       })()
     : {
         ...emptyCommandForm,
@@ -433,6 +284,16 @@ export function CommandManagerModal({
     )
   }
 
+  const openEditorWindow = (mode: 'create' | 'edit', commandId?: string) => {
+    if (!desktopApi) {
+      setEditorState({ mode, commandId })
+      return
+    }
+
+    const folderId = selectedFolderId === 'all' || selectedFolderId === 'ungrouped' ? undefined : selectedFolderId
+    void desktopApi.openCommandFormWindow(mode, commandId, folderId)
+  }
+
   const shell = (
     <div className={`modal-card manager-modal command-manager-modal ${standalone ? 'standalone' : ''}`}>
       <div className="modal-header">
@@ -440,7 +301,7 @@ export function CommandManagerModal({
         {!standalone ? <button className="icon-button" onClick={onClose} type="button">×</button> : null}
       </div>
       <div className="manager-toolbar">
-        <button className="flat-button" type="button" onClick={() => setEditorState({ mode: 'create' })}>{t.newCommand}</button>
+        <button className="flat-button" type="button" onClick={() => openEditorWindow('create')}>{t.newCommand}</button>
       </div>
       <div className="command-manager-panel-grid">
         <section className="command-manager-panel">
@@ -535,7 +396,7 @@ export function CommandManagerModal({
                         onClick={(event) => {
                           event.stopPropagation()
                           setSelectedCommandId(item.id)
-                          setEditorState({ mode: 'edit', commandId: item.id })
+                          openEditorWindow('edit', item.id)
                         }}
                       >
                         {t.edit}
@@ -566,8 +427,9 @@ export function CommandManagerModal({
     <>
       {standalone ? <div className="modal-shell standalone-shell">{shell}</div> : <div className="modal-shell">{shell}</div>}
       {editorState ? (
-        <CommandEditorPage
+        <CommandEditorModal
           folders={folders}
+          mode={editorState.mode}
           initialValue={editorInitialValue}
           onClose={() => setEditorState(null)}
           onSubmit={(input) => {

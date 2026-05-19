@@ -255,7 +255,7 @@ export interface CommandTemplateInput {
 
 export type ConnectionFormMode = 'create' | 'edit'
 
-export type AppWindowMode = 'main' | 'connection-manager' | 'connection-form' | 'command-manager'
+export type AppWindowMode = 'main' | 'connection-manager' | 'connection-form' | 'command-manager' | 'command-form'
 
 export interface CommandExecutionResult {
   renderedCommand: string
@@ -284,6 +284,7 @@ export interface TermdockDesktopApi {
   openConnectionManagerWindow(): Promise<void>
   openCommandManagerWindow(): Promise<void>
   openConnectionFormWindow(mode: ConnectionFormMode, profileId?: string): Promise<void>
+  openCommandFormWindow(mode: ConnectionFormMode, commandId?: string, folderId?: string): Promise<void>
   closeCurrentWindow(): Promise<void>
   getSnapshot(): Promise<WorkspaceSnapshot>
   createFolder(name: string, parentId?: string): Promise<WorkspaceSnapshot>

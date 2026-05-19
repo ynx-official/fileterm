@@ -26,6 +26,11 @@
   padding: 12px;
 }
 
+.connection-form-window,
+.manager-window {
+  background: transparent;
+}
+
 .modal-card.ssh-modal.standalone {
   width: 100%;
   min-height: calc(100vh - 24px);
@@ -41,6 +46,33 @@
   font-weight: 600;
   font-size: 15px;
   margin-bottom: 16px;
+}
+
+.modal-card.manager-modal.standalone .modal-header,
+.modal-card.ssh-modal.standalone .modal-header {
+  -webkit-app-region: drag;
+}
+
+.modal-card.manager-modal.standalone .modal-header button,
+.modal-card.ssh-modal.standalone .modal-header button,
+.modal-card.manager-modal.standalone .manager-toolbar,
+.modal-card.manager-modal.standalone .manager-table,
+.modal-card.manager-modal.standalone .manager-body,
+.modal-card.manager-modal.standalone .manager-row,
+.modal-card.manager-modal.standalone .manager-actions,
+.modal-card.ssh-modal.standalone .ssh-modal-body,
+.modal-card.ssh-modal.standalone .ssh-form-shell,
+.modal-card.ssh-modal.standalone .ssh-form-page,
+.modal-card.ssh-modal.standalone .ssh-modal-nav,
+.modal-card.ssh-modal.standalone input,
+.modal-card.ssh-modal.standalone select,
+.modal-card.ssh-modal.standalone textarea,
+.modal-card.ssh-modal.standalone button,
+.modal-card.manager-modal.standalone input,
+.modal-card.manager-modal.standalone select,
+.modal-card.manager-modal.standalone textarea,
+.modal-card.manager-modal.standalone button {
+  -webkit-app-region: no-drag;
 }
 
 .ssh-modal-body {
