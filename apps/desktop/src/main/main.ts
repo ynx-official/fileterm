@@ -8,6 +8,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 let mainWindow: BrowserWindow | null = null
 let connectionManagerWindow: BrowserWindow | null = null
 let connectionFormWindow: BrowserWindow | null = null
+let commandManagerWindow: BrowserWindow | null = null
+let commandFormWindow: BrowserWindow | null = null
 
 const isMac = process.platform === 'darwin'
 
@@ -33,8 +35,8 @@ function createMainWindow() {
     minWidth: 1040,
     minHeight: 680,
     title: 'TermDock',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 20, y: 18 },
+    titleBarStyle: isMac ? 'hiddenInset' : 'default',
+    trafficLightPosition: isMac ? { x: 20, y: 18 } : undefined,
     backgroundColor: '#151515',
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.cjs'),
@@ -69,6 +71,37 @@ function createMainWindow() {
   return win
 }
 
+function createNativeChildWindow(options: {
+  title: string
+  width: number
+  height: number
+  minWidth: number
+  minHeight: number
+  backgroundColor?: string
+}) {
+  return new BrowserWindow({
+    width: options.width,
+    height: options.height,
+    minWidth: options.minWidth,
+    minHeight: options.minHeight,
+    show: false,
+    title: options.title,
+    backgroundColor: options.backgroundColor ?? '#1b1b1b',
+    autoHideMenuBar: true,
+    titleBarStyle: isMac ? 'hiddenInset' : 'default',
+    trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
+    minimizable: false,
+    vibrancy: isMac ? 'sidebar' : undefined,
+    visualEffectState: isMac ? 'active' : undefined,
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  })
+}
+
 function openConnectionManagerWindow(parent: BrowserWindow) {
   void parent
   if (connectionManagerWindow && !connectionManagerWindow.isDestroyed()) {
@@ -76,24 +109,12 @@ function openConnectionManagerWindow(parent: BrowserWindow) {
     return
   }
 
-  const win = new BrowserWindow({
+  const win = createNativeChildWindow({
+    title: '连接管理器',
     width: 980,
     height: 680,
     minWidth: 760,
-    minHeight: 520,
-    show: false,
-    title: '连接管理器',
-    backgroundColor: '#1b1b1b',
-    autoHideMenuBar: true,
-    titleBarStyle: isMac ? 'hiddenInset' : 'default',
-    trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
-    minimizable: false,
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    }
+    minHeight: 520
   })
 
   connectionManagerWindow = win
@@ -109,30 +130,46 @@ function openConnectionManagerWindow(parent: BrowserWindow) {
   loadAppWindow(win, { window: 'connection-manager' })
 }
 
+function openCommandManagerWindow(parent: BrowserWindow) {
+  void parent
+  if (commandManagerWindow && !commandManagerWindow.isDestroyed()) {
+    commandManagerWindow.focus()
+    return
+  }
+
+  const win = createNativeChildWindow({
+    title: '命令管理器',
+    width: 1180,
+    height: 760,
+    minWidth: 980,
+    minHeight: 640
+  })
+
+  commandManagerWindow = win
+  win.once('ready-to-show', () => {
+    win.show()
+  })
+  win.on('closed', () => {
+    if (commandManagerWindow === win) {
+      commandManagerWindow = null
+    }
+  })
+
+  loadAppWindow(win, { window: 'command-manager' })
+}
+
 function openConnectionFormWindow(parent: BrowserWindow, mode: 'create' | 'edit', profileId?: string) {
   void parent
   if (connectionFormWindow && !connectionFormWindow.isDestroyed()) {
     connectionFormWindow.close()
   }
 
-  const win = new BrowserWindow({
+  const win = createNativeChildWindow({
+    title: mode === 'edit' ? '编辑连接' : '新建连接',
     width: 920,
     height: 720,
     minWidth: 760,
-    minHeight: 620,
-    show: false,
-    title: mode === 'edit' ? '编辑连接' : '新建连接',
-    backgroundColor: '#1b1b1b',
-    autoHideMenuBar: true,
-    titleBarStyle: isMac ? 'hiddenInset' : 'default',
-    trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
-    minimizable: false,
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
-    }
+    minHeight: 620
   })
 
   connectionFormWindow = win
@@ -152,11 +189,45 @@ function openConnectionFormWindow(parent: BrowserWindow, mode: 'create' | 'edit'
   })
 }
 
+function openCommandFormWindow(parent: BrowserWindow, mode: 'create' | 'edit', commandId?: string, folderId?: string) {
+  void parent
+  if (commandFormWindow && !commandFormWindow.isDestroyed()) {
+    commandFormWindow.close()
+  }
+
+  const win = createNativeChildWindow({
+    title: mode === 'edit' ? '编辑命令' : '新建命令',
+    width: 960,
+    height: 760,
+    minWidth: 760,
+    minHeight: 620
+  })
+
+  commandFormWindow = win
+  win.once('ready-to-show', () => {
+    win.show()
+  })
+  win.on('closed', () => {
+    if (commandFormWindow === win) {
+      commandFormWindow = null
+    }
+  })
+
+  loadAppWindow(win, {
+    window: 'command-form',
+    mode,
+    ...(commandId ? { commandId } : {}),
+    ...(folderId ? { folderId } : {})
+  })
+}
+
 app.whenReady().then(() => {
   registerIpcHandlers(app.getPath('userData'), {
     getMainWindow: () => mainWindow,
     openConnectionManagerWindow,
-    openConnectionFormWindow
+    openCommandManagerWindow,
+    openConnectionFormWindow,
+    openCommandFormWindow
   })
   createMainWindow()
 

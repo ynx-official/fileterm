@@ -1,7 +1,10 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron') as typeof import('electron')
 
 import type {
+  CommandExecutionOptions,
+  CommandTemplateInput,
   ConnectionFormMode,
+  CommandExecutionResult,
   CreateProfileInput,
   DirectorySnapshot,
   LocalFileItem,
@@ -17,8 +20,12 @@ const api: TermdockDesktopApi = {
   isDesktop: true,
   openConnectionManagerWindow: (): Promise<void> =>
     ipcRenderer.invoke('app:openConnectionManagerWindow'),
+  openCommandManagerWindow: (): Promise<void> =>
+    ipcRenderer.invoke('app:openCommandManagerWindow'),
   openConnectionFormWindow: (mode: ConnectionFormMode, profileId?: string): Promise<void> =>
     ipcRenderer.invoke('app:openConnectionFormWindow', mode, profileId),
+  openCommandFormWindow: (mode: ConnectionFormMode, commandId?: string, folderId?: string): Promise<void> =>
+    ipcRenderer.invoke('app:openCommandFormWindow', mode, commandId, folderId),
   closeCurrentWindow: (): Promise<void> =>
     ipcRenderer.invoke('app:closeCurrentWindow'),
   getSnapshot: (): Promise<WorkspaceSnapshot> => ipcRenderer.invoke('workspace:getSnapshot'),
@@ -36,6 +43,22 @@ const api: TermdockDesktopApi = {
     ipcRenderer.invoke('workspace:deleteFolder', folderId),
   updateEntityOrder: (id: string, newParentId: string | undefined, newOrder: number): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('workspace:updateEntityOrder', id, newParentId, newOrder),
+  createCommandFolder: (name: string, parentId?: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:createCommandFolder', name, parentId),
+  updateCommandFolder: (folderId: string, updates: any): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:updateCommandFolder', folderId, updates),
+  deleteCommandFolder: (folderId: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:deleteCommandFolder', folderId),
+  updateCommandOrder: (id: string, newParentId: string | undefined, newOrder: number): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:updateCommandOrder', id, newParentId, newOrder),
+  createCommandTemplate: (input: CommandTemplateInput): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:createCommandTemplate', input),
+  updateCommandTemplate: (commandId: string, input: CommandTemplateInput): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:updateCommandTemplate', commandId, input),
+  deleteCommandTemplate: (commandId: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('workspace:deleteCommandTemplate', commandId),
+  executeCommandTemplate: (tabId: string, commandId: string, args?: string[], options?: CommandExecutionOptions): Promise<CommandExecutionResult> =>
+    ipcRenderer.invoke('workspace:executeCommandTemplate', tabId, commandId, args, options),
   openProfile: (profileId: string): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('workspace:openProfile', profileId),
   openProfileFromManager: (profileId: string): Promise<WorkspaceSnapshot> =>

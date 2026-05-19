@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type FormEvent, type MouseEvent } from 'react'
 import type {
+  CommandExecutionOptions,
+  CommandTemplateInput,
   ConnectionFormMode,
   ConnectionProfile,
   CreateProfileInput,
@@ -11,6 +13,8 @@ import type {
 } from '@termdock/core'
 import { defaultForm, emptyState, localPreviewFiles, previewLocalPath, previewState, profileToForm } from './app/app-data'
 import { homeTabKey, isActiveTransfer, reorderTabKeys, sessionTabKey, withParentRow } from './app/app-utils'
+import { CommandEditorModal, emptyCommandForm, toCommandTemplateInput } from './features/commands/CommandEditorModal'
+import { CommandManagerModal } from './features/commands/CommandManagerModal'
 import { ConnectionManagerModal } from './features/connections/ConnectionManagerModal'
 import { ConnectionModal } from './features/connections/ConnectionModal'
 import { FileEditorModal } from './features/files/FileEditorModal'
@@ -31,9 +35,13 @@ export function App() {
   const searchParams = new URLSearchParams(window.location.search)
   const windowMode = searchParams.get('window') ?? 'main'
   const isConnectionManagerWindow = windowMode === 'connection-manager'
+  const isCommandManagerWindow = windowMode === 'command-manager'
   const isConnectionFormWindow = windowMode === 'connection-form'
+  const isCommandFormWindow = windowMode === 'command-form'
   const formWindowMode = (searchParams.get('mode') as ConnectionFormMode | null) ?? 'create'
   const formWindowProfileId = searchParams.get('profileId')
+  const formWindowCommandId = searchParams.get('commandId')
+  const formWindowFolderId = searchParams.get('folderId')
 
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(emptyState)
   const [error, setError] = useState<string | null>(null)
@@ -41,6 +49,7 @@ export function App() {
   const [isBusy, setIsBusy] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [showConnectionManager, setShowConnectionManager] = useState(false)
+  const [showCommandManager, setShowCommandManager] = useState(false)
   const [form, setForm] = useState<CreateProfileInput>(defaultForm)
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
   const [localPath, setLocalPath] = useState(previewLocalPath)
@@ -110,7 +119,7 @@ export function App() {
       applySnapshot(snapshot)
     })
 
-    if (!isConnectionManagerWindow && !isConnectionFormWindow) {
+    if (!isConnectionManagerWindow && !isConnectionFormWindow && !isCommandManagerWindow && !isCommandFormWindow) {
       desktopApi
         .listLocalDirectory()
         .then(({ path, items }) => {
@@ -123,7 +132,7 @@ export function App() {
     return () => {
       offSnapshot()
     }
-  }, [desktopApi, isConnectionFormWindow, isConnectionManagerWindow])
+  }, [desktopApi, isCommandFormWindow, isCommandManagerWindow, isConnectionFormWindow, isConnectionManagerWindow])
 
   useEffect(() => {
     if (!isConnectionFormWindow) {
@@ -267,13 +276,8 @@ export function App() {
   const handleSaveProfile = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
-    if (!form.name || !form.host || !form.username || !form.group || !form.remotePath || !Number(form.port)) {
+    if (!form.name || !form.host || !form.group || !form.remotePath || !Number(form.port)) {
       setFormError(t.fillRequired)
-      return
-    }
-
-    if (form.type === 'ssh' && form.authType === 'password' && !form.password) {
-      setFormError(t.missingSshPassword)
       return
     }
 
@@ -303,6 +307,143 @@ export function App() {
       setForm(defaultForm)
     } catch (err) {
       setFormError((err as Error).message)
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const openCommandManager = () => {
+    if (desktopApi) {
+      void desktopApi.openCommandManagerWindow()
+      return
+    }
+    setShowCommandManager(true)
+  }
+
+  const saveCommandTemplate = async (commandId: string | null, input: CommandTemplateInput) => {
+    if (!desktopApi) {
+      return
+    }
+
+    try {
+      setIsBusy(true)
+      const snapshot = commandId
+        ? await desktopApi.updateCommandTemplate(commandId, input)
+        : await desktopApi.createCommandTemplate(input)
+      applySnapshot(snapshot)
+      if (isCommandFormWindow) {
+        closeCurrentWindow()
+      }
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const createCommandFolder = async (name: string) => {
+    if (!desktopApi) {
+      return
+    }
+
+    try {
+      setIsBusy(true)
+      const snapshot = await desktopApi.createCommandFolder(name)
+      applySnapshot(snapshot)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const updateCommandFolder = async (folderId: string, updates: { name?: string; parentId?: string; order?: number }) => {
+    if (!desktopApi) {
+      return
+    }
+
+    try {
+      setIsBusy(true)
+      const snapshot = await desktopApi.updateCommandFolder(folderId, updates)
+      applySnapshot(snapshot)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const updateCommandOrder = async (id: string, parentId: string | undefined, order: number) => {
+    if (!desktopApi) {
+      return
+    }
+
+    try {
+      setIsBusy(true)
+      const snapshot = await desktopApi.updateCommandOrder(id, parentId, order)
+      applySnapshot(snapshot)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const deleteCommandFolder = async (folderId: string) => {
+    if (!desktopApi) {
+      return
+    }
+
+    try {
+      setIsBusy(true)
+      const snapshot = await desktopApi.deleteCommandFolder(folderId)
+      applySnapshot(snapshot)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const deleteCommandTemplate = async (commandId: string) => {
+    if (!desktopApi) {
+      return
+    }
+
+    try {
+      setIsBusy(true)
+      const snapshot = await desktopApi.deleteCommandTemplate(commandId)
+      applySnapshot(snapshot)
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  const executeCommandTemplate = async (
+    commandId: string,
+    args: string[],
+    options: CommandExecutionOptions,
+    scope: 'current' | 'all-ssh'
+  ) => {
+    if (!desktopApi) {
+      return
+    }
+
+    try {
+      setIsBusy(true)
+      const targetTabs = scope === 'all-ssh'
+        ? workspace.tabs.filter((tab) => tab.sessionType === 'ssh' && tab.status !== 'closed')
+        : activeTab && activeTab.sessionType === 'ssh'
+          ? [activeTab]
+          : []
+
+      for (const tab of targetTabs) {
+        await desktopApi.executeCommandTemplate(tab.id, commandId, args, options)
+      }
+    } catch (err) {
+      setError((err as Error).message)
     } finally {
       setIsBusy(false)
     }
@@ -929,6 +1070,62 @@ export function App() {
     )
   }
 
+  if (isCommandManagerWindow) {
+    return (
+      <CommandManagerModal
+        commandFolders={workspace.commandFolders || []}
+        commandTemplates={workspace.commandTemplates || []}
+        standalone
+        onClose={closeCurrentWindow}
+        onCreateFolder={(name) => {
+          void createCommandFolder(name)
+        }}
+        onDeleteFolder={(folderId) => {
+          void deleteCommandFolder(folderId)
+        }}
+        onUpdateFolder={(folderId, updates) => {
+          void updateCommandFolder(folderId, updates)
+        }}
+        onUpdateOrder={(id, parentId, order) => {
+          void updateCommandOrder(id, parentId, order)
+        }}
+        onCreateCommand={(input) => {
+          void saveCommandTemplate(null, input)
+        }}
+        onUpdateCommand={(commandId, input) => {
+          void saveCommandTemplate(commandId, input)
+        }}
+        onDeleteCommand={(commandId) => {
+          void deleteCommandTemplate(commandId)
+        }}
+      />
+    )
+  }
+
+  if (isCommandFormWindow) {
+    const editingCommand = formWindowMode === 'edit'
+      ? workspace.commandTemplates.find((item) => item.id === formWindowCommandId) ?? null
+      : null
+
+    return (
+      <CommandEditorModal
+        folders={workspace.commandFolders || []}
+        initialValue={editingCommand
+          ? toCommandTemplateInput(editingCommand)
+          : {
+              ...emptyCommandForm,
+              parentId: formWindowFolderId || undefined
+            }}
+        mode={editingCommand ? 'edit' : formWindowMode}
+        standalone
+        onClose={closeCurrentWindow}
+        onSubmit={(input) => {
+          void saveCommandTemplate(editingCommand?.id ?? null, input)
+        }}
+      />
+    )
+  }
+
   if (isConnectionFormWindow) {
     return (
       <ConnectionModal
@@ -964,6 +1161,7 @@ export function App() {
             setTabOrder((prev) => reorderTabKeys(prev, draggingTabKey, targetKey))
           }}
           onDragStart={setDraggingTabKey}
+          onOpenCommandManager={openCommandManager}
           onOpenConnectionManager={() => {
             if (desktopApi) {
               void desktopApi.openConnectionManagerWindow()
@@ -1001,9 +1199,17 @@ export function App() {
               activeProfile={activeProfile}
               activeSession={activeSession}
               activeTab={activeTab}
+              tabs={workspace.tabs}
+              commandFolders={workspace.commandFolders || []}
+              commandTemplates={workspace.commandTemplates || []}
               folders={workspace.folders || []}
+              isBusy={isBusy}
               localItems={localItems}
               localPath={localPath}
+              onExecuteCommand={(commandId, args, options, scope) => {
+                void executeCommandTemplate(commandId, args, options, scope)
+              }}
+              onOpenCommandManager={openCommandManager}
               profiles={workspace.profiles}
               onChooseUploadFiles={handleChooseUploadFiles}
               onDownloadFiles={handleDownloadFiles}
@@ -1084,6 +1290,35 @@ export function App() {
           onUpdateOrder={(id, parentId, order) => desktopApi?.updateEntityOrder(id, parentId, order)}
         />
 
+      ) : null}
+
+      {showCommandManager ? (
+        <CommandManagerModal
+          commandFolders={workspace.commandFolders || []}
+          commandTemplates={workspace.commandTemplates || []}
+          onClose={() => setShowCommandManager(false)}
+          onCreateFolder={(name) => {
+            void createCommandFolder(name)
+          }}
+          onDeleteFolder={(folderId) => {
+            void deleteCommandFolder(folderId)
+          }}
+          onUpdateFolder={(folderId, updates) => {
+            void updateCommandFolder(folderId, updates)
+          }}
+          onUpdateOrder={(id, parentId, order) => {
+            void updateCommandOrder(id, parentId, order)
+          }}
+          onCreateCommand={(input) => {
+            void saveCommandTemplate(null, input)
+          }}
+          onUpdateCommand={(commandId, input) => {
+            void saveCommandTemplate(commandId, input)
+          }}
+          onDeleteCommand={(commandId) => {
+            void deleteCommandTemplate(commandId)
+          }}
+        />
       ) : null}
 
       {showForm ? (

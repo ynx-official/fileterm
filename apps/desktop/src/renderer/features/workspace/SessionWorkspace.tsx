@@ -1,13 +1,27 @@
 import { useEffect, useRef, useState, type CSSProperties, type DragEvent } from 'react'
-import type { LocalFileItem, RemoteFileItem, SessionSnapshot, WorkspaceTab } from '@termdock/core'
+import type {
+  CommandExecutionOptions,
+  CommandFolder,
+  CommandTemplate,
+  LocalFileItem,
+  RemoteFileItem,
+  SessionSnapshot,
+  WorkspaceTab
+} from '@termdock/core'
 import { TerminalView } from '../../components/TerminalView'
 import { FileManager } from '../files/FileManager'
 
 export function SessionWorkspace({
   activeTab,
   activeSession,
+  tabs,
   localItems,
   localPath,
+  commandFolders,
+  commandTemplates,
+  isBusy,
+  onExecuteCommand,
+  onOpenCommandManager,
   onOpenLocalItem,
   onOpenLocalPath,
   onOpenRemoteItem,
@@ -20,8 +34,14 @@ export function SessionWorkspace({
 }: {
   activeTab: WorkspaceTab
   activeSession: SessionSnapshot
+  tabs: WorkspaceTab[]
   localItems: LocalFileItem[]
   localPath: string
+  commandFolders: CommandFolder[]
+  commandTemplates: CommandTemplate[]
+  isBusy: boolean
+  onExecuteCommand(commandId: string, args: string[], options: CommandExecutionOptions, scope: 'current' | 'all-ssh'): void
+  onOpenCommandManager(): void
   onOpenLocalItem(item: LocalFileItem): void
   onOpenLocalPath(path: string): void
   onOpenRemoteItem(item: RemoteFileItem): void
@@ -124,8 +144,15 @@ export function SessionWorkspace({
       ) : null}
       <FileManager
         activeSession={activeSession}
+        activeTab={activeTab}
+        tabs={tabs}
+        commandFolders={commandFolders}
+        commandTemplates={commandTemplates}
+        isBusy={isBusy}
         localItems={localItems}
         localPath={localPath}
+        onExecuteCommand={onExecuteCommand}
+        onOpenCommandManager={onOpenCommandManager}
         onOpenLocalItem={onOpenLocalItem}
         onOpenLocalPath={onOpenLocalPath}
         onOpenRemoteItem={onOpenRemoteItem}
