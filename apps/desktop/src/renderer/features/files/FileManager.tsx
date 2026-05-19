@@ -102,7 +102,7 @@ export function FileManager({
     const draggedLocalPath = event.dataTransfer.getData(localFileDragType)
     if (draggedLocalPath) {
       const draggedPaths = parseDraggedPaths(draggedLocalPath)
-      const items = localItems.filter((row) => draggedPaths.includes(row.path) && row.type === 'file')
+      const items = localItems.filter((row) => draggedPaths.includes(row.path) && row.name !== '..')
       if (items.length) {
         onUploadFiles(items)
       }
@@ -242,8 +242,8 @@ export function FileManager({
         <button type="button">{t.command}</button>
         <span className="file-current-path">{activeSession.remotePath}</span>
         <div className="file-tab-actions">
-          <button title="刷新" type="button" onClick={onRefresh}><AppIcon name="refresh" /></button>
-          <button title="下载到..." type="button" disabled={!selectedRemoteFileItems.length} onClick={() => onDownloadFiles(selectedRemoteFileItems)}>
+          <button title={t.refresh} type="button" onClick={onRefresh}><AppIcon name="refresh" /></button>
+          <button title={t.downloadTo} type="button" disabled={!selectedRemoteFileItems.length} onClick={() => onDownloadFiles(selectedRemoteFileItems)}>
             <AppIcon name="download" />
           </button>
           <button title={t.upload} type="button" onClick={onChooseUploadFiles}><AppIcon name="upload" /></button>
@@ -282,8 +282,10 @@ export function FileManager({
               selectedPaths={selectedLocalPaths}
               onDragItem={(event, item) => {
                 event.dataTransfer.effectAllowed = 'copy'
-                const payload = selectedLocalPaths.includes(item.path) ? selectedLocalPaths : [item.path]
-                const previewItems = localItems.filter((row) => payload.includes(row.path))
+                const payload = selectedLocalPaths.includes(item.path)
+                  ? selectedLocalPaths
+                  : [item.path]
+                const previewItems = localItems.filter((row) => payload.includes(row.path) && row.name !== '..')
                 event.dataTransfer.setData(localFileDragType, JSON.stringify(payload))
                 setFileDragPreview(event, previewItems.map((row) => row.name))
               }}
@@ -432,7 +434,16 @@ export function FileManager({
             setContextMenu(null)
           }}
           onUpload={() => {
-            onChooseUploadFiles()
+            if (contextLocalItem) {
+              const items = selectedLocalPaths.includes(contextLocalItem.path)
+                ? localItems.filter((item) => selectedLocalPaths.includes(item.path) && item.name !== '..')
+                : contextLocalItem.name === '..' ? [] : [contextLocalItem]
+              if (items.length) {
+                onUploadFiles(items)
+              }
+            } else {
+              onChooseUploadFiles()
+            }
             setContextMenu(null)
           }}
         />

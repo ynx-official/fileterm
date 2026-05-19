@@ -78,7 +78,7 @@ export interface TransferTask {
   direction: 'upload' | 'download'
   name: string
   progress: number
-  status: 'queued' | 'running' | 'done' | 'failed'
+  status: 'queued' | 'running' | 'done' | 'failed' | 'canceled'
   message?: string
 }
 
@@ -106,23 +106,88 @@ export interface NetworkSamplePoint {
   tx: number
 }
 
+export interface NetworkRates {
+  rx: string
+  tx: string
+}
+
+export interface SystemIdentity {
+  osName: string
+  kernelName: string
+  kernelVersion: string
+  architecture: string
+  hostname: string
+}
+
+export interface CpuInfoRow {
+  model: string
+  cores: number
+  frequencyMHz: string
+  cache: string
+  bogomips: string
+}
+
+export interface CpuUsageBreakdown {
+  user: number
+  system: number
+  nice: number
+  idle: number
+  ioWait: number
+  irq: number
+  softIrq: number
+  steal: number
+}
+
+export interface ResourceUsageBreakdown {
+  total: string
+  used: string
+  available: string
+  percent: number
+}
+
+export interface NetworkInterfaceRow {
+  name: string
+  txTotal: string
+  rxTotal: string
+  txRate: string
+  rxRate: string
+}
+
+export interface FileSystemRow {
+  name: string
+  size: string
+  used: string
+  usagePercent: string
+  available: string
+  mountPoint: string
+}
+
 export interface SystemMetrics {
   ip: string
   uptime: string
   load: string
+  identity: SystemIdentity
   cpuPercent: number
+  cpuUsage: CpuUsageBreakdown
+  cpuInfoRows: CpuInfoRow[]
   memoryPercent: number
   memoryUsage: string
+  memoryAppUsage?: string
+  memoryCacheUsage?: string
+  memoryKernelUsage?: string
+  memoryBreakdown: ResourceUsageBreakdown
   swapPercent: number
   swapUsage: string
+  swapBreakdown: ResourceUsageBreakdown
   diskRows: Array<{ path: string; usage: string }>
+  fileSystemRows: FileSystemRow[]
   networkInterfaces: string[]
   activeNetworkInterface: string
-  networkRates: {
-    rx: string
-    tx: string
-  }
+  networkRates: NetworkRates
   networkSamples: NetworkSamplePoint[]
+  networkInterfaceRows: NetworkInterfaceRow[]
+  networkRatesByInterface?: Record<string, NetworkRates>
+  networkSamplesByInterface?: Record<string, NetworkSamplePoint[]>
   topProcesses: SidebarProcessItem[]
 }
 
@@ -206,9 +271,11 @@ export interface TermdockDesktopApi {
   listLocalDirectory(dirPath?: string): Promise<DirectorySnapshot<LocalFileItem>>
   readLocalFile(filePath: string): Promise<string>
   writeLocalFile(filePath: string, content: string): Promise<void>
+  getDroppedFilePaths(files: File[]): string[]
   selectLocalFiles(defaultPath?: string): Promise<string[]>
   selectLocalDirectory(defaultPath?: string): Promise<string | null>
   queueUpload(fileNames: string[]): Promise<WorkspaceSnapshot>
+  cancelTransfer(transferId: string): Promise<WorkspaceSnapshot>
   uploadFile(tabId: string, localPath: string, remoteDirectory: string): Promise<WorkspaceSnapshot>
   downloadFile(tabId: string, remotePath: string, localDirectory: string): Promise<WorkspaceSnapshot>
   writeTerminal(tabId: string, data: string): Promise<void>
@@ -242,6 +309,8 @@ export interface FileSessionController extends SessionController {
   openRemotePath(path: string): Promise<RemoteFileItem[]>
   readRemoteFile(path: string): Promise<string>
   writeRemoteFile(path: string, content: string): Promise<void>
+  ensureRemoteDirectory(path: string): Promise<void>
+  abortTransfer(): Promise<void>
   uploadFile(localPath: string, remotePath: string, onProgress: (progress: number) => void): Promise<void>
   downloadFile(remotePath: string, localPath: string, onProgress: (progress: number) => void): Promise<void>
 }

@@ -1,18 +1,24 @@
+import { useState } from 'react'
 import type { WorkspaceTab } from '@termdock/core'
 import { tabStatusClass } from '../../app/app-utils'
+import type { AppLocale } from '../../i18n'
+import { t } from '../../i18n'
+import type { ThemeMode } from '../../hooks/useThemeMode'
 import { AppIcon } from '../common/AppIcon'
+import { ContextMenu } from '../common/ContextMenu'
 
 export type OrderedTabEntry =
-  | { key: string; kind: 'home'; id: string }
+  | { key: string; kind: 'local'; id: string; title: string; tabKind: 'home' | 'system' }
   | { key: string; kind: 'session'; tab: WorkspaceTab }
 
 export type TabContextTarget =
-  | { kind: 'home'; id: string; title: string }
+  | { kind: 'local'; id: string; title: string }
   | { kind: 'session'; id: string; title: string; status: WorkspaceTab['status'] }
 
 export function TabBar({
   activeHomeTabId,
   activeSessionTabId,
+  locale,
   onAddHomeTab,
   onActivateHome,
   onActivateSession,
@@ -23,10 +29,14 @@ export function TabBar({
   onDragStart,
   onOpenConnectionManager,
   onOpenTabContext,
-  orderedTabs
+  onSetLocale,
+  onSetTheme,
+  orderedTabs,
+  theme
 }: {
   activeHomeTabId: string | null
   activeSessionTabId: string | null
+  locale: AppLocale
   onAddHomeTab(): void
   onActivateHome(id: string): void
   onActivateSession(id: string): void
@@ -37,23 +47,28 @@ export function TabBar({
   onDragStart(tabKey: string): void
   onOpenConnectionManager(): void
   onOpenTabContext(event: React.MouseEvent<HTMLDivElement>, target: TabContextTarget): void
+  onSetLocale(locale: AppLocale): void
+  onSetTheme(theme: ThemeMode): void
   orderedTabs: OrderedTabEntry[]
+  theme: ThemeMode
 }) {
+  const [toolsMenu, setToolsMenu] = useState<{ x: number; y: number } | null>(null)
+
   return (
     <header className="fs-tabbar">
       <div className="titlebar-brand">
-        <strong>TermDock</strong>
+        <strong>{t.appTitle}</strong>
       </div>
       <div className="titlebar-tabarea">
-        <button aria-label="Open connection manager" className="tabbar-folder-button" onClick={onOpenConnectionManager} title="连接管理器" type="button">
+        <button aria-label={t.connectionManager} className="tabbar-folder-button" onClick={onOpenConnectionManager} title={t.connectionManager} type="button">
           <AppIcon name="connections" size={16} />
         </button>
         <div className="fs-tabs">
           {orderedTabs.map((entry, index) => (
-            entry.kind === 'home' ? (
+            entry.kind === 'local' ? (
               <div
                 key={entry.key}
-                className={`fs-tab home-tab ${activeHomeTabId === entry.id ? 'active' : ''}`}
+                className={`fs-tab ${entry.tabKind === 'home' ? 'home-tab' : 'system-tab'} ${activeHomeTabId === entry.id ? 'active' : ''}`}
                 draggable
                 onClick={() => onActivateHome(entry.id)}
                 onContextMenu={(event) => {
@@ -61,9 +76,9 @@ export function TabBar({
                   event.stopPropagation()
                   onActivateHome(entry.id)
                   onOpenTabContext(event, {
-                    kind: 'home',
+                    kind: 'local',
                     id: entry.id,
-                    title: `${index + 1} 新建标签`
+                    title: entry.title
                   })
                 }}
                 onDragEnd={onDragEnd}
@@ -79,8 +94,8 @@ export function TabBar({
                 tabIndex={0}
               >
                 <span>{index + 1}</span>
-                <strong>新建标签</strong>
-                <button aria-label="Close 新建标签" className="tab-close" onClick={(event) => onCloseHomeTab(event, entry.id)} type="button">×</button>
+                <strong>{entry.title}</strong>
+                <button aria-label={`${t.closeTab} ${entry.title}`} className="tab-close" onClick={(event) => onCloseHomeTab(event, entry.id)} type="button">×</button>
               </div>
             ) : (
               <div
@@ -114,15 +129,43 @@ export function TabBar({
                 <span>{index + 1}</span>
                 <strong>{entry.tab.title}</strong>
                 <span className={`tab-dot ${tabStatusClass(entry.tab.status)}`} />
-                <button aria-label={`Close ${entry.tab.title}`} className="tab-close" onClick={(event) => onCloseSessionTab(event, entry.tab.id)} type="button">×</button>
+                <button aria-label={`${t.closeTab} ${entry.tab.title}`} className="tab-close" onClick={(event) => onCloseSessionTab(event, entry.tab.id)} type="button">×</button>
               </div>
             )
           ))}
           <button className="add-tab" type="button" onClick={onAddHomeTab}>+</button>
         </div>
         <div className="window-tools">
-          <button title="Grid" type="button"><AppIcon name="grid" /></button>
+          <button
+            aria-label={t.settings}
+            title={t.settings}
+            type="button"
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect()
+              setToolsMenu({ x: rect.right - 180, y: rect.bottom + 6 })
+            }}
+          >
+            <AppIcon name="menu" />
+          </button>
         </div>
+        {toolsMenu ? (
+          <ContextMenu
+            className="tools-menu"
+            items={[
+              { label: `${t.theme}: ${t.defaultDark}`, disabled: theme === 'default-dark', action: () => onSetTheme('default-dark') },
+              { label: `${t.theme}: ${t.defaultLight}`, disabled: theme === 'default-light', action: () => onSetTheme('default-light') },
+              { separator: true },
+              { label: '简体中文', disabled: locale === 'zhCN', action: () => onSetLocale('zhCN') },
+              { label: 'English', disabled: locale === 'enUS', action: () => onSetLocale('enUS') },
+              { separator: true },
+              { label: t.commandManager, action: () => window.alert(t.notReady) },
+              { label: t.connectionManager, action: onOpenConnectionManager },
+              { label: t.settings, action: () => window.alert(t.notReady) }
+            ]}
+            onClose={() => setToolsMenu(null)}
+            position={toolsMenu}
+          />
+        ) : null}
       </div>
     </header>
   )

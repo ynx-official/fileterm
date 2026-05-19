@@ -23,7 +23,7 @@ export function FileEditorModal({
     <div className="modal-backdrop">
       <div className="modal-card file-editor-modal">
         <div className="modal-header">
-          <span>{file.source === 'remote' ? '编辑远程文件' : '编辑本地文件'} · {file.name}</span>
+          <span>{file.source === 'remote' ? t.editRemoteFile : t.editLocalFile} · {file.name}</span>
           <button className="icon-button" onClick={onClose} type="button">×</button>
         </div>
         <div className="file-editor-path" title={file.path}>{file.path}</div>
@@ -36,7 +36,7 @@ export function FileEditorModal({
         {errorMessage ? <div className="modal-error">{errorMessage}</div> : null}
         <div className="form-actions">
           <button className="flat-button" onClick={onClose} type="button">{t.cancel}</button>
-          <button className="primary-button" onClick={() => onSave(content)} type="button">保存</button>
+          <button className="primary-button" onClick={() => onSave(content)} type="button">{t.save}</button>
         </div>
       </div>
     </div>

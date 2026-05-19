@@ -1,4 +1,5 @@
 import type { LocalFileItem, RemoteFileItem } from '@termdock/core'
+import { t } from '../../i18n'
 import { ContextMenu } from '../common/ContextMenu'
 
 export function FileContextMenu({
@@ -23,33 +24,22 @@ export function FileContextMenu({
   position: { x: number; y: number }
 }) {
   const canDownload = pane === 'remote' && item?.type === 'file'
-  const canUpload = pane === 'remote'
+  const canUpload = pane === 'remote' || pane === 'local'
+  const uploadLabel = pane === 'local' ? t.uploadToRemote : t.uploadMore
+  const items = [
+    { label: t.refresh, action: onRefresh },
+    { separator: true },
+    { label: t.open, disabled: !item, action: onOpen },
+    { separator: true },
+    { label: t.copyPath, disabled: !item, action: onCopyPath },
+    ...(canDownload ? [{ separator: true }, { label: t.download, action: onDownload }] : []),
+    ...(canUpload ? [{ separator: true }, { label: uploadLabel, action: onUpload }] : [])
+  ]
 
   return (
     <ContextMenu
       className="file-context-menu"
-      items={[
-        { label: '刷新', action: onRefresh },
-        { separator: true },
-        { label: '打开', disabled: !item, action: onOpen },
-        { label: '打开方式', disabled: true },
-        { label: '选择文本编辑器', disabled: true },
-        { separator: true },
-        { label: '复制路径', disabled: !item, action: onCopyPath },
-        { separator: true },
-        { label: '下载', disabled: !canDownload, action: onDownload },
-        { label: '上传...', disabled: !canUpload, action: onUpload },
-        { separator: true },
-        { label: '打包传输', disabled: true },
-        { separator: true },
-        { label: '新建', disabled: true },
-        { separator: true },
-        { label: '重命名', disabled: true },
-        { label: '删除', disabled: true, danger: true },
-        { label: '快速删除 (rm命令)', disabled: true, danger: true },
-        { separator: true },
-        { label: '文件权限...', disabled: true }
-      ]}
+      items={items}
       onClose={onClose}
       position={position}
     />

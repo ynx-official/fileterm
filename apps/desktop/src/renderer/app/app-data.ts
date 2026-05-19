@@ -7,6 +7,7 @@ import type {
 
 export const emptyState: WorkspaceSnapshot = {
   profiles: [],
+  folders: [],
   tabs: [],
   activeTabId: null,
   transfers: [],
@@ -50,6 +51,7 @@ export const previewState: WorkspaceSnapshot = {
       remotePath: '/incoming'
     }
   ],
+  folders: [],
   tabs: [
     {
       id: 'preview-tab-ssh',
@@ -81,17 +83,53 @@ export const previewState: WorkspaceSnapshot = {
         ip: '192.168.3.197',
         uptime: '4 天',
         load: '0.44, 0.66, 0.62',
+        identity: {
+          osName: 'fnOS 26.04',
+          kernelName: 'Linux',
+          kernelVersion: '6.18.18-trim',
+          architecture: 'x86_64',
+          hostname: 'fnOSNAS-CN'
+        },
         cpuPercent: 10,
+        cpuUsage: {
+          user: 6.2,
+          system: 3.1,
+          nice: 0.2,
+          idle: 85.7,
+          ioWait: 0,
+          irq: 0.3,
+          softIrq: 0.8,
+          steal: 3.7
+        },
+        cpuInfoRows: [
+          { model: 'Intel(R) Core(TM) i5-12600K', cores: 10, frequencyMHz: '3687.000', cache: '20480 KB', bogomips: '7374.00' }
+        ],
         memoryPercent: 68,
         memoryUsage: '7.9G/11.6G',
+        memoryBreakdown: {
+          total: '11.6G',
+          used: '7.9G',
+          available: '3.7G',
+          percent: 68
+        },
         swapPercent: 7,
         swapUsage: '290M/4.0G',
+        swapBreakdown: {
+          total: '4.0G',
+          used: '290M',
+          available: '3.7G',
+          percent: 7
+        },
         diskRows: [
           { path: '/dev', usage: '5.8G/5.8G' },
           { path: '/run', usage: '1.1G/1.2G' },
           { path: '/', usage: '44G/63G' },
           { path: '/dev/shm', usage: '5.9G/5.9G' },
           { path: '/run/lock', usage: '5.0M/5.0M' }
+        ],
+        fileSystemRows: [
+          { name: '/dev/nvme0n1p2', size: '63G', used: '44G', usagePercent: '70%', available: '19G', mountPoint: '/' },
+          { name: 'tmpfs', size: '5.9G', used: '144K', usagePercent: '0%', available: '5.9G', mountPoint: '/dev/shm' }
         ],
         networkInterfaces: ['enp3s0-ovs'],
         activeNetworkInterface: 'enp3s0-ovs',
@@ -100,11 +138,14 @@ export const previewState: WorkspaceSnapshot = {
           tx: [5, 11, 8, 14, 4, 9, 2, 12, 10, 6, 15, 7, 3, 8, 11, 4, 6, 9][index],
           rx: [10, 19, 13, 22, 6, 24, 8, 15, 18, 12, 20, 9, 5, 13, 16, 8, 11, 14][index]
         })),
+        networkInterfaceRows: [
+          { name: 'enp3s0-ovs', txTotal: '1.4 TB', rxTotal: '692 GB', txRate: '540B', rxRate: '233B' }
+        ],
         topProcesses: [
-          { memory: '3171.4M', cpu: '3.0', command: 'python' },
-          { memory: '1309.4M', cpu: '1.0', command: 'next-server' },
-          { memory: '536.1M', cpu: '0.6', command: 'python3' },
-          { memory: '349.7M', cpu: '0.5', command: 'trim-photos' }
+          { memory: '3171.4M', cpu: '3.0', command: 'python', elapsedSeconds: 18600 },
+          { memory: '1309.4M', cpu: '1.0', command: 'next-server', elapsedSeconds: 9700 },
+          { memory: '536.1M', cpu: '0.6', command: 'python3', elapsedSeconds: 8400 },
+          { memory: '349.7M', cpu: '0.5', command: 'trim-photos', elapsedSeconds: 4100 }
         ]
       }
     }

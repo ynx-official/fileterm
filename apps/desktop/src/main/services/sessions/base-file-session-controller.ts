@@ -37,6 +37,8 @@ export abstract class BaseFileSessionController implements FileSessionController
   abstract openRemotePath(path: string): Promise<RemoteFileItem[]>
   abstract readRemoteFile(path: string): Promise<string>
   abstract writeRemoteFile(path: string, content: string): Promise<void>
+  abstract ensureRemoteDirectory(path: string): Promise<void>
+  abstract abortTransfer(): Promise<void>
   abstract uploadFile(localPath: string, remotePath: string, onProgress: (progress: number) => void): Promise<void>
   abstract downloadFile(remotePath: string, localPath: string, onProgress: (progress: number) => void): Promise<void>
 }

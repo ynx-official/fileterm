@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron') as typeof import('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron') as typeof import('electron')
 
 import type {
   ConnectionFormMode,
@@ -54,12 +54,16 @@ const api: TermdockDesktopApi = {
     ipcRenderer.invoke('localFiles:readFile', filePath),
   writeLocalFile: (filePath: string, content: string): Promise<void> =>
     ipcRenderer.invoke('localFiles:writeFile', filePath, content),
+  getDroppedFilePaths: (files: File[]): string[] =>
+    files.map((file) => webUtils.getPathForFile(file)).filter(Boolean),
   selectLocalFiles: (defaultPath?: string): Promise<string[]> =>
     ipcRenderer.invoke('localFiles:selectFiles', defaultPath),
   selectLocalDirectory: (defaultPath?: string): Promise<string | null> =>
     ipcRenderer.invoke('localFiles:selectDirectory', defaultPath),
   queueUpload: (fileNames: string[]): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('transfer:queueUpload', fileNames),
+  cancelTransfer: (transferId: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('transfer:cancel', transferId),
   uploadFile: (tabId: string, localPath: string, remoteDirectory: string): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('transfer:uploadFile', tabId, localPath, remoteDirectory),
   downloadFile: (tabId: string, remotePath: string, localDirectory: string): Promise<WorkspaceSnapshot> =>

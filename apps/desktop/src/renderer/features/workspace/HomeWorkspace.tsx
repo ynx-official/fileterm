@@ -6,14 +6,10 @@ import { AppIcon } from '../common/AppIcon'
 export function HomeWorkspace({
   profiles,
   folders = [],
-  isDesktopRuntime,
-  onCreate,
   onOpen
 }: {
   profiles: ConnectionProfile[]
   folders?: ConnectionFolder[]
-  isDesktopRuntime: boolean
-  onCreate(): void
   onOpen(profileId: string): void
 }) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
@@ -93,14 +89,14 @@ export function HomeWorkspace({
           <strong style={{ opacity: isFolder ? 0.9 : 1 }}>{node.name}</strong>
           <span>{isFolder ? '--' : (node.note || '/')}</span>
           <span>{isFolder ? '--' : node.username}</span>
-          <small>{isFolder ? 'FOLDER' : node.type.toUpperCase()}</small>
+          <small>{isFolder ? t.homeFolderType : node.type.toUpperCase()}</small>
         </div>
         {isFolder && isExpanded && node.children && (
           <div className="folder-children">
             {node.children.map((child: any) => renderNode(child, depth + 1))}
             {node.children.length === 0 && (
               <div className="quick-row empty-folder" style={{ color: '#666' }}>
-                <span style={{ marginLeft: `${(depth + 1) * 20 + 20}px`, gridColumn: '1 / -1' }}>空文件夹</span>
+                <span style={{ marginLeft: `${(depth + 1) * 20 + 20}px`, gridColumn: '1 / -1' }}>{t.emptyFolder}</span>
               </div>
             )}
           </div>
@@ -114,14 +110,11 @@ export function HomeWorkspace({
       <div className="quick-panel">
         <div className="quick-header">
           <strong>{t.quickConnect}</strong>
-          <div>
-            <button className="flat-button" type="button" disabled={!isDesktopRuntime} onClick={onCreate}>{t.newConnection}</button>
-          </div>
         </div>
         <div className="quick-list">
           {tree.map(node => renderNode(node, 0))}
           {tree.length === 0 && (
-             <div style={{ padding: '20px', textAlign: 'center', color: '#666' }}>暂无连接</div>
+             <div style={{ padding: '20px', textAlign: 'center', color: '#666' }}>{t.noConnections}</div>
           )}
         </div>
       </div>

@@ -1,4 +1,5 @@
 import type { WorkspaceTab } from '@termdock/core'
+import { t } from '../../i18n'
 import { ContextMenu } from '../common/ContextMenu'
 
 export function TabContextMenu({
@@ -29,17 +30,17 @@ export function TabContextMenu({
     <ContextMenu
       className="tab-context-menu"
       items={[
-        { label: '复制标签', action: () => onAction('copy') },
+        { label: t.copyTab, action: () => onAction('copy') },
         { separator: true },
-        { label: '连接', disabled: !canConnect, action: () => onAction('connect') },
-        { label: '连接全部', disabled: !isSessionTab || !canConnectAll, action: () => onAction('connectAll') },
+        { label: t.connect, disabled: !canConnect, action: () => onAction('connect') },
+        { label: t.connectAll, disabled: !isSessionTab || !canConnectAll, action: () => onAction('connectAll') },
         { separator: true },
-        { label: '断开', disabled: !canDisconnect, action: () => onAction('disconnect') },
+        { label: t.disconnect, disabled: !canDisconnect, action: () => onAction('disconnect') },
         { separator: true },
-        { label: '关闭', disabled: !canCloseCurrent, action: () => onAction('close') },
+        { label: t.closeTab, disabled: !canCloseCurrent, action: () => onAction('close') },
         { separator: true },
-        { label: '关闭其他', disabled: !canCloseOthers, action: () => onAction('closeOthers') },
-        { label: '关闭全部', disabled: !canCloseAll, action: () => onAction('closeAll') }
+        { label: t.closeOthers, disabled: !canCloseOthers, action: () => onAction('closeOthers') },
+        { label: t.closeAll, disabled: !canCloseAll, action: () => onAction('closeAll') }
       ]}
       onClose={onClose}
       position={position}

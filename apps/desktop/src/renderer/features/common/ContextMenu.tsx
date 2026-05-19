@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { t } from '../../i18n'
 
 export type ContextMenuEntry = {
   label?: string
@@ -84,13 +85,16 @@ export function ContextMenu({
           key={`${item.label}-${index}`}
           className={item.danger ? 'is-danger' : ''}
           disabled={item.disabled}
-          onClick={() => item.action?.()}
+          onClick={() => {
+            item.action?.()
+            onClose()
+          }}
           type="button"
         >
           {item.label}
         </button>
       ))}
-      <button className="context-close" type="button" onClick={onClose}>关闭</button>
+      <button className="context-close" type="button" onClick={onClose}>{t.closeTab}</button>
     </div>
   )
 }

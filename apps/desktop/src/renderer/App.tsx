@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useTransition, type CSSProperties, type DragEvent, type FormEvent, type MouseEvent } from 'react'
+import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type FormEvent, type MouseEvent } from 'react'
 import type {
   ConnectionFormMode,
   ConnectionProfile,
@@ -10,7 +10,7 @@ import type {
   WorkspaceTab
 } from '@termdock/core'
 import { defaultForm, emptyState, localPreviewFiles, previewLocalPath, previewState, profileToForm } from './app/app-data'
-import { homeTabKey, reorderTabKeys, sessionTabKey, withParentRow } from './app/app-utils'
+import { homeTabKey, isActiveTransfer, reorderTabKeys, sessionTabKey, withParentRow } from './app/app-utils'
 import { ConnectionManagerModal } from './features/connections/ConnectionManagerModal'
 import { ConnectionModal } from './features/connections/ConnectionModal'
 import { FileEditorModal } from './features/files/FileEditorModal'
@@ -19,14 +19,15 @@ import { TabContextMenu } from './features/layout/TabContextMenu'
 import { SystemSidebar } from './features/system/SystemSidebar'
 import { TransferBar } from './features/transfers/TransferBar'
 import { TransferPopover } from './features/transfers/TransferPopover'
-import { HomeWorkspace } from './features/workspace/HomeWorkspace'
-import { SessionWorkspace } from './features/workspace/SessionWorkspace'
-import { useThemeMode } from './hooks/useThemeMode'
-import { t } from './i18n'
+import { WorkspaceStage } from './features/workspace/WorkspaceStage'
+import { useThemeMode, type ThemeMode } from './hooks/useThemeMode'
+import { defaultLocale, setLocale, t, type AppLocale } from './i18n'
+
+type LocalTab =
+  | { id: string; kind: 'home'; title: string }
+  | { id: string; kind: 'system'; title: string; sessionTabId: string }
 
 export function App() {
-  useThemeMode('default')
-
   const searchParams = new URLSearchParams(window.location.search)
   const windowMode = searchParams.get('window') ?? 'main'
   const isConnectionManagerWindow = windowMode === 'connection-manager'
@@ -37,7 +38,6 @@ export function App() {
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot>(emptyState)
   const [error, setError] = useState<string | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
-  const [, startTransition] = useTransition()
   const [isBusy, setIsBusy] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [showConnectionManager, setShowConnectionManager] = useState(false)
@@ -45,8 +45,8 @@ export function App() {
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
   const [localPath, setLocalPath] = useState(previewLocalPath)
   const [localItems, setLocalItems] = useState<LocalFileItem[]>(localPreviewFiles)
-  const [homeTabs, setHomeTabs] = useState([{ id: 'home-1' }])
-  const [activeHomeTabId, setActiveHomeTabId] = useState<string | null>('home-1')
+  const [localTabs, setLocalTabs] = useState<LocalTab[]>([{ id: 'home-1', kind: 'home', title: t.untitledTab }])
+  const [activeLocalTabId, setActiveLocalTabId] = useState<string | null>('home-1')
   const [nextHomeTabNumber, setNextHomeTabNumber] = useState(2)
   const [tabOrder, setTabOrder] = useState<string[]>(['home:home-1'])
   const [draggingTabKey, setDraggingTabKey] = useState<string | null>(null)
@@ -60,23 +60,36 @@ export function App() {
   const [fileEditor, setFileEditor] = useState<FileContentSnapshot | null>(null)
   const [fileEditorError, setFileEditorError] = useState<string | null>(null)
   const [showTransfers, setShowTransfers] = useState(false)
+  const [themeMode, setThemeMode] = useState<ThemeMode>('default-dark')
+  const [locale, setLocaleState] = useState<AppLocale>(defaultLocale)
 
-  const homeTabsRef = useRef(homeTabs)
+  useThemeMode(themeMode)
+
+  const localTabsRef = useRef(localTabs)
   const previousActiveTransferCountRef = useRef(0)
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
   const desktopApi = window.termdock
-  const isDesktopRuntime = Boolean(desktopApi?.isDesktop)
 
   useEffect(() => {
-    homeTabsRef.current = homeTabs
-  }, [homeTabs])
+    localTabsRef.current = localTabs
+  }, [localTabs])
+
+  useEffect(() => {
+    setLocale(locale)
+    setLocalTabs((prev) => prev.map((tab) => {
+      if (tab.kind === 'home') {
+        return { ...tab, title: t.untitledTab }
+      }
+      return { ...tab, title: t.systemInfoTabTitle }
+    }))
+  }, [locale])
 
   useEffect(() => {
     if (!desktopApi) {
       setWorkspace(previewState)
       setLocalPath(previewLocalPath)
       setLocalItems(localPreviewFiles)
-      setActiveHomeTabId(null)
+      setActiveLocalTabId(null)
       setTabOrder(['session:preview-tab-ssh'])
       setError(t.browserPreview)
       return
@@ -120,7 +133,7 @@ export function App() {
     if (formWindowMode === 'edit') {
       const profile = workspace.profiles.find((item) => item.id === formWindowProfileId)
       if (!profile) {
-        setFormError('未找到要编辑的连接。')
+        setFormError(t.profileNotFound)
         return
       }
       setEditingProfileId(profile.id)
@@ -135,7 +148,7 @@ export function App() {
   }, [formWindowMode, formWindowProfileId, isConnectionFormWindow, workspace.profiles])
 
   useEffect(() => {
-    const activeTransferCount = workspace.transfers.filter((transfer) => transfer.status === 'running' || transfer.status === 'queued').length
+    const activeTransferCount = workspace.transfers.filter(isActiveTransfer).length
     if (activeTransferCount > previousActiveTransferCountRef.current) {
       setShowTransfers(true)
     }
@@ -144,7 +157,7 @@ export function App() {
 
   useEffect(() => {
     const allKeys = [
-      ...homeTabs.map((tab) => homeTabKey(tab.id)),
+      ...localTabs.map((tab) => homeTabKey(tab.id)),
       ...workspace.tabs.map((tab) => sessionTabKey(tab.id))
     ]
 
@@ -165,7 +178,7 @@ export function App() {
 
       return [...kept, ...missing]
     })
-  }, [homeTabs, workspace.tabs])
+  }, [localTabs, workspace.tabs])
 
   useEffect(() => {
     if (!isResizingSidebar) {
@@ -193,19 +206,21 @@ export function App() {
     }
   }, [isResizingSidebar])
 
-  const activeTab = workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null
-  const activeSession = activeHomeTabId ? null : activeTab ? workspace.sessions[activeTab.id] : null
-  const activeProfile = !activeHomeTabId && activeTab
+  const activeLocalTab = activeLocalTabId ? localTabs.find((tab) => tab.id === activeLocalTabId) ?? null : null
+  const displayedSessionTabId = activeLocalTab
+    ? activeLocalTab.kind === 'system' ? activeLocalTab.sessionTabId : null
+    : workspace.activeTabId
+  const activeTab = displayedSessionTabId ? workspace.tabs.find((tab) => tab.id === displayedSessionTabId) ?? null : null
+  const activeSession = activeTab ? workspace.sessions[activeTab.id] : null
+  const activeProfile = activeTab
     ? workspace.profiles.find((profile) => profile.id === activeTab.profileId) ?? null
     : null
-  const activeTransferCount = workspace.transfers.filter((transfer) => transfer.status === 'running' || transfer.status === 'queued').length
+  const activeTransferCount = workspace.transfers.filter(isActiveTransfer).length
 
   const applySnapshot = (snapshot: WorkspaceSnapshot) => {
-    startTransition(() => {
-      setWorkspace(snapshot)
-      setError(null)
-      setFormError(null)
-    })
+    setWorkspace(snapshot)
+    setError(null)
+    setFormError(null)
   }
 
   const updateForm = (
@@ -258,12 +273,12 @@ export function App() {
     }
 
     if (form.type === 'ssh' && form.authType === 'password' && !form.password) {
-      setFormError('请填写 SSH 密码。')
+      setFormError(t.missingSshPassword)
       return
     }
 
     if (form.type === 'ssh' && form.authType === 'privateKey' && !form.privateKeyPath) {
-      setFormError('请选择或填写私钥路径。')
+      setFormError(t.missingPrivateKeyPath)
       return
     }
 
@@ -298,7 +313,7 @@ export function App() {
       return
     }
 
-    const activeHomeId = activeHomeTabId
+    const activeHomeId = activeLocalTabId
     const replacementKey = activeHomeId ? homeTabKey(activeHomeId) : null
     pendingHomeReplacementKeyRef.current = replacementKey
 
@@ -311,10 +326,10 @@ export function App() {
       if (activeHomeId && snapshot.activeTabId && replacementKey) {
         const nextSessionKey = sessionTabKey(snapshot.activeTabId)
         setTabOrder((prev) => prev.map((key) => key === replacementKey ? nextSessionKey : key))
-        setHomeTabs((prev) => prev.filter((tab) => tab.id !== activeHomeId))
+        setLocalTabs((prev) => prev.filter((tab) => tab.id !== activeHomeId))
         pendingHomeReplacementKeyRef.current = null
       }
-      setActiveHomeTabId(null)
+      setActiveLocalTabId(null)
     } catch (err) {
       pendingHomeReplacementKeyRef.current = null
       setError((err as Error).message)
@@ -353,7 +368,7 @@ export function App() {
       setIsBusy(true)
       const snapshot = await desktopApi.activateTab(tabId)
       applySnapshot(snapshot)
-      setActiveHomeTabId(null)
+      setActiveLocalTabId(null)
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -368,13 +383,17 @@ export function App() {
 
     const snapshot = await desktopApi.closeTab(tabId)
     applySnapshot(snapshot)
+    const relatedLocalTabs = localTabsRef.current.filter((tab) => tab.kind === 'system' && tab.sessionTabId === tabId).map((tab) => tab.id)
+    if (relatedLocalTabs.length) {
+      closeHomeTabs(relatedLocalTabs, activeLocalTabId && relatedLocalTabs.includes(activeLocalTabId) ? null : activeLocalTabId, snapshot.tabs)
+    }
     if (snapshot.activeTabId === null) {
-      setHomeTabs((prev) => prev.length ? prev : [{ id: 'home-1' }])
+      setLocalTabs((prev) => prev.length ? prev : [{ id: 'home-1', kind: 'home', title: t.untitledTab }])
       setTabOrder((prev) => {
         const filtered = prev.filter((key) => key !== sessionTabKey(tabId))
         return filtered.some((key) => key.startsWith('home:')) ? filtered : ['home:home-1', ...filtered]
       })
-      setActiveHomeTabId((prev) => prev ?? homeTabsRef.current.at(-1)?.id ?? 'home-1')
+      setActiveLocalTabId((prev) => prev ?? localTabsRef.current.at(-1)?.id ?? 'home-1')
     }
     return snapshot
   }
@@ -396,41 +415,66 @@ export function App() {
   }
 
   const handleActivateHome = (homeTabId: string) => {
-    startTransition(() => {
-      setError(null)
-      setActiveHomeTabId(homeTabId)
-    })
+    setError(null)
+    setActiveLocalTabId(homeTabId)
   }
 
   const handleAddHomeTab = () => {
     const nextId = `home-${nextHomeTabNumber}`
     const nextKey = homeTabKey(nextId)
 
-    setHomeTabs((prev) => [...prev, { id: nextId }])
+    setLocalTabs((prev) => [...prev, { id: nextId, kind: 'home', title: t.untitledTab }])
     setTabOrder((prev) => [...prev, nextKey])
     setNextHomeTabNumber((prev) => prev + 1)
-    setActiveHomeTabId(nextId)
+    setActiveLocalTabId(nextId)
+    setError(null)
+  }
+
+  const handleOpenSystemInfo = () => {
+    if (!activeTab) {
+      return
+    }
+
+    const existing = localTabs.find((tab) => tab.kind === 'system' && tab.sessionTabId === activeTab.id)
+    if (existing) {
+      setActiveLocalTabId(existing.id)
+      setError(null)
+      return
+    }
+
+    const nextId = `system-${activeTab.id}`
+    setLocalTabs((prev) => [
+      ...prev,
+      {
+        id: nextId,
+        kind: 'system',
+        title: t.systemInfoTabTitle,
+        sessionTabId: activeTab.id
+      }
+    ])
+    setTabOrder((prev) => [...prev, homeTabKey(nextId)])
+    setActiveLocalTabId(nextId)
     setError(null)
   }
 
   const handleCloseHomeTab = (event: MouseEvent<HTMLButtonElement>, homeTabId: string) => {
     event.stopPropagation()
 
-    setHomeTabs((prev) => {
+    setLocalTabs((prev) => {
       const remaining = prev.filter((tab) => tab.id !== homeTabId)
 
       if (remaining.length === 0 && workspace.tabs.length === 0) {
-        setActiveHomeTabId('home-1')
+        setActiveLocalTabId('home-1')
         setNextHomeTabNumber(2)
         setTabOrder((prevOrder) => {
           const filtered = prevOrder.filter((key) => key !== homeTabKey(homeTabId))
           return filtered.includes('home:home-1') ? filtered : ['home:home-1', ...filtered]
         })
-        return [{ id: 'home-1' }]
+        return [{ id: 'home-1', kind: 'home', title: t.untitledTab }]
       }
 
-      if (activeHomeTabId === homeTabId) {
-        setActiveHomeTabId(remaining.at(-1)?.id ?? null)
+      if (activeLocalTabId === homeTabId) {
+        setActiveLocalTabId(remaining.at(-1)?.id ?? null)
       }
 
       setTabOrder((prevOrder) => prevOrder.filter((key) => key !== homeTabKey(homeTabId)))
@@ -443,7 +487,7 @@ export function App() {
     preferredActiveHomeId: string | null,
     nextSessionTabs: WorkspaceTab[]
   ) => {
-    let nextHomeTabs = homeTabs.filter((tab) => !homeTabIds.includes(tab.id))
+    let nextHomeTabs = localTabs.filter((tab) => !homeTabIds.includes(tab.id))
     let nextOrder = tabOrder.filter((key) => {
       if (key.startsWith('home:')) {
         return nextHomeTabs.some((tab) => homeTabKey(tab.id) === key)
@@ -452,7 +496,7 @@ export function App() {
     })
 
     if (!nextHomeTabs.length && !nextSessionTabs.length) {
-      nextHomeTabs = [{ id: 'home-1' }]
+      nextHomeTabs = [{ id: 'home-1', kind: 'home', title: t.untitledTab }]
       preferredActiveHomeId = 'home-1'
       nextOrder = nextOrder.includes('home:home-1') ? nextOrder : ['home:home-1', ...nextOrder]
       setNextHomeTabNumber((prev) => Math.max(prev, 2))
@@ -460,8 +504,8 @@ export function App() {
       preferredActiveHomeId = nextHomeTabs.at(-1)?.id ?? null
     }
 
-    setHomeTabs(nextHomeTabs)
-    setActiveHomeTabId(preferredActiveHomeId)
+    setLocalTabs(nextHomeTabs)
+    setActiveLocalTabId(preferredActiveHomeId)
     setTabOrder(nextOrder)
   }
 
@@ -503,7 +547,7 @@ export function App() {
         setIsBusy(true)
         const snapshot = await desktopApi.reconnectTab(target.id)
         applySnapshot(snapshot)
-        setActiveHomeTabId(null)
+        setActiveLocalTabId(null)
       } catch (err) {
         setError((err as Error).message)
       } finally {
@@ -528,7 +572,7 @@ export function App() {
         }
         if (lastSnapshot) {
           applySnapshot(lastSnapshot)
-          setActiveHomeTabId(null)
+          setActiveLocalTabId(null)
         }
       } catch (err) {
         setError((err as Error).message)
@@ -563,15 +607,15 @@ export function App() {
           : workspace.tabs.map((tab) => tab.id)
 
     const homeTabsToClose = action === 'closeAll'
-      ? homeTabs.map((tab) => tab.id)
+      ? localTabs.map((tab) => tab.id)
       : action === 'close'
-        ? target.kind === 'home' ? [target.id] : []
-        : target.kind === 'home'
-          ? homeTabs.filter((tab) => tab.id !== target.id).map((tab) => tab.id)
-          : homeTabs.map((tab) => tab.id)
+        ? target.kind === 'local' ? [target.id] : []
+        : target.kind === 'local'
+          ? localTabs.filter((tab) => tab.id !== target.id).map((tab) => tab.id)
+          : localTabs.map((tab) => tab.id)
 
     const remainingSessionTabs = workspace.tabs.filter((tab) => !sessionTabsToClose.includes(tab.id))
-    const preferredActiveHomeId = target.kind === 'home' && action !== 'close' ? target.id : null
+    const preferredActiveHomeId = target.kind === 'local' && action !== 'close' ? target.id : null
     closeHomeTabs(homeTabsToClose, preferredActiveHomeId, remainingSessionTabs)
 
     if (!sessionTabsToClose.length) {
@@ -582,7 +626,7 @@ export function App() {
       setIsBusy(true)
       await closeSessionTabs(sessionTabsToClose)
       if (!remainingSessionTabs.length) {
-        setActiveHomeTabId((prev) => prev ?? preferredActiveHomeId ?? homeTabsRef.current.at(-1)?.id ?? 'home-1')
+        setActiveLocalTabId((prev) => prev ?? preferredActiveHomeId ?? localTabsRef.current.at(-1)?.id ?? 'home-1')
       }
     } catch (err) {
       setError((err as Error).message)
@@ -593,9 +637,7 @@ export function App() {
 
   const handleDropUpload = async (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
-    const localPaths = Array.from(event.dataTransfer.files)
-      .map((file) => (file as File & { path?: string }).path)
-      .filter((filePath): filePath is string => Boolean(filePath))
+    const localPaths = extractDroppedLocalPaths(event)
 
     if (!localPaths.length || !desktopApi || !activeTab || !activeSession) {
       setError(t.desktopOnlyUpload)
@@ -604,10 +646,7 @@ export function App() {
 
     try {
       setIsBusy(true)
-      for (const localFilePath of localPaths) {
-        const snapshot = await desktopApi.uploadFile(activeTab.id, localFilePath, activeSession.remotePath)
-        applySnapshot(snapshot)
-      }
+      await uploadLocalPaths(localPaths)
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -686,12 +725,31 @@ export function App() {
     }
   }
 
+  const uploadLocalPaths = async (paths: string[]) => {
+    if (!desktopApi || !activeTab || !activeSession) {
+      return
+    }
+
+    for (const localPath of Array.from(new Set(paths))) {
+      const snapshot = await desktopApi.uploadFile(activeTab.id, localPath, activeSession.remotePath)
+      applySnapshot(snapshot)
+    }
+  }
+
   const orderedTabs: OrderedTabEntry[] = tabOrder
     .map((key) => {
       if (key.startsWith('home:')) {
         const id = key.slice(5)
-        const homeTab = homeTabs.find((tab) => tab.id === id)
-        return homeTab ? { key, kind: 'home' as const, id: homeTab.id } : null
+        const localTab = localTabs.find((tab) => tab.id === id)
+        return localTab
+          ? {
+              key,
+              kind: 'local' as const,
+              id: localTab.id,
+              title: localTab.title,
+              tabKind: localTab.kind
+            }
+          : null
       }
 
       const id = key.slice(8)
@@ -699,6 +757,132 @@ export function App() {
       return sessionTab ? { key, kind: 'session' as const, tab: sessionTab } : null
     })
     .filter((item): item is OrderedTabEntry => item !== null)
+
+  const handleOpenRemoteItem = (item: RemoteFileItem) => {
+    if (!desktopApi || !activeTab) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setIsBusy(true)
+        if (item.type === 'folder') {
+          await openRemoteDirectory(activeTab.id, item.path)
+        } else {
+          await openRemoteFileForEdit(activeTab.id, item)
+        }
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleOpenRemotePath = (targetPath: string) => {
+    if (!activeTab) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setIsBusy(true)
+        await openRemoteDirectory(activeTab.id, targetPath)
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleRefreshWorkspace = () => {
+    if (!activeTab || !activeSession) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setIsBusy(true)
+        await openLocalDirectory(localPath)
+        await openRemoteDirectory(activeTab.id, activeSession.remotePath)
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleUploadFiles = (items: LocalFileItem[]) => {
+    if (!desktopApi) {
+      return
+    }
+
+    void (async () => {
+      try {
+        setIsBusy(true)
+        await uploadLocalPaths(items.map((item) => item.path))
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleChooseUploadFiles = () => {
+    if (!desktopApi) {
+      return
+    }
+
+    void (async () => {
+      const filePaths = await desktopApi.selectLocalFiles(localPath)
+      if (!filePaths.length) {
+        return
+      }
+
+      try {
+        setIsBusy(true)
+        await uploadLocalPaths(filePaths)
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
+
+  const handleDownloadFiles = (items: RemoteFileItem[], targetDirectory?: string) => {
+    if (!desktopApi || !activeTab) {
+      return
+    }
+
+    void (async () => {
+      const files = items.filter((row) => row.type === 'file')
+      if (!files.length) {
+        return
+      }
+
+      const downloadDirectory = targetDirectory ?? await desktopApi.selectLocalDirectory()
+      if (!downloadDirectory) {
+        return
+      }
+
+      try {
+        setIsBusy(true)
+        for (const item of files) {
+          const snapshot = await desktopApi.downloadFile(activeTab.id, item.path, downloadDirectory)
+          applySnapshot(snapshot)
+        }
+        await openLocalDirectory(downloadDirectory)
+      } catch (err) {
+        setError((err as Error).message)
+      } finally {
+        setIsBusy(false)
+      }
+    })()
+  }
 
   if (isConnectionManagerWindow) {
     return (
@@ -763,8 +947,9 @@ export function App() {
     <>
       <div className="fs-shell" style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
         <TabBar
-          activeHomeTabId={activeHomeTabId}
+          activeHomeTabId={activeLocalTabId}
           activeSessionTabId={workspace.activeTabId}
+          locale={locale}
           onAddHomeTab={handleAddHomeTab}
           onActivateHome={handleActivateHome}
           onActivateSession={(tabId) => {
@@ -789,13 +974,19 @@ export function App() {
           onOpenTabContext={(event, target) => {
             setTabContextMenu({ x: event.clientX, y: event.clientY, target })
           }}
+          onSetLocale={(nextLocale) => {
+            setLocale(nextLocale)
+            setLocaleState(nextLocale)
+          }}
+          onSetTheme={setThemeMode}
           orderedTabs={orderedTabs}
+          theme={themeMode}
         />
 
         <aside className="fs-sidebar" style={{ position: 'relative' }}>
-          <SystemSidebar activeProfile={activeProfile} activeSession={activeSession} />
+          <SystemSidebar activeProfile={activeProfile} activeSession={activeSession} onOpenSystemInfo={handleOpenSystemInfo} />
           <div
-            aria-label="Resize sidebar"
+            aria-label={t.resizeSidebar}
             className={`sidebar-resizer ${isResizingSidebar ? 'is-active' : ''}`}
             onMouseDown={() => setIsResizingSidebar(true)}
             role="separator"
@@ -805,127 +996,28 @@ export function App() {
         <main className={`fs-main ${error ? 'has-status' : 'no-status'}`}>
           {error ? <div className="status-message">{error}</div> : null}
           <div className="workspace-stage">
-            {activeTab && activeSession ? (
-              <SessionWorkspace
-                activeTab={activeTab}
-                activeSession={activeSession}
-                localItems={localItems}
-                localPath={localPath}
-                onOpenLocalItem={handleOpenLocalItem}
-                onOpenLocalPath={(targetPath) => {
-                  void openLocalDirectory(targetPath).catch((err: Error) => setError(err.message))
-                }}
-                onOpenRemoteItem={(item) => {
-                  if (!desktopApi) {
-                    return
-                  }
-
-                  void (async () => {
-                    try {
-                      setIsBusy(true)
-                      if (item.type === 'folder') {
-                        await openRemoteDirectory(activeTab.id, item.path)
-                      } else {
-                        await openRemoteFileForEdit(activeTab.id, item)
-                      }
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onOpenRemotePath={(targetPath) => {
-                  void (async () => {
-                    try {
-                      setIsBusy(true)
-                      await openRemoteDirectory(activeTab.id, targetPath)
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onRefresh={() => {
-                  void (async () => {
-                    try {
-                      setIsBusy(true)
-                      await openLocalDirectory(localPath)
-                      await openRemoteDirectory(activeTab.id, activeSession.remotePath)
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onUploadFiles={(items) => {
-                  if (!desktopApi) return
-                  void (async () => {
-                    try {
-                      setIsBusy(true)
-                      for (const item of items.filter((row) => row.type === 'file')) {
-                        const snapshot = await desktopApi.uploadFile(activeTab.id, item.path, activeSession.remotePath)
-                        applySnapshot(snapshot)
-                      }
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onChooseUploadFiles={() => {
-                  if (!desktopApi) return
-                  void (async () => {
-                    const filePaths = await desktopApi.selectLocalFiles(localPath)
-                    if (!filePaths.length) return
-                    try {
-                      setIsBusy(true)
-                      for (const filePath of filePaths) {
-                        const snapshot = await desktopApi.uploadFile(activeTab.id, filePath, activeSession.remotePath)
-                        applySnapshot(snapshot)
-                      }
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onDownloadFiles={(items, targetDirectory) => {
-                  if (!desktopApi) return
-                  void (async () => {
-                    const files = items.filter((row) => row.type === 'file')
-                    if (!files.length) return
-                    const downloadDirectory = targetDirectory ?? await desktopApi.selectLocalDirectory()
-                    if (!downloadDirectory) return
-                    try {
-                      setIsBusy(true)
-                      for (const item of files) {
-                        const snapshot = await desktopApi.downloadFile(activeTab.id, item.path, downloadDirectory)
-                        applySnapshot(snapshot)
-                      }
-                      await openLocalDirectory(downloadDirectory)
-                    } catch (err) {
-                      setError((err as Error).message)
-                    } finally {
-                      setIsBusy(false)
-                    }
-                  })()
-                }}
-                onDropUpload={handleDropUpload}
-              />
-            ) : (
-              <HomeWorkspace
-                profiles={workspace.profiles}
-                folders={workspace.folders || []}
-                isDesktopRuntime={isDesktopRuntime}
-                onCreate={openCreateConnection}
-                onOpen={handleOpenProfile}
-              />
-            )}
+            <WorkspaceStage
+              activeLocalTab={activeLocalTab}
+              activeProfile={activeProfile}
+              activeSession={activeSession}
+              activeTab={activeTab}
+              folders={workspace.folders || []}
+              localItems={localItems}
+              localPath={localPath}
+              profiles={workspace.profiles}
+              onChooseUploadFiles={handleChooseUploadFiles}
+              onDownloadFiles={handleDownloadFiles}
+              onDropUpload={handleDropUpload}
+              onOpenLocalItem={handleOpenLocalItem}
+              onOpenLocalPath={(targetPath) => {
+                void openLocalDirectory(targetPath).catch((err: Error) => setError(err.message))
+              }}
+              onOpenProfile={handleOpenProfile}
+              onOpenRemoteItem={handleOpenRemoteItem}
+              onOpenRemotePath={handleOpenRemotePath}
+              onRefresh={handleRefreshWorkspace}
+              onUploadFiles={handleUploadFiles}
+            />
           </div>
         </main>
 
@@ -937,16 +1029,27 @@ export function App() {
         />
 
         {showTransfers ? (
-          <TransferPopover transfers={workspace.transfers} onClose={() => setShowTransfers(false)} />
+          <TransferPopover
+            transfers={workspace.transfers}
+            onCancelTransfer={(transferId) => {
+              if (!desktopApi) return
+              void desktopApi.cancelTransfer(transferId).then((snapshot) => {
+                applySnapshot(snapshot)
+              }).catch((err: Error) => {
+                setError(err.message)
+              })
+            }}
+            onClose={() => setShowTransfers(false)}
+          />
         ) : null}
       </div>
 
       {tabContextMenu ? (
         <TabContextMenu
           canConnectAll={workspace.tabs.some((tab) => tab.status !== 'connected' && tab.status !== 'connecting')}
-          canCloseAll={homeTabs.length + workspace.tabs.length > 0}
-          canCloseCurrent={tabContextMenu.target.kind === 'session' ? true : homeTabs.length + workspace.tabs.length > 1}
-          canCloseOthers={homeTabs.length + workspace.tabs.length > 1}
+          canCloseAll={localTabs.length + workspace.tabs.length > 0}
+          canCloseCurrent={tabContextMenu.target.kind === 'session' ? true : localTabs.length + workspace.tabs.length > 1}
+          canCloseOthers={localTabs.length + workspace.tabs.length > 1}
           isSessionTab={tabContextMenu.target.kind === 'session'}
           onAction={(action) => {
             void handleTabContextAction(action)
@@ -1011,4 +1114,22 @@ export function App() {
       ) : null}
     </>
   )
+}
+
+function extractDroppedLocalPaths(event: DragEvent<HTMLDivElement>) {
+  const desktopApi = window.termdock
+  const fileList = Array.from(event.dataTransfer.files)
+  const filePaths = (
+    desktopApi?.getDroppedFilePaths?.(fileList)
+    ?? fileList.map((file) => (file as File & { path?: string }).path).filter(Boolean)
+  ).filter((filePath): filePath is string => Boolean(filePath))
+
+  if (filePaths.length) {
+    return filePaths
+  }
+
+  return Array.from(event.dataTransfer.items)
+    .map((item) => item.getAsFile() as (File & { path?: string }) | null)
+    .map((file) => file?.path)
+    .filter((filePath): filePath is string => Boolean(filePath))
 }

@@ -14,11 +14,24 @@ function parseMemory(memStr: string): number {
 
 export function SystemSidebar({
   activeProfile,
-  activeSession
+  activeSession,
+  onOpenSystemInfo
 }: {
   activeProfile: ConnectionProfile | null
   activeSession: SessionSnapshot | null
+  onOpenSystemInfo(): void
 }) {
+  if (!activeSession) {
+    return (
+      <section className="sys-card sys-card-empty">
+        <div className="sidebar-empty-state">
+          <strong>{t.noConnection}</strong>
+          <p>{t.noConnectionDescription}</p>
+        </div>
+      </section>
+    )
+  }
+
   const [sortMode, setSortMode] = useState<'memory' | 'cpu' | 'command'>('cpu')
   const metrics = activeSession?.systemMetrics
   const internalIp = metrics?.ip || '-'
@@ -40,7 +53,7 @@ export function SystemSidebar({
         return parseMemory(b.memory) - parseMemory(a.memory)
       }
       return 0
-    }).slice(0, 20)
+    }).slice(0, 4)
   }, [metrics?.topProcesses, sortMode])
 
   return (
@@ -50,12 +63,25 @@ export function SystemSidebar({
           <AddressLine label={t.privateIp} value={internalIp} />
           <AddressLine label={t.accessAddress} value={accessAddress} />
         </div>
-        <button className="system-title" type="button">{t.systemInfo}</button>
-        <div className="metric-line"><span>{t.running}</span><strong>{metrics?.uptime ?? '-'}</strong></div>
-        <div className="metric-line"><span>{t.load}</span><strong>{metrics?.load ?? '-'}</strong></div>
-        <Meter label={t.cpu} value={metrics?.cpuPercent ?? 0} tone="green" caption={metrics ? `${metrics.cpuPercent}%` : '0%'} />
-        <Meter label={t.memory} value={metrics?.memoryPercent ?? 0} tone="orange" caption={metrics?.memoryUsage ?? '0/0'} />
-        <Meter label={t.swap} value={metrics?.swapPercent ?? 0} tone="yellow" caption={metrics?.swapUsage ?? '0/0'} />
+        <button className="system-title" onClick={onOpenSystemInfo} type="button">{t.systemInfo}</button>
+        <div className="metric-line"><span>{t.running}</span><strong className="value">{metrics?.uptime ?? '-'}</strong></div>
+        <div className="metric-line"><span>{t.load}</span><strong className="value">{metrics?.load ?? '-'}</strong></div>
+        <Meter
+          label={t.cpu}
+          value={metrics?.cpuPercent ?? 0}
+          tone="green"
+          caption=""
+          percent={metrics ? `${metrics.cpuPercent}%` : '0%'}
+        />
+        <MemoryMeter metrics={metrics} />
+        <Meter
+          label={t.swap}
+          value={metrics?.swapPercent ?? 0}
+          tone={getMetricTone(metrics?.swapPercent ?? 0).replace('status-', '')}
+          caption={metrics?.swapUsage ?? '0/0'}
+          percent={metrics ? `${metrics.swapPercent}%` : '0%'}
+          dotTone={getMetricTone(metrics?.swapPercent ?? 0)}
+        />
         <div className="mini-tabs">
           <span className={sortMode === 'memory' ? 'active' : ''} onClick={() => setSortMode('memory')}>{t.memory}</span>
           <span className={sortMode === 'cpu' ? 'active' : ''} onClick={() => setSortMode('cpu')}>{t.cpu}</span>
@@ -91,20 +117,86 @@ function AddressLine({ label, value }: { label: string; value: string }) {
         }}
         type="button"
       >
-        复制
+        {t.copy}
       </button>
     </div>
   )
 }
 
-function Meter({ label, value, tone, caption }: { label: string; value: number; tone: string; caption: string }) {
+function Meter({ label, value, tone, caption, percent, dotTone }: { label: string; value: number; tone: string; caption: string; percent?: string; dotTone?: string }) {
   return (
-    <div className="meter-row">
-      <span>{label}</span>
+    <div className="meter-group">
+      <div className="meter-header">
+        <span>{label}</span>
+        <strong className="metric-chip-summary">
+          {dotTone && <i className={`metric-dot ${dotTone}`} />}
+          <span>{caption}</span>
+          {percent && <span className="metric-percent">{percent}</span>}
+        </strong>
+      </div>
       <div className="meter-track"><i className={`meter-fill ${tone}`} style={{ width: `${value}%` }} /></div>
-      <strong>{caption}</strong>
     </div>
   )
+}
+
+function MemoryMeter({ metrics }: { metrics?: SystemMetrics }) {
+  const total = parseUsageTotal(metrics?.memoryUsage)
+  const app = parseMemory(metrics?.memoryAppUsage ?? '')
+  const cache = parseMemory(metrics?.memoryCacheUsage ?? '')
+  const kernel = parseMemory(metrics?.memoryKernelUsage ?? '')
+  const memoryTone = getMetricTone(metrics?.memoryPercent ?? 0)
+  const segments = total > 0
+    ? [
+        { key: 'app', label: t.app, value: metrics?.memoryAppUsage ?? '-', width: Math.max(0, Math.min(100, (app / total) * 100)) },
+        { key: 'cache', label: t.cacheLabel, value: metrics?.memoryCacheUsage ?? '-', width: Math.max(0, Math.min(100, (cache / total) * 100)) },
+        { key: 'kernel', label: t.kernelLabel, value: metrics?.memoryKernelUsage ?? '-', width: Math.max(0, Math.min(100, (kernel / total) * 100)) }
+      ].filter((segment) => parseMemory(segment.value) > 0)
+    : []
+
+  return (
+    <div className="meter-group memory-meter-group">
+      <div className="meter-header">
+        <span>{t.memory}</span>
+        <strong className="metric-chip-summary">
+          <i className={`metric-dot ${memoryTone}`} />
+          <span>{metrics?.memoryUsage ?? '0/0'}</span>
+          <span className="metric-percent">{metrics ? `${metrics.memoryPercent}%` : '0%'}</span>
+        </strong>
+      </div>
+      <div className="meter-track meter-track-stacked">
+        {segments.length ? segments.map((segment) => (
+          <i
+            className={`meter-fill stacked ${segment.key}`}
+            key={segment.key}
+            style={{ width: `${segment.width}%` }}
+          />
+        )) : <i className="meter-fill orange" style={{ width: `${metrics?.memoryPercent ?? 0}%` }} />}
+
+        {segments.length ? (
+          <div className="memory-hover-popover">
+            {segments.map((segment) => (
+              <div className="memory-hover-row" key={segment.key}>
+                <i className={`metric-dot ${segment.key}`} />
+                <span className="label">{segment.label}</span>
+                <span className="value">{segment.value}</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function parseUsageTotal(usage?: string) {
+  if (!usage || !usage.includes('/')) return 0
+  return parseMemory(usage.split('/')[1] ?? '')
+}
+
+function getMetricTone(percent: number) {
+  if (percent >= 85) return 'status-red'
+  if (percent >= 60) return 'status-yellow'
+  return 'status-green'
 }
 
 function ProcessTable({ rows }: { rows: SystemMetrics['topProcesses'] }) {
@@ -153,47 +245,10 @@ function buildLinePath(samples: NetworkSamplePoint[], key: 'rx' | 'tx', maxValue
   return path
 }
 
-function resampleSeries(samples: NetworkSamplePoint[], targetLength: number) {
-  if (!samples.length) {
-    return Array.from({ length: targetLength }, () => ({ rx: 0, tx: 0 }))
-  }
-
-  if (samples.length === targetLength) {
-    return samples
-  }
-
-  if (samples.length > targetLength) {
-    return Array.from({ length: targetLength }, (_value, index) => {
-      const start = Math.floor((index / targetLength) * samples.length)
-      const end = Math.floor(((index + 1) / targetLength) * samples.length)
-      const bucket = samples.slice(start, Math.max(start + 1, end))
-      const rx = bucket.reduce((sum, item) => sum + item.rx, 0) / bucket.length
-      const tx = bucket.reduce((sum, item) => sum + item.tx, 0) / bucket.length
-
-      return {
-        rx: Math.round(rx),
-        tx: Math.round(tx)
-      }
-    })
-  }
-
-  return Array.from({ length: targetLength }, (_value, index) => {
-    if (targetLength === 1) {
-      return samples[0]
-    }
-
-    const position = (index / (targetLength - 1)) * (samples.length - 1)
-    const leftIndex = Math.floor(position)
-    const rightIndex = Math.min(samples.length - 1, Math.ceil(position))
-    const progress = position - leftIndex
-    const left = samples[leftIndex]
-    const right = samples[rightIndex]
-
-    return {
-      rx: Math.round(left.rx + (right.rx - left.rx) * progress),
-      tx: Math.round(left.tx + (right.tx - left.tx) * progress)
-    }
-  })
+function buildScrollingWindow(samples: NetworkSamplePoint[], visibleCount: number) {
+  const windowSize = visibleCount + 1
+  const padded = Array.from({ length: Math.max(0, windowSize - samples.length) }, () => ({ rx: 0, tx: 0 }))
+  return [...padded, ...samples].slice(-windowSize)
 }
 
 function formatTrafficLabel(value: number) {
@@ -207,12 +262,23 @@ function formatTrafficLabel(value: number) {
 }
 
 function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
+  const visibleSampleCount = 64
+  const chartStep = 100 / Math.max(1, visibleSampleCount - 1)
   const [selectedInterface, setSelectedInterface] = useState(metrics?.activeNetworkInterface ?? '')
-  const rawSamples = metrics?.networkSamples.length ? metrics.networkSamples : Array.from({ length: 120 }, () => ({ rx: 0, tx: 0 }))
-  const samples = useMemo(() => resampleSeries(rawSamples, 64), [rawSamples])
+  const interfaceOptions = metrics?.networkInterfaces.length ? metrics.networkInterfaces : ['-']
+  const currentRates = metrics?.networkRatesByInterface?.[selectedInterface] ?? metrics?.networkRates
+  const rawSamples = metrics?.networkSamplesByInterface?.[selectedInterface]?.length
+    ? metrics.networkSamplesByInterface[selectedInterface]
+    : metrics?.networkSamples.length
+      ? metrics.networkSamples
+      : []
+  const samples = useMemo(() => buildScrollingWindow(rawSamples, visibleSampleCount), [rawSamples])
   const [displaySamples, setDisplaySamples] = useState(samples)
+  const [chartOffset, setChartOffset] = useState(-chartStep)
   const animationFrameRef = useRef<number | null>(null)
   const previousInterfaceRef = useRef(selectedInterface)
+  const previousLastSampleRef = useRef(rawSamples.at(-1))
+  const previousSampleCountRef = useRef(rawSamples.length)
 
   const activityValues = displaySamples.map((sample) => Math.max(sample.rx, sample.tx))
   const maxValue = Math.max(...activityValues, 1)
@@ -221,12 +287,22 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
   const chartScale = [maxValue, maxValue * 0.66, maxValue * 0.33]
 
   useEffect(() => {
-    setSelectedInterface(metrics?.activeNetworkInterface ?? '')
-  }, [metrics?.activeNetworkInterface])
+    if (!interfaceOptions.includes(selectedInterface)) {
+      setSelectedInterface(metrics?.activeNetworkInterface ?? interfaceOptions[0] ?? '')
+    }
+  }, [interfaceOptions, metrics?.activeNetworkInterface, selectedInterface])
 
   useEffect(() => {
     const interfaceChanged = previousInterfaceRef.current !== selectedInterface
     previousInterfaceRef.current = selectedInterface
+    const latestSample = rawSamples.at(-1)
+    const previousLastSample = previousLastSampleRef.current
+    const sampleAdvanced = previousSampleCountRef.current !== rawSamples.length
+      || previousLastSample?.rx !== latestSample?.rx
+      || previousLastSample?.tx !== latestSample?.tx
+
+    previousLastSampleRef.current = latestSample
+    previousSampleCountRef.current = rawSamples.length
 
     if (animationFrameRef.current !== null) {
       cancelAnimationFrame(animationFrameRef.current)
@@ -235,23 +311,26 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
 
     if (interfaceChanged) {
       setDisplaySamples(samples)
+      setChartOffset(-chartStep)
       return
     }
 
-    const fromSamples = displaySamples.length === samples.length ? displaySamples : samples
+    if (!sampleAdvanced) {
+      setDisplaySamples(samples)
+      setChartOffset(-chartStep)
+      return
+    }
+
     const startTime = performance.now()
-    const duration = 260
+    const duration = 420
+
+    setDisplaySamples(samples)
+    setChartOffset(0)
 
     const animate = (now: number) => {
       const progress = Math.min(1, (now - startTime) / duration)
       const eased = 1 - Math.pow(1 - progress, 3)
-
-      setDisplaySamples(
-        samples.map((sample, index) => ({
-          rx: Math.round(fromSamples[index].rx + (sample.rx - fromSamples[index].rx) * eased),
-          tx: Math.round(fromSamples[index].tx + (sample.tx - fromSamples[index].tx) * eased)
-        }))
-      )
+      setChartOffset(-chartStep * eased)
 
       if (progress < 1) {
         animationFrameRef.current = requestAnimationFrame(animate)
@@ -275,12 +354,12 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
       <div className="network-panel">
         <div className="network-rates">
           <span className="network-rate up">
-            <i>UP</i>
-            <strong>{metrics?.networkRates.tx ?? '0B'}</strong>
+            <i>↑</i>
+            <strong>{currentRates?.tx ?? '0B'}</strong>
           </span>
           <span className="network-rate down">
-            <i>DN</i>
-            <strong>{metrics?.networkRates.rx ?? '0B'}</strong>
+            <i>↓</i>
+            <strong>{currentRates?.rx ?? '0B'}</strong>
           </span>
         </div>
         <select
@@ -288,8 +367,8 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
           value={selectedInterface}
           onChange={(event) => setSelectedInterface(event.target.value)}
         >
-          {(metrics?.networkInterfaces.length ? metrics.networkInterfaces : ['-']).map((name) => (
-            <option key={name} value={name}>{name}</option>
+          {interfaceOptions.map((name) => (
+            <option key={name} value={name}>{name === 'all' ? t.total : name}</option>
           ))}
         </select>
       </div>
@@ -304,8 +383,10 @@ function NetworkPanel({ metrics }: { metrics?: SystemMetrics }) {
             <path className="network-guide major" d="M 0 12 H 100" />
             <path className="network-guide minor" d="M 0 44 H 100" />
             <path className="network-guide minor" d="M 0 76 H 100" />
-            <path className="network-path tx-path" d={txPath} />
-            <path className="network-path rx-path" d={rxPath} />
+            <g transform={`translate(${chartOffset} 0)`}>
+              <path className="network-path tx-path" d={txPath} />
+              <path className="network-path rx-path" d={rxPath} />
+            </g>
           </svg>
         </div>
       </div>

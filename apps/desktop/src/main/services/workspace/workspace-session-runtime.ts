@@ -111,9 +111,6 @@ export class WorkspaceSessionRuntime {
       await controller.connect()
       this.liveControllers.set(tabId, controller)
 
-      const files = await controller.listRemoteFiles()
-      const systemMetrics =
-        controller.type === 'ssh' ? await controller.refreshSystemMetrics() : undefined
       const current = this.sessions.get(tabId)
       if (!current) {
         return
@@ -125,13 +122,49 @@ export class WorkspaceSessionRuntime {
         terminalTranscript:
           controller.type === 'ssh' ? controller.getTerminalTranscript() : undefined,
         remotePath: controller.getRemotePath(),
-        remoteFiles: files,
         connected: true,
-        systemMetrics: systemMetrics ? this.mergeNetworkHistory(undefined, systemMetrics) : undefined
+        remoteFiles: current.remoteFiles,
+        systemMetrics: current.systemMetrics
       })
       this.options.updateTabStatus(tabId, 'connected')
+      await this.emitSnapshotForTab(tabId)
+
+      let remoteFilesError: string | null = null
+      try {
+        const files = await controller.listRemoteFiles()
+        const latest = this.sessions.get(tabId)
+        if (latest) {
+          this.sessions.set(tabId, {
+            ...latest,
+            remotePath: controller.getRemotePath(),
+            remoteFiles: files
+          })
+          await this.emitSnapshotForTab(tabId)
+        }
+      } catch (error) {
+        remoteFilesError = error instanceof Error ? error.message : '远程目录读取失败'
+      }
+
       if (controller.type === 'ssh') {
-        this.startMetricsPolling(tabId, controller)
+        const systemMetrics = await controller.refreshSystemMetrics()
+        const latest = this.sessions.get(tabId)
+        if (latest && systemMetrics) {
+          this.sessions.set(tabId, {
+            ...latest,
+            systemMetrics: this.mergeNetworkHistory(undefined, systemMetrics)
+          })
+          await this.emitSnapshotForTab(tabId)
+        }
+        if (remoteFilesError) {
+          controller.pushClientNotice(`SFTP 初始化失败: ${remoteFilesError}`)
+        }
+      }
+
+      if (controller.type === 'ssh') {
+        const profile = controller['profile']
+        if (profile.type !== 'ssh' || profile.enableExecChannel !== false) {
+          this.startMetricsPolling(tabId, controller)
+        }
       }
     } catch (error) {
       const current = this.sessions.get(tabId)
@@ -281,14 +314,24 @@ export class WorkspaceSessionRuntime {
     nextMetrics: NonNullable<SessionSnapshot['systemMetrics']>
   ) {
     const nextPoint = nextMetrics.networkSamples.at(-1) ?? { rx: 0, tx: 0 }
-    const previousSamples =
-      previousMetrics?.activeNetworkInterface === nextMetrics.activeNetworkInterface
-        ? previousMetrics.networkSamples
-        : []
+    const previousSamples = previousMetrics?.networkSamples ?? []
+    const previousByInterface = previousMetrics?.networkSamplesByInterface ?? {}
+    const nextByInterface = nextMetrics.networkSamplesByInterface ?? {}
+    const mergedByInterface = Object.fromEntries(
+      Object.entries(nextByInterface).map(([name, samples]) => {
+        const nextInterfacePoint = samples.at(-1) ?? { rx: 0, tx: 0 }
+        const previousInterfaceSamples = previousByInterface[name] ?? []
+        return [
+          name,
+          [...previousInterfaceSamples, nextInterfacePoint].slice(-WorkspaceSessionRuntime.NETWORK_HISTORY_LIMIT)
+        ]
+      })
+    )
 
     return {
       ...nextMetrics,
-      networkSamples: [...previousSamples, nextPoint].slice(-WorkspaceSessionRuntime.NETWORK_HISTORY_LIMIT)
+      networkSamples: [...previousSamples, nextPoint].slice(-WorkspaceSessionRuntime.NETWORK_HISTORY_LIMIT),
+      networkSamplesByInterface: mergedByInterface
     }
   }
 }

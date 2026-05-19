@@ -8,6 +8,10 @@ export function registerTransferHandlers(services: IpcServices) {
     workspaceService.queueUpload(fileNames)
   )
 
+  ipcMain.handle('transfer:cancel', (event, transferId: string) =>
+    workspaceService.cancelTransfer(transferId, event.sender)
+  )
+
   ipcMain.handle('transfer:uploadFile', (event, tabId: string, localPath: string, remoteDirectory: string) =>
     workspaceService.uploadFile(tabId, localPath, remoteDirectory, event.sender)
   )

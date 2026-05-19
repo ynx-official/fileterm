@@ -1,0 +1,192 @@
+:root[data-theme='default-light'] {
+  color-scheme: light;
+
+  --bg-main: #f4f5f7;
+  --bg-sidebar: #ffffff;
+  --bg-card: #ffffff;
+  --bg-hover: #eceff3;
+  --bg-active: #dde2e8;
+
+  --border-light: rgba(15, 23, 42, 0.11);
+  --border-dark: rgba(15, 23, 42, 0.2);
+
+  --text-main: #1f2933;
+  --text-muted: #66717f;
+
+  --primary: #5f6874;
+  --primary-hover: #4f5864;
+  --accent-text: #3f4b59;
+  --selection-bg: #dfe5ec;
+  --danger: #c93d3d;
+  --success: #168a53;
+  --warning: #b77900;
+
+  --meter-track: rgba(15, 23, 42, 0.12);
+
+  --metric-app: #f2b000;
+  --metric-cache: #168a53;
+  --metric-kernel: #1e88e5;
+  --metric-status-green: #168a53;
+  --metric-status-yellow: #f2b000;
+  --metric-status-red: #d94e4e;
+  --popover-bg: #ffffff;
+  --popover-border: var(--border-light);
+  --popover-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+
+  --terminal-bg: #ffffff;
+  --terminal-text: #17202a;
+  --terminal-cmd-bg: rgba(15, 23, 42, 0.08);
+  --terminal-cmd-text: #111827;
+}
+
+:root[data-theme='default-light'] .fs-shell,
+:root[data-theme='default-light'] .home-workspace,
+:root[data-theme='default-light'] .session-workspace,
+:root[data-theme='default-light'] .terminal-area,
+:root[data-theme='default-light'] .terminal-host,
+:root[data-theme='default-light'] .system-info-workspace {
+  background: var(--bg-main);
+}
+
+:root[data-theme='default-light'] .fs-sidebar,
+:root[data-theme='default-light'] .titlebar-brand,
+:root[data-theme='default-light'] .tabbar-folder-button,
+:root[data-theme='default-light'] .file-tabs,
+:root[data-theme='default-light'] .disk-head,
+:root[data-theme='default-light'] .transfer-strip {
+  background: var(--bg-sidebar);
+  border-color: var(--border-light);
+  color: var(--text-main);
+}
+
+:root[data-theme='default-light'] .sys-card,
+:root[data-theme='default-light'] .disk-table,
+:root[data-theme='default-light'] .process-table,
+:root[data-theme='default-light'] .quick-panel,
+:root[data-theme='default-light'] .modal-card,
+:root[data-theme='default-light'] .manager-table,
+:root[data-theme='default-light'] .file-manager,
+:root[data-theme='default-light'] .file-table-shell,
+:root[data-theme='default-light'] .local-pane,
+:root[data-theme='default-light'] .remote-pane,
+:root[data-theme='default-light'] .system-info-card {
+  background: var(--bg-card);
+  border-color: var(--border-light);
+  color: var(--text-main);
+}
+
+:root[data-theme='default-light'] .fs-tab,
+:root[data-theme='default-light'] .file-tabs button,
+:root[data-theme='default-light'] .file-tab-actions button,
+:root[data-theme='default-light'] .flat-button,
+:root[data-theme='default-light'] .transfer-segments button,
+:root[data-theme='default-light'] .mini-tabs span,
+:root[data-theme='default-light'] .network-select,
+:root[data-theme='default-light'] .ssh-grid input,
+:root[data-theme='default-light'] .ssh-grid select,
+:root[data-theme='default-light'] .ssh-grid textarea,
+:root[data-theme='default-light'] .connection-form input,
+:root[data-theme='default-light'] .connection-form select {
+  background: #f7f8fa;
+  border-color: var(--border-light);
+  color: var(--text-main);
+}
+
+:root[data-theme='default-light'] .fs-tab.active,
+:root[data-theme='default-light'] .file-tabs button.active,
+:root[data-theme='default-light'] .transfer-segments button.active,
+:root[data-theme='default-light'] .transfer-segments button:hover,
+:root[data-theme='default-light'] .mini-tabs span.active,
+:root[data-theme='default-light'] .quick-row:hover,
+:root[data-theme='default-light'] .manager-row:hover,
+:root[data-theme='default-light'] .fs-file-table tbody tr:hover,
+:root[data-theme='default-light'] .fs-file-table tbody tr.is-selected,
+:root[data-theme='default-light'] .fs-file-table tbody tr.is-selected:nth-child(even) {
+  background: var(--selection-bg);
+  color: var(--text-main);
+}
+
+:root[data-theme='default-light'] .context-menu {
+  background: rgba(255, 255, 255, 0.96);
+  border-color: var(--border-light);
+  color: var(--text-main);
+  box-shadow: 0 16px 40px rgba(15, 23, 42, 0.18);
+}
+
+:root[data-theme='default-light'] .modal-backdrop {
+  background: rgba(15, 23, 42, 0.28);
+}
+
+:root[data-theme='default-light'] .ssh-modal-nav,
+:root[data-theme='default-light'] .ssh-fieldset,
+:root[data-theme='default-light'] .terminal-key-box,
+:root[data-theme='default-light'] .ssh-placeholder,
+:root[data-theme='default-light'] .file-split,
+:root[data-theme='default-light'] .file-split-resizer,
+:root[data-theme='default-light'] .file-editor-path {
+  background: #f7f8fa;
+  border-color: var(--border-light);
+  color: var(--text-main);
+}
+
+:root[data-theme='default-light'] .fs-file-table th,
+:root[data-theme='default-light'] .system-table th,
+:root[data-theme='default-light'] .disk-row:nth-child(even),
+:root[data-theme='default-light'] .fs-file-table tbody tr:nth-child(even),
+:root[data-theme='default-light'] .system-table tbody tr:nth-child(even) {
+  background: #f1f3f6;
+}
+
+:root[data-theme='default-light'] .system-title {
+  background: #f7f8fa;
+  color: var(--text-main);
+}
+
+:root[data-theme='default-light'] .meter-track {
+  background: rgba(15, 23, 42, 0.12);
+}
+
+:root[data-theme='default-light'] .metric-dot.app {
+  background: var(--metric-app);
+}
+
+:root[data-theme='default-light'] .metric-dot.cache {
+  background: var(--metric-cache);
+}
+
+:root[data-theme='default-light'] .metric-dot.kernel {
+  background: var(--metric-kernel);
+}
+
+:root[data-theme='default-light'] .metric-dot.status-green {
+  background: var(--metric-status-green);
+}
+
+:root[data-theme='default-light'] .metric-dot.status-yellow {
+  background: var(--metric-status-yellow);
+}
+
+:root[data-theme='default-light'] .metric-dot.status-red {
+  background: var(--metric-status-red);
+}
+
+:root[data-theme='default-light'] .meter-fill.app {
+  background: var(--metric-app);
+}
+
+:root[data-theme='default-light'] .meter-fill.cache {
+  background: var(--metric-cache);
+}
+
+:root[data-theme='default-light'] .meter-fill.kernel {
+  background: var(--metric-kernel);
+}
+
+:root[data-theme='default-light'] .meter-fill.green {
+  background: var(--success);
+}
+
+:root[data-theme='default-light'] .meter-fill.yellow,
+:root[data-theme='default-light'] .meter-fill.orange {
+  background: var(--warning);
+}

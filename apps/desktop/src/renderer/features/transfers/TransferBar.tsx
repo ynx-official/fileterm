@@ -17,7 +17,7 @@ export function TransferBar({
     <footer className="transfer-strip">
       <strong>{t.transferTasks}</strong>
       <button className="transfer-summary-button" onClick={onOpen} type="button">
-        {isPending ? '更新中...' : `${activeCount || runningTransfers(transfers)} ${t.runningTasks}`}
+        {isPending ? t.updating : `${activeCount || runningTransfers(transfers)} ${t.runningTasks}`}
       </button>
     </footer>
   )

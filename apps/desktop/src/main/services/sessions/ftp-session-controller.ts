@@ -45,17 +45,25 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
     return this.currentRemotePath
   }
 
+  async abortTransfer(): Promise<void> {
+    this.ftp.close()
+    this.connected = false
+  }
+
   async listRemoteFiles(): Promise<RemoteFileItem[]> {
+    await this.ensureConnected()
     return this.readRemoteDirectory(this.currentRemotePath)
   }
 
   async openRemotePath(nextPath: string): Promise<RemoteFileItem[]> {
+    await this.ensureConnected()
     await this.ftp.cd(nextPath)
     this.currentRemotePath = await this.ftp.pwd()
     return this.readRemoteDirectory(this.currentRemotePath)
   }
 
   async readRemoteFile(targetPath: string): Promise<string> {
+    await this.ensureConnected()
     const localPath = this.tempFilePath(targetPath)
     try {
       await this.ftp.downloadTo(localPath, targetPath)
@@ -66,22 +74,40 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
   }
 
   async writeRemoteFile(targetPath: string, content: string): Promise<void> {
+    await this.ensureConnected()
     const localPath = this.tempFilePath(targetPath)
     try {
       await writeFile(localPath, content, 'utf8')
+      await this.ensureRemoteDirectory(path.posix.dirname(targetPath))
       await this.ftp.uploadFrom(localPath, targetPath)
     } finally {
       void unlink(localPath).catch(() => undefined)
     }
   }
 
+  async ensureRemoteDirectory(targetPath: string): Promise<void> {
+    await this.ensureConnected()
+    if (!targetPath || targetPath === '.') {
+      return
+    }
+
+    const previousPath = await this.ftp.pwd()
+    try {
+      await this.ftp.ensureDir(targetPath)
+    } finally {
+      await this.ftp.cd(previousPath)
+    }
+  }
+
   async uploadFile(localPath: string, remotePath: string, onProgress: (progress: number) => void): Promise<void> {
+    await this.ensureConnected()
     const info = await stat(localPath)
     const total = Math.max(info.size, 1)
     this.ftp.trackProgress((progress) => {
       onProgress(Math.min(99, Math.round((progress.bytes / total) * 100)))
     })
     try {
+      await this.ensureRemoteDirectory(path.posix.dirname(remotePath))
       await this.ftp.uploadFrom(localPath, remotePath)
       onProgress(100)
     } finally {
@@ -90,6 +116,7 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
   }
 
   async downloadFile(remotePath: string, localPath: string, onProgress: (progress: number) => void): Promise<void> {
+    await this.ensureConnected()
     const total = Math.max(await this.ftp.size(remotePath), 1)
     this.ftp.trackProgress((progress) => {
       onProgress(Math.min(99, Math.round((progress.bytes / total) * 100)))
@@ -131,5 +158,11 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
 
   private tempFilePath(remotePath: string) {
     return path.join(os.tmpdir(), `termdock-${randomUUID()}-${path.posix.basename(remotePath) || 'remote-file'}`)
+  }
+
+  private async ensureConnected() {
+    if (!this.connected) {
+      await this.connect()
+    }
   }
 }
