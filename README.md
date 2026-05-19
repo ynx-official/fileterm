@@ -171,7 +171,7 @@ termdock/
       <a href="https://github.com/St0ff3l">
         <img src="https://avatars.githubusercontent.com/St0ff3l?s=120" width="72" height="72" alt="StOff31" />
         <br />
-        <sub><b>StOff31</b></sub>
+        <sub><b>St0ff3l</b></sub>
       </a>
     </td>
     <td>
