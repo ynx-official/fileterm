@@ -453,44 +453,57 @@
 }
 
 .command-toggle input,
-.command-editor-checkbox-row input {
+.command-editor-checkbox-row input,
+.command-toggle input[type='checkbox'],
+.command-editor-checkbox-row input[type='checkbox'] {
   appearance: none;
   -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
-  margin: 0;
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  margin: 0 !important;
   border: 1px solid var(--border-light);
-  border-radius: 999px;
+  border-radius: 999px !important;
   background: var(--bg-main);
   position: relative;
   flex: 0 0 auto;
+  display: inline-block;
+  vertical-align: middle;
   cursor: pointer;
   transition: border-color 0.2s ease, background 0.2s ease;
 }
 
 .command-toggle input::after,
-.command-editor-checkbox-row input::after {
+.command-editor-checkbox-row input::after,
+.command-toggle input[type='checkbox']::after,
+.command-editor-checkbox-row input[type='checkbox']::after {
   content: "";
   position: absolute;
   inset: 3px;
-  border-radius: 999px;
+  border-radius: 999px !important;
   background: var(--primary);
   transform: scale(0);
   transition: transform 0.16s ease;
 }
 
 .command-toggle input:checked,
-.command-editor-checkbox-row input:checked {
+.command-editor-checkbox-row input:checked,
+.command-toggle input[type='checkbox']:checked,
+.command-editor-checkbox-row input[type='checkbox']:checked {
   border-color: var(--primary);
 }
 
 .command-toggle input:checked::after,
-.command-editor-checkbox-row input:checked::after {
+.command-editor-checkbox-row input:checked::after,
+.command-toggle input[type='checkbox']:checked::after,
+.command-editor-checkbox-row input[type='checkbox']:checked::after {
   transform: scale(1);
 }
 
 .command-toggle input:focus-visible,
-.command-editor-checkbox-row input:focus-visible {
+.command-editor-checkbox-row input:focus-visible,
+.command-toggle input[type='checkbox']:focus-visible,
+.command-editor-checkbox-row input[type='checkbox']:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.08);
 }
@@ -762,7 +775,7 @@
   font-weight: 600;
 }
 
-.command-editor-dialog-form input,
+.command-editor-dialog-form input:not([type='checkbox']),
 .command-editor-dialog-form select,
 .command-editor-dialog-form textarea,
 .command-folder-dialog-form input {
@@ -774,7 +787,7 @@
   font-size: 12px;
 }
 
-.command-editor-dialog-form input,
+.command-editor-dialog-form input:not([type='checkbox']),
 .command-editor-dialog-form select,
 .command-folder-dialog-form input {
   height: 34px;
@@ -819,8 +832,10 @@
 }
 
 .command-editor-checkbox-row input {
-  width: 16px;
-  height: 16px;
+  width: 18px !important;
+  height: 18px !important;
+  min-width: 18px !important;
+  padding: 0 !important;
   flex: 0 0 auto;
 }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ConnectionProfile, NetworkSamplePoint, SessionSnapshot, SystemMetrics } from '@termdock/core'
 import { copyText } from '../../app/app-utils'
-import { t } from '../../i18n'
+import { getLocale, t } from '../../i18n'
 
 function parseMemory(memStr: string): number {
   if (!memStr) return 0
@@ -64,7 +64,7 @@ export function SystemSidebar({
           <AddressLine label={t.accessAddress} value={accessAddress} />
         </div>
         <button className="system-title" onClick={onOpenSystemInfo} type="button">{t.systemInfo}</button>
-        <div className="metric-line"><span>{t.running}</span><strong className="value">{metrics?.uptime ?? '-'}</strong></div>
+        <div className="metric-line"><span>{t.running}</span><strong className="value">{formatUptime(metrics?.uptime)}</strong></div>
         <div className="metric-line"><span>{t.load}</span><strong className="value">{metrics?.load ?? '-'}</strong></div>
         <Meter
           label={t.cpu}
@@ -191,6 +191,17 @@ function MemoryMeter({ metrics }: { metrics?: SystemMetrics }) {
 function parseUsageTotal(usage?: string) {
   if (!usage || !usage.includes('/')) return 0
   return parseMemory(usage.split('/')[1] ?? '')
+}
+
+function formatUptime(value?: string) {
+  if (!value) return '-'
+  if (getLocale() !== 'enUS') return value
+
+  return value
+    .replace(/(\d+)\s*天/g, '$1d')
+    .replace(/(\d+)\s*小时/g, '$1h')
+    .replace(/(\d+)\s*分钟/g, '$1m')
+    .replace(/(\d+)\s*秒/g, '$1s')
 }
 
 function getMetricTone(percent: number) {

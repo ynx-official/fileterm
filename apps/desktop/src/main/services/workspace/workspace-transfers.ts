@@ -13,18 +13,35 @@ export class WorkspaceTransfersState {
   }
 
   queueUploads(fileNames: string[]) {
-    const queued = fileNames.map((name, index) => ({
+    const queued = fileNames.map((name) => ({
       id: randomUUID(),
       direction: 'upload' as const,
       name,
-      progress: index === 0 ? 12 : 0,
-      status: index === 0 ? 'running' as const : 'queued' as const
+      progress: 0,
+      status: 'queued' as const
     }))
 
     this.transfers.unshift(...queued)
   }
 
   add(direction: TransferTask['direction'], name: string) {
+    const queuedIndex = this.transfers.findIndex((transfer) => (
+      transfer.direction === direction
+      && transfer.name === name
+      && transfer.status === 'queued'
+    ))
+    if (queuedIndex !== -1) {
+      const queuedTransfer = this.transfers[queuedIndex]
+      this.transfers[queuedIndex] = {
+        ...queuedTransfer,
+        progress: 0,
+        status: 'running',
+        message: undefined,
+        speed: undefined
+      }
+      return queuedTransfer.id
+    }
+
     const transferId = randomUUID()
     this.transfers.unshift({
       id: transferId,

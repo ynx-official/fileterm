@@ -3,6 +3,7 @@ import { t } from '../../i18n'
 
 export type ContextMenuEntry = {
   label?: string
+  shortcut?: string
   disabled?: boolean
   danger?: boolean
   action?(): void
@@ -91,7 +92,8 @@ export function ContextMenu({
           }}
           type="button"
         >
-          {item.label}
+          <span>{item.label}</span>
+          {item.shortcut ? <span className="context-menu-shortcut">{item.shortcut}</span> : null}
         </button>
       ))}
       <button className="context-close" type="button" onClick={onClose}>{t.closeTab}</button>

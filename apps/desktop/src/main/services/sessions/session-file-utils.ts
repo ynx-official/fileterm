@@ -236,6 +236,85 @@ cpu_info=$(awk -F: '
     }
   }
 ' /proc/cpuinfo 2>/dev/null)
+if [ -z "$cpu_info" ]; then
+  cpu_info=$(LC_ALL=C lscpu 2>/dev/null | awk -F: '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    /^Model name:/ { model=trim($2) }
+    /^Socket\\(s\\):/ { sockets=trim($2) + 0 }
+    /^Core\\(s\\) per socket:/ { cores_per_socket=trim($2) + 0 }
+    /^CPU\\(s\\):/ && total_cores == 0 { total_cores=trim($2) + 0 }
+    /^CPU max MHz:/ { frequency=trim($2) }
+    /^CPU MHz:/ && frequency == "" { frequency=trim($2) }
+    /^L3 cache:/ { cache=trim($2) }
+    /^L2 cache:/ && cache == "" { cache=trim($2) }
+    /^BogoMIPS:/ { bogomips=trim($2) }
+    END {
+      if (total_cores == 0 && sockets > 0 && cores_per_socket > 0) total_cores=sockets * cores_per_socket
+      if (model != "") printf "%s|%s|%s|%s|%s\\n", model, (total_cores > 0 ? total_cores : 0), (frequency == "" ? "-" : sprintf("%.3f", frequency + 0)), (cache == "" ? "-" : cache), (bogomips == "" ? "-" : bogomips)
+    }
+  ')
+fi
+gpu_info=$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits 2>/dev/null | awk -F',' '
+  function trim(value) {
+    sub(/^[[:space:]]+/, "", value)
+    sub(/[[:space:]]+$/, "", value)
+    return value
+  }
+  NF >= 3 {
+    model=trim($1)
+    driver=trim($2)
+    memory=trim($3)
+    printf "%s|NVIDIA|%s|%s MiB\\n", model, (driver == "" ? "-" : driver), (memory == "" ? "-" : memory)
+  }
+')
+if [ -z "$gpu_info" ]; then
+  gpu_info=$(lspci 2>/dev/null | awk '
+    BEGIN { IGNORECASE=1 }
+    /VGA compatible controller|3D controller|Display controller/ {
+      line=$0
+      sub(/^[^:]+: /, "", line)
+      vendor=line
+      sub(/[[:space:]].*$/, "", vendor)
+      printf "%s|%s|-|-\\n", line, (vendor == "" ? "-" : vendor)
+    }
+  ')
+fi
+if [ -z "$gpu_info" ]; then
+  gpu_info=$(lshw -C display 2>/dev/null | awk -F: '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    /^  \\*-display/ {
+      if (product != "" || vendor != "" || driver != "" || memory != "") {
+        printf "%s|%s|%s|%s\\n", (product == "" ? "-" : product), (vendor == "" ? "-" : vendor), (driver == "" ? "-" : driver), (memory == "" ? "-" : memory)
+      }
+      product=""
+      vendor=""
+      driver=""
+      memory=""
+      next
+    }
+    /^       product:/ { product=trim($2) }
+    /^       vendor:/ { vendor=trim($2) }
+    /^       size:/ { memory=trim($2) }
+    /^       configuration:/ {
+      if (match($0, /driver=[^[:space:]]+/)) {
+        driver=substr($0, RSTART + 7, RLENGTH - 7)
+      }
+    }
+    END {
+      if (product != "" || vendor != "" || driver != "" || memory != "") {
+        printf "%s|%s|%s|%s\\n", (product == "" ? "-" : product), (vendor == "" ? "-" : vendor), (driver == "" ? "-" : driver), (memory == "" ? "-" : memory)
+      }
+    }
+  ')
+fi
 ifaces=$(awk -F: 'NR>2 {name=$1; gsub(/[[:space:]]/,"",name); if (name != "lo") print name}' /proc/net/dev 2>/dev/null | paste -sd, -)
 active_iface=$(awk '$2 == 00000000 {print $1; exit}' /proc/net/route 2>/dev/null)
 [ -z "$active_iface" ] && active_iface=$(echo "$ifaces" | awk -F, '{print $1}')
@@ -273,6 +352,9 @@ echo "__SWAP__$swap"
 echo "__CPUINFO_START__"
 echo "$cpu_info"
 echo "__CPUINFO_END__"
+echo "__GPUINFO_START__"
+echo "$gpu_info"
+echo "__GPUINFO_END__"
 echo "__IFACES__$ifaces"
 echo "__ACTIVE_IFACE__$active_iface"
 echo "__RATES__$rx_rate|$tx_rate"
@@ -371,6 +453,15 @@ export function parseSystemMetrics(raw: string): SystemMetrics {
       bogomips
     }
   }).filter((row) => row.model)
+  const gpuInfoRows = readBlock('__GPUINFO_START__', '__GPUINFO_END__').map((line) => {
+    const [model, vendor, driver, memory] = line.split('|')
+    return {
+      model,
+      vendor: vendor || '-',
+      driver: driver || '-',
+      memory: memory || '-'
+    }
+  }).filter((row) => row.model)
   const transientCollectorCommands = new Set(['ps', 'awk', 'bash', 'sleep', 'sh'])
   const groupedProcesses = new Map<string, {
     memoryMb: number
@@ -432,6 +523,7 @@ export function parseSystemMetrics(raw: string): SystemMetrics {
       steal: Number(cpuSteal) || 0
     },
     cpuInfoRows,
+    gpuInfoRows,
     memoryPercent: Number(memPercent) || 0,
     memoryUsage: memTotal ? `${formatMegabytes(memUsed)}/${formatMegabytes(memTotal)}` : '0/0',
     memoryAppUsage: Number(memApp) > 0 ? formatMegabytes(memApp) : undefined,

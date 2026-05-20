@@ -133,6 +133,9 @@ export const previewState: WorkspaceSnapshot = {
         cpuInfoRows: [
           { model: 'Intel(R) Core(TM) i5-12600K', cores: 10, frequencyMHz: '3687.000', cache: '20480 KB', bogomips: '7374.00' }
         ],
+        gpuInfoRows: [
+          { model: 'Intel UHD Graphics 770', vendor: 'Intel', driver: 'i915', memory: 'Shared' }
+        ],
         memoryPercent: 68,
         memoryUsage: '7.9G/11.6G',
         memoryBreakdown: {

@@ -166,6 +166,13 @@ export interface CpuInfoRow {
   bogomips: string
 }
 
+export interface GpuInfoRow {
+  model: string
+  vendor: string
+  driver: string
+  memory: string
+}
+
 export interface CpuUsageBreakdown {
   user: number
   system: number
@@ -209,6 +216,7 @@ export interface SystemMetrics {
   cpuPercent: number
   cpuUsage: CpuUsageBreakdown
   cpuInfoRows: CpuInfoRow[]
+  gpuInfoRows: GpuInfoRow[]
   memoryPercent: number
   memoryUsage: string
   memoryAppUsage?: string

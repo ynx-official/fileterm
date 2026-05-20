@@ -73,10 +73,10 @@ export function FileManager({
   onDownloadFiles(items: RemoteFileItem[], targetDirectory?: string): void
   onDropUpload(event: DragEvent<HTMLDivElement>): void
   onRequestChangePermissions(pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem): void
-  onRequestDelete(pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem): void
+  onRequestDelete(pane: 'local' | 'remote', items: Array<LocalFileItem | RemoteFileItem>): void
   onRequestNewFile(pane: 'local' | 'remote', directoryPath: string): void
   onRequestNewFolder(pane: 'local' | 'remote', directoryPath: string): void
-  onRequestQuickDelete(pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem): void
+  onRequestQuickDelete(pane: 'local' | 'remote', items: Array<LocalFileItem | RemoteFileItem>): void
   onRequestRename(pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem): void
   onToggleRemoteFileAccessMode(): void
   remoteFileAccessMode: 'user' | 'root'
@@ -123,6 +123,25 @@ export function FileManager({
   const contextRemoteItem = contextMenu?.pane === 'remote'
     ? activeSession.remoteFiles.find((item) => item.path === contextMenu.path) ?? null
     : null
+  const contextLocalSelection = contextLocalItem && selectedLocalPaths.includes(contextLocalItem.path)
+    ? localItems.filter((item) => selectedLocalPaths.includes(item.path) && item.name !== '..')
+    : contextLocalItem && contextLocalItem.name !== '..' ? [contextLocalItem] : []
+  const contextRemoteSelection = contextRemoteItem && selectedRemotePaths.includes(contextRemoteItem.path)
+    ? selectedRemoteItems
+    : contextRemoteItem ? [contextRemoteItem] : []
+  const contextSelectionCount = contextMenu?.pane === 'local' ? contextLocalSelection.length : contextRemoteSelection.length
+  const isMultiContextSelection = contextSelectionCount > 1
+  const singleContextItem = contextMenu?.pane === 'local'
+    ? (contextLocalSelection.length === 1 ? contextLocalSelection[0] : contextLocalItem)
+    : (contextRemoteSelection.length === 1 ? contextRemoteSelection[0] : contextRemoteItem)
+  const canOpenContextItem = Boolean(singleContextItem)
+  const canCopyContextPath = Boolean(singleContextItem && !isMultiContextSelection)
+  const canDownloadContextItems = contextRemoteSelection.some((item) => item.type === 'file')
+  const canUploadContextItems = Boolean(!isMultiContextSelection && contextLocalSelection.length)
+    || Boolean(!isMultiContextSelection && contextMenu?.pane === 'remote')
+  const canCreateFromContext = !isMultiContextSelection
+  const canRenameContextItem = Boolean(singleContextItem && !isMultiContextSelection && singleContextItem.name !== '..')
+  const canChangeContextPermissions = Boolean(singleContextItem && !isMultiContextSelection && singleContextItem.name !== '..')
 
   const submitLocalPath = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -233,17 +252,17 @@ export function FileManager({
   }
 
   const openContextTarget = () => {
-    if (contextLocalItem) {
-      onOpenLocalItem(contextLocalItem)
+    if (contextMenu?.pane === 'local' && singleContextItem) {
+      onOpenLocalItem(singleContextItem as LocalFileItem)
     }
-    if (contextRemoteItem) {
-      onOpenRemoteItem(contextRemoteItem)
+    if (contextMenu?.pane === 'remote' && singleContextItem) {
+      onOpenRemoteItem(singleContextItem as RemoteFileItem)
     }
     setContextMenu(null)
   }
 
   const copyContextPath = () => {
-    const targetPath = contextLocalItem?.path ?? contextRemoteItem?.path
+    const targetPath = singleContextItem?.path
     if (targetPath) {
       copyText(targetPath)
     }
@@ -532,12 +551,19 @@ export function FileManager({
       )}
       {contextMenu ? (
         <FileContextMenu
+          canChangePermissions={canChangeContextPermissions}
+          canCopyPath={canCopyContextPath}
+          canCreate={canCreateFromContext}
+          canDownload={canDownloadContextItems}
+          canOpen={canOpenContextItem}
           canQuickDelete={contextMenu.pane === 'remote' && activeTab?.sessionType === 'ssh'}
-          item={contextLocalItem ?? contextRemoteItem}
+          canRename={canRenameContextItem}
+          canUpload={canUploadContextItems}
+          item={singleContextItem ?? contextLocalItem ?? contextRemoteItem}
           pane={contextMenu.pane}
           position={{ x: contextMenu.x, y: contextMenu.y }}
           onChangePermissions={() => {
-            const item = contextLocalItem ?? contextRemoteItem
+            const item = singleContextItem
             if (item) {
               onRequestChangePermissions(contextMenu.pane, item)
             }
@@ -546,23 +572,21 @@ export function FileManager({
           onClose={() => setContextMenu(null)}
           onCopyPath={copyContextPath}
           onDelete={() => {
-            const item = contextLocalItem ?? contextRemoteItem
-            if (item) {
-              onRequestDelete(contextMenu.pane, item)
+            const items = contextMenu.pane === 'local' ? contextLocalSelection : contextRemoteSelection
+            if (items.length) {
+              onRequestDelete(contextMenu.pane, items)
             }
             setContextMenu(null)
           }}
           onDeleteFast={() => {
-            const item = contextLocalItem ?? contextRemoteItem
-            if (item) {
-              onRequestQuickDelete(contextMenu.pane, item)
+            const items = contextMenu.pane === 'local' ? contextLocalSelection : contextRemoteSelection
+            if (items.length) {
+              onRequestQuickDelete(contextMenu.pane, items)
             }
             setContextMenu(null)
           }}
           onDownload={() => {
-            const items = contextRemoteItem && selectedRemotePaths.includes(contextRemoteItem.path)
-              ? selectedRemoteItems
-              : contextRemoteItem ? [contextRemoteItem] : []
+            const items = contextRemoteSelection
             onDownloadFiles(items)
             setContextMenu(null)
           }}
@@ -580,7 +604,7 @@ export function FileManager({
             setContextMenu(null)
           }}
           onRename={() => {
-            const item = contextLocalItem ?? contextRemoteItem
+            const item = singleContextItem
             if (item) {
               onRequestRename(contextMenu.pane, item)
             }
@@ -588,11 +612,8 @@ export function FileManager({
           }}
           onUpload={() => {
             if (contextLocalItem) {
-              const items = selectedLocalPaths.includes(contextLocalItem.path)
-                ? localItems.filter((item) => selectedLocalPaths.includes(item.path) && item.name !== '..')
-                : contextLocalItem.name === '..' ? [] : [contextLocalItem]
-              if (items.length) {
-                onUploadFiles(items)
+              if (contextLocalSelection.length) {
+                onUploadFiles(contextLocalSelection)
               }
             } else {
               onChooseUploadFiles()

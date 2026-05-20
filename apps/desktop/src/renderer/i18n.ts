@@ -10,6 +10,21 @@ const zhCN = {
   privateIp: 'IP',
   accessAddress: '连接',
   copy: '复制',
+  paste: '粘贴',
+  find: '查找',
+  findPrevious: '上一个',
+  findNext: '下一个',
+  clearScreen: '清屏',
+  findPrompt: '查找终端内容',
+  findNotFound: '未找到匹配内容。',
+  findResultLine: '第 {line} 行',
+  terminalConnecting: '连接主机...',
+  terminalConnected: '连接主机成功',
+  terminalDisconnected: '连接已断开',
+  terminalConnectionClosed: '[连接已关闭]',
+  connectionFailedPrefix: '连接失败: ',
+  disconnected: '已断开',
+  disconnectedFromPrefix: '已断开连接: ',
   running: '运行',
   load: '负载',
   cpu: 'CPU',
@@ -29,6 +44,7 @@ const zhCN = {
   hostname: '主机名称',
   overview: '概览',
   cpuDetails: 'CPU',
+  gpuDetails: 'GPU',
   cpuUsage: 'CPU占用',
   memoryUsageTitle: '内存',
   swapUsageTitle: '交换',
@@ -40,6 +56,8 @@ const zhCN = {
   frequency: '频率',
   cache: '缓存',
   bogomips: 'BogoMips',
+  vendor: '厂商',
+  driver: '驱动',
   user: '用户',
   system: '系统',
   nice: 'Nice',
@@ -285,8 +303,33 @@ const enUS: typeof zhCN = {
   openSystemInfo: 'Open system info',
   accessAddress: 'Access',
   copy: 'Copy',
+  paste: 'Paste',
+  find: 'Find',
+  findPrevious: 'Previous',
+  findNext: 'Next',
+  clearScreen: 'Clear Screen',
+  findPrompt: 'Find in terminal',
+  findNotFound: 'No match found.',
+  findResultLine: 'Line {line}',
+  terminalConnecting: 'Connecting to host...',
+  terminalConnected: 'Connected to host',
+  terminalDisconnected: 'Connection closed',
+  terminalConnectionClosed: '[connection closed]',
+  connectionFailedPrefix: 'Connection failed: ',
+  disconnected: 'Disconnected',
+  disconnectedFromPrefix: 'Disconnected from ',
   running: 'Uptime',
   load: 'Load',
+  memory: 'Memory',
+  swap: 'Swap',
+  command: 'Command',
+  file: 'File',
+  path: 'Path',
+  availableSize: 'Avail/Size',
+  total: 'Total',
+  name: 'Name',
+  type: 'Type',
+  terminal: 'Terminal',
   memoryUsageTitle: 'Memory',
   swapUsageTitle: 'Swap',
   fileSystems: 'Filesystems',
@@ -298,10 +341,14 @@ const enUS: typeof zhCN = {
   architecture: 'Architecture',
   hostname: 'Hostname',
   overview: 'Overview',
+  cpuDetails: 'CPU',
+  gpuDetails: 'GPU',
   model: 'Model',
   cores: 'Cores',
   frequency: 'Frequency',
   cache: 'Cache',
+  vendor: 'Vendor',
+  driver: 'Driver',
   user: 'User',
   system: 'System',
   idle: 'Idle',
@@ -379,7 +426,7 @@ const enUS: typeof zhCN = {
   emptyTerminal: 'The SSH terminal will appear here after you open a connection.',
   emptyFiles: 'Remote files will appear here after you open a connection.',
   transferTasks: 'Transfers',
-  runningTasks: 'running',
+  runningTasks: 'tasks running',
   updating: 'Updating...',
   connectionManager: 'Connection Manager',
   closeTab: 'Close',
@@ -535,7 +582,21 @@ export type AppLocale = keyof typeof messages
 export type LocaleMessages = (typeof messages)[AppLocale]
 
 export const defaultLocale: AppLocale = 'zhCN'
-let activeLocale: AppLocale = defaultLocale
+
+function resolveInitialLocale(): AppLocale {
+  if (typeof window === 'undefined') {
+    return defaultLocale
+  }
+
+  try {
+    const nextLocale = window.localStorage.getItem('termdock.locale')
+    return nextLocale === 'enUS' || nextLocale === 'zhCN' ? nextLocale : defaultLocale
+  } catch {
+    return defaultLocale
+  }
+}
+
+let activeLocale: AppLocale = resolveInitialLocale()
 
 export function setLocale(locale: AppLocale) {
   activeLocale = locale

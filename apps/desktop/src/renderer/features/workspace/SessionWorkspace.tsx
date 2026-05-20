@@ -55,10 +55,10 @@ export function SessionWorkspace({
   onOpenRemoteItem(item: RemoteFileItem): void
   onOpenRemotePath(path: string): void
   onRequestChangePermissions(pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem): void
-  onRequestDelete(pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem): void
+  onRequestDelete(pane: 'local' | 'remote', items: Array<LocalFileItem | RemoteFileItem>): void
   onRequestNewFile(pane: 'local' | 'remote', directoryPath: string): void
   onRequestNewFolder(pane: 'local' | 'remote', directoryPath: string): void
-  onRequestQuickDelete(pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem): void
+  onRequestQuickDelete(pane: 'local' | 'remote', items: Array<LocalFileItem | RemoteFileItem>): void
   onRequestRename(pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem): void
   onToggleRemoteFileAccessMode(): void
   remoteFileAccessMode: 'user' | 'root'

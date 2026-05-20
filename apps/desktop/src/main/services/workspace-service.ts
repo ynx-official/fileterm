@@ -206,7 +206,7 @@ export class WorkspaceService {
       accessHost: profile.host,
       summary: profile.type === 'ssh' ? '连接主机...' : `连接主机 ${profile.host}:${profile.port}...`,
       terminalTranscript:
-        profile.type === 'ssh' ? current?.terminalTranscript ?? '' : undefined,
+        controller.type === 'ssh' ? controller.getTerminalTranscript() : undefined,
       remotePath: current?.remotePath ?? profile.remotePath,
       remoteFiles: current?.remoteFiles ?? [],
       fileAccessMode: current?.fileAccessMode ?? controller.getFileAccessMode(),

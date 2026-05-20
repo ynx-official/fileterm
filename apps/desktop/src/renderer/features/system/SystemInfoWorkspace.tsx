@@ -61,6 +61,18 @@ export function SystemInfoWorkspace({
           />
         </DataCard>
 
+        <DataCard title={t.gpuDetails}>
+          <Table
+            columns={[t.model, t.vendor, t.driver, t.memory]}
+            rows={metrics.gpuInfoRows.map((row) => [
+              row.model,
+              row.vendor,
+              row.driver,
+              row.memory
+            ])}
+          />
+        </DataCard>
+
         <DataCard title={t.cpuUsage}>
           <Table
             columns={[t.user, t.system, t.nice, t.idle, t.ioWait, t.irq, t.softIrq, t.realtime]}

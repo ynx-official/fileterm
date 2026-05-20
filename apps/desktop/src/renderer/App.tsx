@@ -34,6 +34,7 @@ import { defaultLocale, setLocale, t, type AppLocale } from './i18n'
 const TERMINAL_TRANSCRIPT_LIMIT = 200_000
 const STATUS_MESSAGE_TIMEOUT_MS = 15_000
 const REMOTE_METHOD_ERROR_PREFIX = /Error invoking remote method '[^']+':\s*/i
+const LOCALE_STORAGE_KEY = 'termdock.locale'
 
 type ErrorDetails = {
   item?: RemoteFileItem
@@ -42,7 +43,11 @@ type ErrorDetails = {
 
 type LocalTab =
   | { id: string; kind: 'home'; title: string }
-  | { id: string; kind: 'system'; title: string; sessionTabId: string }
+  | { id: string; kind: 'system'; title: string; sessionTabId: string; sourceTabTitle: string }
+
+function formatSystemInfoTabTitle(sourceTabTitle: string) {
+  return `${t.systemInfoTabTitle} · ${sourceTabTitle || t.untitledTab}`
+}
 
 type FileDialogTarget = {
   pane: 'local' | 'remote'
@@ -55,7 +60,16 @@ type FileActionDialog =
   | { kind: 'new-folder'; pane: 'local' | 'remote'; directoryPath: string }
   | { kind: 'new-file'; pane: 'local' | 'remote'; directoryPath: string }
   | { kind: 'rename'; target: FileDialogTarget }
-  | { kind: 'delete'; target: FileDialogTarget }
+  | { kind: 'delete'; targets: FileDialogTarget[] }
+
+function readStoredLocale(): AppLocale {
+  if (typeof window === 'undefined') {
+    return defaultLocale
+  }
+
+  const nextLocale = window.localStorage.getItem(LOCALE_STORAGE_KEY)
+  return nextLocale === 'enUS' || nextLocale === 'zhCN' ? nextLocale : defaultLocale
+}
 
 export function App() {
   const searchParams = new URLSearchParams(window.location.search)
@@ -126,7 +140,7 @@ export function App() {
   const [rootAccessDialogError, setRootAccessDialogError] = useState<string | null>(null)
   const [showTransfers, setShowTransfers] = useState(false)
   const [themeMode, setThemeMode] = useState<ThemeMode>('default-dark')
-  const [locale, setLocaleState] = useState<AppLocale>(defaultLocale)
+  const [locale, setLocaleState] = useState<AppLocale>(() => readStoredLocale())
 
   useThemeMode(themeMode)
 
@@ -141,13 +155,19 @@ export function App() {
 
   useEffect(() => {
     setLocale(locale)
+    window.localStorage.setItem(LOCALE_STORAGE_KEY, locale)
     setLocalTabs((prev) => prev.map((tab) => {
       if (tab.kind === 'home') {
         return { ...tab, title: t.untitledTab }
       }
-      return { ...tab, title: t.systemInfoTabTitle }
+      const sourceTabTitle = workspace.tabs.find((entry) => entry.id === tab.sessionTabId)?.title ?? tab.sourceTabTitle
+      return {
+        ...tab,
+        sourceTabTitle,
+        title: formatSystemInfoTabTitle(sourceTabTitle)
+      }
     }))
-  }, [locale])
+  }, [locale, workspace.tabs])
 
   useEffect(() => {
     if (!desktopApi) {
@@ -744,8 +764,9 @@ export function App() {
       {
         id: nextId,
         kind: 'system',
-        title: t.systemInfoTabTitle,
-        sessionTabId: activeTab.id
+        title: formatSystemInfoTabTitle(activeTab.title),
+        sessionTabId: activeTab.id,
+        sourceTabTitle: activeTab.title
       }
     ])
     setTabOrder((prev) => [...prev, homeTabKey(nextId)])
@@ -1088,13 +1109,21 @@ export function App() {
 
     if (fileActionDialog.kind === 'delete') {
       await runFileAction(async () => {
-        if (fileActionDialog.target.pane === 'local') {
-          await desktopApi.deleteLocalPath(fileActionDialog.target.path)
-        } else if (activeTab) {
-          const snapshot = await desktopApi.deleteRemotePath(activeTab.id, fileActionDialog.target.path, fileActionDialog.target.type)
-          applySnapshot(snapshot)
+        const [firstTarget] = fileActionDialog.targets
+        if (!firstTarget) {
+          return
         }
-        await refreshCurrentPane(fileActionDialog.target.pane)
+        if (firstTarget.pane === 'local') {
+          for (const target of fileActionDialog.targets) {
+            await desktopApi.deleteLocalPath(target.path)
+          }
+        } else if (activeTab) {
+          for (const target of fileActionDialog.targets) {
+            const snapshot = await desktopApi.deleteRemotePath(activeTab.id, target.path, target.type)
+            applySnapshot(snapshot)
+          }
+        }
+        await refreshCurrentPane(firstTarget.pane)
       })
       return
     }
@@ -1163,11 +1192,11 @@ export function App() {
     })
   }
 
-  const requestDelete = (pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem) => {
+  const requestDelete = (pane: 'local' | 'remote', items: Array<LocalFileItem | RemoteFileItem>) => {
     setFileActionError(null)
     setFileActionDialog({
       kind: 'delete',
-      target: { pane, path: item.path, name: item.name, type: item.type }
+      targets: items.map((item) => ({ pane, path: item.path, name: item.name, type: item.type }))
     })
   }
 
@@ -1203,19 +1232,22 @@ export function App() {
     }
   }
 
-  const handleQuickDelete = (pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem) => {
-    if (!desktopApi || pane !== 'remote' || !activeTab) {
+  const handleQuickDelete = (pane: 'local' | 'remote', items: Array<LocalFileItem | RemoteFileItem>) => {
+    if (!desktopApi || pane !== 'remote' || !activeTab || !items.length) {
       return
     }
 
     void (async () => {
       try {
         setIsBusy(true)
-        const snapshot = await desktopApi.deleteRemotePath(activeTab.id, item.path, item.type)
-        applySnapshot(snapshot)
+        for (const item of items) {
+          const snapshot = await desktopApi.deleteRemotePath(activeTab.id, item.path, item.type)
+          applySnapshot(snapshot)
+        }
         await refreshCurrentPane('remote')
       } catch (err) {
-        reportError(setError, '快速删除远程文件', err, { item, targetPath: item.path })
+        const firstItem = items[0]
+        reportError(setError, '快速删除远程文件', err, firstItem ? { item: firstItem, targetPath: firstItem.path } : undefined)
       } finally {
         setIsBusy(false)
       }
@@ -1227,7 +1259,13 @@ export function App() {
       return
     }
 
-    for (const localPath of Array.from(new Set(paths))) {
+    const uniquePaths = Array.from(new Set(paths))
+    if (uniquePaths.length > 1) {
+      const snapshot = await desktopApi.queueUpload(uniquePaths.map(fileNameFromPath))
+      applySnapshot(snapshot)
+    }
+
+    for (const localPath of uniquePaths) {
       const snapshot = await desktopApi.uploadFile(activeTab.id, localPath, activeSession.remotePath)
       applySnapshot(snapshot)
     }
@@ -1818,7 +1856,9 @@ export function App() {
           danger={fileActionDialog.kind === 'delete'}
           description={
             fileActionDialog.kind === 'delete'
-              ? `${t.deleteConfirmPrefix}${fileActionDialog.target.name}${t.deleteConfirmSuffix}`
+              ? fileActionDialog.targets.length > 1
+                ? `${t.deleteConfirmPrefix}${fileActionDialog.targets.length} ${t.itemsSuffix}${t.deleteConfirmSuffix}`
+                : `${t.deleteConfirmPrefix}${fileActionDialog.targets[0]?.name ?? ''}${t.deleteConfirmSuffix}`
               : undefined
           }
           errorMessage={fileActionError}
@@ -1875,6 +1915,10 @@ function appendTerminalTranscript(current: string | undefined, chunk: string) {
   }
 
   return next.slice(next.length - TERMINAL_TRANSCRIPT_LIMIT)
+}
+
+function fileNameFromPath(filePath: string) {
+  return filePath.split(/[/\\]/).pop() || filePath
 }
 
 function extractDroppedLocalPaths(event: DragEvent<HTMLDivElement>) {
