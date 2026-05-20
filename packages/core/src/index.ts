@@ -101,6 +101,10 @@ export interface TransferProgress {
   message?: string
 }
 
+export interface TransferTargetOptions {
+  targetName?: string
+}
+
 export interface PermissionChangeOptions {
   mode: string
   recursive?: boolean
@@ -353,8 +357,8 @@ export interface TermdockDesktopApi {
   selectLocalDirectory(defaultPath?: string): Promise<string | null>
   queueUpload(fileNames: string[]): Promise<WorkspaceSnapshot>
   cancelTransfer(transferId: string): Promise<WorkspaceSnapshot>
-  uploadFile(tabId: string, localPath: string, remoteDirectory: string): Promise<WorkspaceSnapshot>
-  downloadFile(tabId: string, remotePath: string, localDirectory: string): Promise<WorkspaceSnapshot>
+  uploadFile(tabId: string, localPath: string, remoteDirectory: string, options?: TransferTargetOptions): Promise<WorkspaceSnapshot>
+  downloadFile(tabId: string, remotePath: string, localDirectory: string, options?: TransferTargetOptions): Promise<WorkspaceSnapshot>
   setRemoteFileAccessMode(tabId: string, mode: 'user' | 'root', options?: RemoteFileAccessOptions): Promise<WorkspaceSnapshot>
   writeTerminal(tabId: string, data: string): Promise<void>
   resizeTerminal(tabId: string, cols: number, rows: number): Promise<void>

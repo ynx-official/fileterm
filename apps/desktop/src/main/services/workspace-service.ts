@@ -12,6 +12,7 @@ import {
   type SessionSnapshot,
   type PermissionChangeOptions,
   type TransferProgress,
+  type TransferTargetOptions,
   type TransferTask,
   type WorkspaceSnapshot
 } from '@termdock/core'
@@ -292,7 +293,13 @@ export class WorkspaceService {
     return this.getSnapshot()
   }
 
-  async uploadFile(tabId: string, localPath: string, remoteDirectory: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+  async uploadFile(
+    tabId: string,
+    localPath: string,
+    remoteDirectory: string,
+    sender: WebContents,
+    options?: TransferTargetOptions
+  ): Promise<WorkspaceSnapshot> {
     const controller = this.sessionRuntime.requireController(tabId)
     const transferId = this.addTransfer('upload', path.basename(localPath), sender)
     const transferState = { canceled: false }
@@ -313,7 +320,7 @@ export class WorkspaceService {
           speed: transferTracker(progress),
           message: progress.message
         }, sender)
-      })
+      }, options?.targetName)
       if (transferState.canceled) {
         return this.getSnapshot()
       }
@@ -341,9 +348,15 @@ export class WorkspaceService {
     return this.getSnapshot()
   }
 
-  async downloadFile(tabId: string, remotePath: string, localDirectory: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+  async downloadFile(
+    tabId: string,
+    remotePath: string,
+    localDirectory: string,
+    sender: WebContents,
+    options?: TransferTargetOptions
+  ): Promise<WorkspaceSnapshot> {
     const controller = this.sessionRuntime.requireController(tabId)
-    const localPath = path.join(localDirectory, path.posix.basename(remotePath))
+    const localPath = path.join(localDirectory, options?.targetName ?? path.posix.basename(remotePath))
     const transferId = this.addTransfer('download', path.posix.basename(remotePath), sender)
     const transferState = { canceled: false }
     const transferTracker = createTransferSpeedTracker()
@@ -494,12 +507,13 @@ export class WorkspaceService {
     localPath: string,
     remoteDirectory: string,
     transferState: { canceled: boolean },
-    onProgress: (progress: TransferProgress) => void
+    onProgress: (progress: TransferProgress) => void,
+    targetName?: string
   ) {
     this.ensureTransferActive(transferState)
     const info = await stat(localPath)
     if (!info.isDirectory()) {
-      const remotePath = path.posix.join(remoteDirectory, path.basename(localPath))
+      const remotePath = path.posix.join(remoteDirectory, targetName ?? path.basename(localPath))
       await controller.uploadFile(localPath, remotePath, onProgress)
       return
     }

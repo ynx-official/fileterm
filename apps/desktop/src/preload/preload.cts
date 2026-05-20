@@ -11,6 +11,7 @@ import type {
   LocalFileItem,
   PermissionChangeOptions,
   RemoteFileAccessOptions,
+  TransferTargetOptions,
   TermdockDesktopApi,
   TerminalDataPayload,
   TerminalStatePayload,
@@ -102,10 +103,10 @@ const api: TermdockDesktopApi = {
     ipcRenderer.invoke('transfer:queueUpload', fileNames),
   cancelTransfer: (transferId: string): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('transfer:cancel', transferId),
-  uploadFile: (tabId: string, localPath: string, remoteDirectory: string): Promise<WorkspaceSnapshot> =>
-    ipcRenderer.invoke('transfer:uploadFile', tabId, localPath, remoteDirectory),
-  downloadFile: (tabId: string, remotePath: string, localDirectory: string): Promise<WorkspaceSnapshot> =>
-    ipcRenderer.invoke('transfer:downloadFile', tabId, remotePath, localDirectory),
+  uploadFile: (tabId: string, localPath: string, remoteDirectory: string, options?: TransferTargetOptions): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('transfer:uploadFile', tabId, localPath, remoteDirectory, options),
+  downloadFile: (tabId: string, remotePath: string, localDirectory: string, options?: TransferTargetOptions): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('transfer:downloadFile', tabId, remotePath, localDirectory, options),
   setRemoteFileAccessMode: (tabId: string, mode: 'user' | 'root', options?: RemoteFileAccessOptions): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('remoteFiles:setFileAccessMode', tabId, mode, options),
   writeTerminal: (tabId: string, data: string): Promise<void> =>

@@ -529,6 +529,30 @@
   font-weight: 600;
 }
 
+.conflict-resolution-modal {
+  width: min(520px, calc(100vw - 48px));
+  display: grid;
+  gap: 18px;
+}
+
+.conflict-resolution-name {
+  padding: 12px 14px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.conflict-resolution-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.conflict-resolution-actions > button {
+  min-width: 120px;
+}
+
 .file-permission-name {
   font-size: 22px;
   font-weight: 700;
