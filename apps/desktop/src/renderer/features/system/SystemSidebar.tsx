@@ -69,7 +69,7 @@ export function SystemSidebar({
         <Meter
           label={t.cpu}
           value={metrics?.cpuPercent ?? 0}
-          tone="green"
+          tone={getMetricTone(metrics?.cpuPercent ?? 0).replace('status-', '')}
           caption=""
           percent={metrics ? `${metrics.cpuPercent}%` : '0%'}
         />

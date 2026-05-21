@@ -43,6 +43,10 @@ export class WorkspaceService {
     this.profileRepository = profileRepository
   }
 
+  async shutdown() {
+    await this.sessionRuntime.shutdown()
+  }
+
   async getSnapshot(): Promise<WorkspaceSnapshot> {
     return {
       profiles: await this.profileRepository.list(),

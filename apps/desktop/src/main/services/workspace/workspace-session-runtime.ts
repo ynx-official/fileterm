@@ -76,6 +76,30 @@ export class WorkspaceSessionRuntime {
     this.liveControllers.delete(tabId)
   }
 
+  async shutdown() {
+    for (const tabId of this.metricsPollers.keys()) {
+      this.stopMetricsPolling(tabId)
+    }
+
+    for (const [requestId, pending] of this.pendingSshInteractions.entries()) {
+      this.pendingSshInteractions.delete(requestId)
+      pending.reject(new Error('Workspace runtime is shutting down'))
+    }
+
+    const controllerEntries = [...this.liveControllers.entries()]
+    this.liveControllers.clear()
+
+    await Promise.allSettled(
+      controllerEntries.map(async ([tabId, controller]) => {
+        try {
+          await controller.disconnect()
+        } finally {
+          this.tabSenders.delete(tabId)
+        }
+      })
+    )
+  }
+
   requireController(tabId: string) {
     const controller = this.liveControllers.get(tabId)
     if (!controller) {
@@ -100,7 +124,8 @@ export class WorkspaceSessionRuntime {
 
   createController(tabId: string, profile: ConnectionProfile): LiveSessionController {
     if (profile.type === 'ssh') {
-      const sshController = new LiveSshSessionController(
+      let sshController: LiveSshSessionController | null = null
+      sshController = new LiveSshSessionController(
           tabId,
           profile,
           (request) => this.requestSshInteraction(tabId, profile, request),
@@ -125,7 +150,7 @@ export class WorkspaceSessionRuntime {
               ...current,
               summary,
               terminalTranscript: transcript,
-              hasReusableSudoAuth: sshController.hasReusableSudoAuth(),
+              hasReusableSudoAuth: sshController?.hasReusableSudoAuth() ?? false,
               connected
             })
             this.options.updateTabStatus(
@@ -422,7 +447,7 @@ export class WorkspaceSessionRuntime {
       sender.send(channel, payload)
       return true
     } catch (error) {
-      if (error instanceof Error && error.message.includes('Render frame was disposed')) {
+      if (isIgnorableWebContentsSendError(error)) {
         this.invalidSenders.add(sender)
         return false
       }
@@ -530,6 +555,21 @@ export class WorkspaceSessionRuntime {
 
     return next.slice(next.length - WorkspaceSessionRuntime.TERMINAL_TRANSCRIPT_LIMIT)
   }
+}
+
+function isIgnorableWebContentsSendError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  const errno = error as NodeJS.ErrnoException
+  if (errno.code === 'EPIPE') {
+    return true
+  }
+
+  return error.message.includes('Render frame was disposed')
+    || error.message.includes('Object has been destroyed')
+    || error.message.includes('WebContents was destroyed')
 }
 
 function statusFromTerminalState(

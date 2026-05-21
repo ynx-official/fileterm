@@ -12,10 +12,11 @@ import type { IpcServices, IpcWindowOptions } from './types.js'
 import { registerWorkspaceHandlers } from './workspace-handlers.js'
 
 export function registerIpcHandlers(userDataPath: string, options: IpcWindowOptions) {
+  const workspaceService = new WorkspaceService(
+    new FileProfileRepository(userDataPath, seedProfiles, seedCommandTemplates, seedCommandFolders)
+  )
   const services: IpcServices = {
-    workspaceService: new WorkspaceService(
-      new FileProfileRepository(userDataPath, seedProfiles, seedCommandTemplates, seedCommandFolders)
-    ),
+    workspaceService,
     localFilesService: new LocalFilesService(),
     broadcastSnapshot(snapshot) {
       for (const window of BrowserWindow.getAllWindows()) {
@@ -23,7 +24,7 @@ export function registerIpcHandlers(userDataPath: string, options: IpcWindowOpti
           try {
             window.webContents.send('workspace:snapshot', snapshot)
           } catch (error) {
-            if (!(error instanceof Error) || !error.message.includes('Render frame was disposed')) {
+            if (!isIgnorableBroadcastError(error)) {
               throw error
             }
           }
@@ -39,4 +40,21 @@ export function registerIpcHandlers(userDataPath: string, options: IpcWindowOpti
   registerTerminalHandlers(services)
   registerRemoteFilesHandlers(services)
   registerSshInteractionHandlers(services)
+
+  return services
+}
+
+function isIgnorableBroadcastError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  const errno = error as NodeJS.ErrnoException
+  if (errno.code === 'EPIPE') {
+    return true
+  }
+
+  return error.message.includes('Render frame was disposed')
+    || error.message.includes('Object has been destroyed')
+    || error.message.includes('WebContents was destroyed')
 }

@@ -25,6 +25,43 @@ type UiPreferences = {
 }
 
 let uiPreferences: UiPreferences = { ...DEFAULT_UI_PREFERENCES }
+let ipcServices: ReturnType<typeof registerIpcHandlers> | null = null
+
+function isBrokenPipeError(error: unknown): boolean {
+  return error instanceof Error
+    && 'code' in error
+    && (error as NodeJS.ErrnoException).code === 'EPIPE'
+}
+
+function safeConsoleError(...args: unknown[]) {
+  try {
+    console.error(...args)
+  } catch (error) {
+    if (!isBrokenPipeError(error)) {
+      throw error
+    }
+  }
+}
+
+process.stdout.on('error', (error) => {
+  if (!isBrokenPipeError(error)) {
+    throw error
+  }
+})
+
+process.stderr.on('error', (error) => {
+  if (!isBrokenPipeError(error)) {
+    throw error
+  }
+})
+
+process.on('uncaughtException', (error) => {
+  if (isBrokenPipeError(error)) {
+    return
+  }
+
+  safeConsoleError('[TermDock] uncaught exception', error)
+})
 
 function getUiPreferencesPath() {
   return path.join(app.getPath('userData'), 'ui-preferences.json')
@@ -51,7 +88,7 @@ function writeUiPreferences(next: UiPreferences) {
   try {
     fs.writeFileSync(getUiPreferencesPath(), JSON.stringify(next, null, 2), 'utf-8')
   } catch (error) {
-    console.error('[TermDock] failed to persist ui preferences', error)
+    safeConsoleError('[TermDock] failed to persist ui preferences', error)
   }
 }
 
@@ -121,7 +158,7 @@ function createMainWindow() {
         const hasDesktopApi = await win.webContents.executeJavaScript('Boolean(window.termdock?.isDesktop)')
         console.log(`[TermDock] preload ready: ${hasDesktopApi}`)
       } catch (error) {
-        console.error('[TermDock] preload probe failed', error)
+        safeConsoleError('[TermDock] preload probe failed', error)
       }
     })
     win.webContents.openDevTools({ mode: 'detach' })
@@ -339,7 +376,7 @@ function openFileEditorWindow(parent: BrowserWindow, input: {
 
 app.whenReady().then(() => {
   readUiPreferences()
-  registerIpcHandlers(app.getPath('userData'), {
+  ipcServices = registerIpcHandlers(app.getPath('userData'), {
     getMainWindow: () => mainWindow,
     getUiPreferences: () => uiPreferences,
     setUiPreferences: (input) => {
@@ -367,7 +404,12 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
+  void ipcServices?.workspaceService.shutdown()
   if (process.platform !== 'darwin') {
     app.quit()
   }
+})
+
+app.on('before-quit', () => {
+  void ipcServices?.workspaceService.shutdown()
 })
