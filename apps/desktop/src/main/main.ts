@@ -105,6 +105,19 @@ function getWindowBackgroundColor(theme: UiPreferences['theme']) {
   return theme === 'default-light' ? '#f8fafc' : '#151515'
 }
 
+function getAppIconPath() {
+  return [
+    path.join(__dirname, '../../build/icon.png'),
+    path.join(__dirname, '../../public/icon.png'),
+    path.join(__dirname, '../../dist/icon.png')
+  ].find((candidate) => fs.existsSync(candidate))
+}
+
+function getWindowIconOptions() {
+  const icon = getAppIconPath()
+  return icon ? { icon } : {}
+}
+
 function loadAppWindow(win: BrowserWindow, searchParams?: Record<string, string>, preferences: UiPreferences = uiPreferences) {
   const query = {
     ...(searchParams ?? {}),
@@ -136,6 +149,7 @@ function createMainWindow() {
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 20, y: 18 } : undefined,
     backgroundColor: getWindowBackgroundColor(uiPreferences.theme),
+    ...getWindowIconOptions(),
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.cjs'),
       contextIsolation: true,
@@ -191,6 +205,7 @@ function createNativeChildWindow(options: {
     minimizable: false,
     vibrancy: isMac ? 'sidebar' : undefined,
     visualEffectState: isMac ? 'active' : undefined,
+    ...getWindowIconOptions(),
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.cjs'),
       contextIsolation: true,
@@ -376,6 +391,10 @@ function openFileEditorWindow(parent: BrowserWindow, input: {
 
 app.whenReady().then(() => {
   readUiPreferences()
+  const appIconPath = getAppIconPath()
+  if (isMac && appIconPath) {
+    app.dock?.setIcon(appIconPath)
+  }
   ipcServices = registerIpcHandlers(app.getPath('userData'), {
     getMainWindow: () => mainWindow,
     getUiPreferences: () => uiPreferences,
