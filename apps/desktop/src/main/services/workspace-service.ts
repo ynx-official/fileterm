@@ -63,6 +63,7 @@ export class WorkspaceService {
   bindWorkspaceSender(sender: WebContents) {
     for (const tab of this.tabs.list()) {
       this.sessionRuntime.setSender(tab.id, sender)
+      void this.sessionRuntime.restoreTabData(tab.id)
     }
   }
 

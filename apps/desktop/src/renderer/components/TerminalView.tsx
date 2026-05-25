@@ -6,8 +6,6 @@ import { copyText } from '../app/app-utils'
 import { t } from '../i18n'
 import { ContextMenu } from '../features/common/ContextMenu'
 
-const MAX_TERMINAL_WRITE_CHARS_PER_FRAME = 128_000
-
 function localizeTerminalText(value: string) {
   return value
     .replaceAll('连接主机成功', t.terminalConnected)
@@ -19,6 +17,48 @@ function localizeTerminalText(value: string) {
     .replace(/Connection error:\s*/g, t.connectionFailedPrefix)
     .replace(/Disconnected from\s*/g, t.disconnectedFromPrefix)
     .replace(/\bDisconnected\b/g, t.disconnected)
+}
+
+function toDisplayTerminalText(value: string) {
+  // Localize fixed TermDock notices before preserving terminal control semantics later.
+  return localizeTerminalText(value)
+}
+
+function isWideCodePoint(codePoint: number) {
+  return (
+    (codePoint >= 0x1100 && codePoint <= 0x115f)
+    || (codePoint >= 0x2329 && codePoint <= 0x232a)
+    || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+    || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+    || (codePoint >= 0xff00 && codePoint <= 0xff60)
+    || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+    || (codePoint >= 0x1f300 && codePoint <= 0x1faf6)
+    || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  )
+}
+
+function getTerminalCellWidth(value: string) {
+  return Array.from(value).reduce((width, char) => {
+    const codePoint = char.codePointAt(0) ?? 0
+    return width + (isWideCodePoint(codePoint) ? 2 : 1)
+  }, 0)
+}
+
+function rowsForDisplayWidth(width: number, cols: number) {
+  return Math.max(1, Math.ceil(Math.max(0, width) / Math.max(1, cols)))
+}
+
+const TERMINAL_TRANSCRIPT_LIMIT = 200_000
+
+function trimTranscript(transcript: string) {
+  if (transcript.length <= TERMINAL_TRANSCRIPT_LIMIT) {
+    return transcript
+  }
+
+  return transcript.slice(transcript.length - TERMINAL_TRANSCRIPT_LIMIT)
 }
 
 export function TerminalView({
@@ -34,8 +74,14 @@ export function TerminalView({
   const terminalRef = useRef<Terminal | null>(null)
   const findInputRef = useRef<HTMLInputElement | null>(null)
   const bootTextRef = useRef(bootText)
+  const renderedTranscriptRef = useRef('')
   const pendingWriteRef = useRef('')
   const writeFrameRef = useRef<number | null>(null)
+  const isWritingRef = useRef(false)
+  const activeInlineRedrawRef = useRef(false)
+  const inlineRedrawContentRef = useRef('')
+  const inlineRedrawRowsRef = useRef(1)
+  const suppressHydratedChunksUntilRef = useRef(0)
   const bootedTabs = useRef(new Set<string>())
   const wasConnectedRef = useRef(false)
   const [hasSelection, setHasSelection] = useState(false)
@@ -225,25 +271,186 @@ export function TerminalView({
   const flushPendingWrite = () => {
     writeFrameRef.current = null
     const terminal = terminalRef.current
-    if (!terminal || !pendingWriteRef.current) {
+    if (!terminal) {
       pendingWriteRef.current = ''
       return
     }
 
-    const nextChunk = pendingWriteRef.current.slice(0, MAX_TERMINAL_WRITE_CHARS_PER_FRAME)
-    pendingWriteRef.current = pendingWriteRef.current.slice(MAX_TERMINAL_WRITE_CHARS_PER_FRAME)
-    terminal.write(nextChunk)
-
-    if (pendingWriteRef.current) {
-      writeFrameRef.current = window.requestAnimationFrame(flushPendingWrite)
+    if (!pendingWriteRef.current) {
+      return
     }
+
+    if (isWritingRef.current) {
+      writeFrameRef.current = window.requestAnimationFrame(flushPendingWrite)
+      return
+    }
+
+    const nextChunk = pendingWriteRef.current
+    pendingWriteRef.current = ''
+    isWritingRef.current = true
+    terminal.write(nextChunk, () => {
+      isWritingRef.current = false
+      if (pendingWriteRef.current && writeFrameRef.current === null) {
+        writeFrameRef.current = window.requestAnimationFrame(flushPendingWrite)
+      }
+    })
   }
 
   const scheduleTerminalWrite = (text: string) => {
+    if (!text) {
+      return
+    }
+
     pendingWriteRef.current += text
     if (writeFrameRef.current === null) {
       writeFrameRef.current = window.requestAnimationFrame(flushPendingWrite)
     }
+  }
+
+  const clearInlineRedrawState = () => {
+    activeInlineRedrawRef.current = false
+    inlineRedrawContentRef.current = ''
+    inlineRedrawRowsRef.current = 1
+  }
+
+  const appendRenderedTranscript = (chunk: string) => {
+    if (!chunk) {
+      return
+    }
+
+    renderedTranscriptRef.current = trimTranscript(`${renderedTranscriptRef.current}${chunk}`)
+  }
+
+  const replaceTerminalWithTranscript = (terminal: Terminal, transcript: string) => {
+    renderedTranscriptRef.current = trimTranscript(transcript)
+    pendingWriteRef.current = ''
+    if (writeFrameRef.current !== null) {
+      window.cancelAnimationFrame(writeFrameRef.current)
+      writeFrameRef.current = null
+    }
+    isWritingRef.current = false
+    clearInlineRedrawState()
+    terminal.reset()
+    terminal.write(normalizeInlineRedrawChunk(terminal, toDisplayTerminalText(renderedTranscriptRef.current)))
+    suppressHydratedChunksUntilRef.current = Date.now() + 1500
+  }
+
+  const shouldHydrateTranscript = (currentTranscript: string, nextTranscript: string, connected: boolean) => {
+    if (!nextTranscript || nextTranscript === currentTranscript) {
+      return false
+    }
+
+    if (!currentTranscript) {
+      return true
+    }
+
+    if (nextTranscript.length < currentTranscript.length) {
+      return true
+    }
+
+    if (!nextTranscript.startsWith(currentTranscript)) {
+      return true
+    }
+
+    if (!connected) {
+      return true
+    }
+
+    return currentTranscript.length < 512
+  }
+
+  const buildInlineRedrawPrefix = (rows: number) => {
+    if (rows <= 1) {
+      return '\r\x1b[2K'
+    }
+
+    let prefix = '\r'
+    for (let index = 1; index < rows; index += 1) {
+      prefix += '\x1b[F'
+    }
+    for (let index = 0; index < rows; index += 1) {
+      prefix += '\x1b[2K'
+      if (index < rows - 1) {
+        prefix += '\x1b[E'
+      }
+    }
+    for (let index = 1; index < rows; index += 1) {
+      prefix += '\x1b[F'
+    }
+    return prefix
+  }
+
+  const normalizeInlineRedrawChunk = (terminal: Terminal, value: string) => {
+    if (!value.includes('\r')) {
+      if (activeInlineRedrawRef.current) {
+        inlineRedrawContentRef.current += value
+        inlineRedrawRowsRef.current = rowsForDisplayWidth(
+          getTerminalCellWidth(inlineRedrawContentRef.current),
+          terminal.cols
+        )
+      }
+      if (value.includes('\n')) {
+        clearInlineRedrawState()
+      }
+      return value.replaceAll('\n', '\r\n')
+    }
+
+    let normalized = ''
+    let cursor = 0
+
+    while (cursor < value.length) {
+      const carriageIndex = value.indexOf('\r', cursor)
+      const newlineIndex = value.indexOf('\n', cursor)
+
+      if (carriageIndex === -1 && newlineIndex === -1) {
+        const tail = value.slice(cursor)
+        normalized += tail
+        if (activeInlineRedrawRef.current) {
+          inlineRedrawContentRef.current += tail
+          inlineRedrawRowsRef.current = rowsForDisplayWidth(
+            getTerminalCellWidth(inlineRedrawContentRef.current),
+            terminal.cols
+          )
+        }
+        break
+      }
+
+      const nextBreakIndex = [carriageIndex, newlineIndex]
+        .filter((index) => index !== -1)
+        .sort((left, right) => left - right)[0]
+
+      const segment = value.slice(cursor, nextBreakIndex)
+      normalized += segment
+      if (activeInlineRedrawRef.current) {
+        inlineRedrawContentRef.current += segment
+        inlineRedrawRowsRef.current = rowsForDisplayWidth(
+          getTerminalCellWidth(inlineRedrawContentRef.current),
+          terminal.cols
+        )
+      }
+
+      if (nextBreakIndex === carriageIndex && value[nextBreakIndex + 1] === '\n') {
+        normalized += '\r\n'
+        clearInlineRedrawState()
+        cursor = nextBreakIndex + 2
+        continue
+      }
+
+      if (nextBreakIndex === carriageIndex) {
+        normalized += buildInlineRedrawPrefix(inlineRedrawRowsRef.current)
+        activeInlineRedrawRef.current = true
+        inlineRedrawContentRef.current = ''
+        inlineRedrawRowsRef.current = 1
+        cursor = nextBreakIndex + 1
+        continue
+      }
+
+      normalized += '\r\n'
+      clearInlineRedrawState()
+      cursor = nextBreakIndex + 1
+    }
+
+    return normalized
   }
 
   const syncTerminalSize = (fitAddon: FitAddon, terminal: Terminal) => {
@@ -286,9 +493,10 @@ export function TerminalView({
     terminalRef.current = terminal
 
     syncTerminalSize(fitAddon, terminal)
+    clearInlineRedrawState()
 
     if (bootTextRef.current) {
-      terminal.write(localizeTerminalText(bootTextRef.current))
+      replaceTerminalWithTranscript(terminal, bootTextRef.current)
     }
 
     const resize = () => {
@@ -309,13 +517,20 @@ export function TerminalView({
 
     const offData = window.termdock?.onTerminalData(({ tabId: nextTabId, chunk }) => {
       if (nextTabId === tabId) {
-        scheduleTerminalWrite(localizeTerminalText(chunk))
+        if (Date.now() < suppressHydratedChunksUntilRef.current && renderedTranscriptRef.current.endsWith(chunk)) {
+          return
+        }
+        appendRenderedTranscript(chunk)
+        scheduleTerminalWrite(normalizeInlineRedrawChunk(terminal, toDisplayTerminalText(chunk)))
       }
     })
 
-    const offState = window.termdock?.onTerminalState(({ tabId: nextTabId, summary, connected }) => {
+    const offState = window.termdock?.onTerminalState(({ tabId: nextTabId, summary, transcript, connected }) => {
       if (nextTabId === tabId) {
         onStatus?.(localizeTerminalText(summary))
+        if (shouldHydrateTranscript(renderedTranscriptRef.current, transcript, connected)) {
+          replaceTerminalWithTranscript(terminal, transcript)
+        }
         if (wasConnectedRef.current && !connected) {
           scheduleTerminalWrite(`\r\n${t.terminalConnectionClosed}\r\n`)
         }
@@ -389,7 +604,11 @@ export function TerminalView({
         window.cancelAnimationFrame(writeFrameRef.current)
       }
       writeFrameRef.current = null
+      isWritingRef.current = false
       pendingWriteRef.current = ''
+      renderedTranscriptRef.current = ''
+      suppressHydratedChunksUntilRef.current = 0
+      clearInlineRedrawState()
       resizeObserver.disconnect()
       hostRef.current?.removeEventListener('contextmenu', onContextMenu)
       window.removeEventListener('keydown', onKeyDown)
@@ -397,6 +616,16 @@ export function TerminalView({
       terminal.dispose()
     }
   }, [isMac, onStatus, tabId])
+
+  useEffect(() => {
+    bootTextRef.current = bootText
+    const terminal = terminalRef.current
+    if (!terminal || !shouldHydrateTranscript(renderedTranscriptRef.current, bootText, wasConnectedRef.current)) {
+      return
+    }
+
+    replaceTerminalWithTranscript(terminal, bootText)
+  }, [bootText])
 
   useEffect(() => {
     if (!terminalRef.current) {

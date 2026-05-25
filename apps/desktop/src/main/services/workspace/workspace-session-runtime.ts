@@ -254,13 +254,30 @@ export class WorkspaceSessionRuntime {
       const current = this.sessions.get(tabId)
       if (current) {
         const message = error instanceof Error ? error.message : '未知错误'
+        const summary = `连接失败: ${message}`
+        let transcript = controller.type === 'ssh'
+          ? controller.getTerminalTranscript()
+          : current.terminalTranscript
+        if (controller.type === 'ssh') {
+          if (!transcript?.includes(message)) {
+            controller.pushClientNotice(summary)
+            transcript = controller.getTerminalTranscript()
+          }
+        }
         this.sessions.set(tabId, {
           ...current,
-          summary: `连接失败: ${message}`,
-          terminalTranscript:
-            controller.type === 'ssh' ? controller.getTerminalTranscript() : current.terminalTranscript,
+          summary,
+          terminalTranscript: transcript,
           connected: false
         })
+        if (controller.type === 'ssh') {
+          this.sendToTab(tabId, 'terminal:state', {
+            tabId,
+            summary,
+            transcript: transcript ?? '',
+            connected: false
+          })
+        }
       }
       this.options.updateTabStatus(tabId, 'error')
       this.stopMetricsPolling(tabId)
@@ -365,6 +382,52 @@ export class WorkspaceSessionRuntime {
       return
     }
     await this.emitSnapshot(sender)
+  }
+
+  async restoreTabData(tabId: string) {
+    const controller = this.liveControllers.get(tabId)
+    const current = this.sessions.get(tabId)
+    if (!controller || !current?.connected) {
+      return
+    }
+
+    let nextSnapshot = current
+    let changed = false
+
+    if (!current.remoteFiles.length) {
+      try {
+        const remoteFiles = await controller.listRemoteFiles()
+        nextSnapshot = {
+          ...nextSnapshot,
+          remotePath: controller.getRemotePath(),
+          fileAccessMode: controller.getFileAccessMode(),
+          remoteFiles
+        }
+        changed = true
+      } catch {
+        // Keep the existing session data; this restoration is best-effort.
+      }
+    }
+
+    if (controller.type === 'ssh' && !nextSnapshot.systemMetrics) {
+      try {
+        const systemMetrics = await controller.refreshSystemMetrics()
+        if (systemMetrics) {
+          nextSnapshot = {
+            ...nextSnapshot,
+            systemMetrics: this.mergeNetworkHistory(undefined, systemMetrics)
+          }
+          changed = true
+        }
+      } catch {
+        // Ignore restoration errors; polling will keep trying after the tab is rebound.
+      }
+    }
+
+    if (changed) {
+      this.sessions.set(tabId, nextSnapshot)
+      await this.emitSnapshotForTab(tabId)
+    }
   }
 
   private startMetricsPolling(tabId: string, controller: LiveSshSessionController) {

@@ -71,15 +71,15 @@ export function SystemSidebar({
           value={metrics?.cpuPercent ?? 0}
           tone={getMetricTone(metrics?.cpuPercent ?? 0).replace('status-', '')}
           caption=""
-          percent={metrics ? `${metrics.cpuPercent}%` : '0%'}
+          percent={metrics ? `${metrics.cpuPercent}%` : '-'}
         />
         <MemoryMeter metrics={metrics} />
         <Meter
           label={t.swap}
           value={metrics?.swapPercent ?? 0}
           tone={getMetricTone(metrics?.swapPercent ?? 0).replace('status-', '')}
-          caption={metrics?.swapUsage ?? '0/0'}
-          percent={metrics ? `${metrics.swapPercent}%` : '0%'}
+          caption={metrics?.swapUsage ?? '-'}
+          percent={metrics ? `${metrics.swapPercent}%` : '-'}
           dotTone={getMetricTone(metrics?.swapPercent ?? 0)}
         />
         <div className="mini-tabs">
@@ -159,8 +159,8 @@ function MemoryMeter({ metrics }: { metrics?: SystemMetrics }) {
         <span>{t.memory}</span>
         <strong className="metric-chip-summary">
           <i className={`metric-dot ${memoryTone}`} />
-          <span>{metrics?.memoryUsage ?? '0/0'}</span>
-          <span className="metric-percent">{metrics ? `${metrics.memoryPercent}%` : '0%'}</span>
+          <span>{metrics?.memoryUsage ?? '-'}</span>
+          <span className="metric-percent">{metrics ? `${metrics.memoryPercent}%` : '-'}</span>
         </strong>
       </div>
       <div className="meter-track meter-track-stacked">

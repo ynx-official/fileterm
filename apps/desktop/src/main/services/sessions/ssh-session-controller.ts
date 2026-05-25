@@ -96,6 +96,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
 
     await new Promise<void>((resolve, reject) => {
       let settled = false
+      let connectionFailed = false
 
       this.ssh.removeAllListeners('banner')
       this.ssh.removeAllListeners('keyboard-interactive')
@@ -120,6 +121,9 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
             },
             (error: Error | undefined, stream: ClientChannel) => {
               if (error) {
+                connectionFailed = true
+                this.appendSystemMessage(`终端启动失败: ${error.message}\r\n`)
+                this.onStateChange(`Connection error: ${error.message}`, this.transcript, false)
                 if (!settled) {
                   settled = true
                   reject(error)
@@ -148,6 +152,11 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
         })
         .on('error', (error: Error) => {
           this.connected = false
+          if (connectionFailed) {
+            this.sshDebug.log('main', `忽略重复连接错误: ${error.message}`)
+            return
+          }
+          connectionFailed = true
           this.appendSystemMessage(`连接失败: ${error.message}\r\n`)
           this.sshDebug.log('main', `连接错误: ${error.message}`)
           if (!settled) {
@@ -158,6 +167,10 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
         })
         .on('close', () => {
           this.connected = false
+          if (connectionFailed) {
+            this.sshDebug.log('main', '连接失败后收到关闭事件')
+            return
+          }
           this.appendSystemMessage('连接已断开\r\n')
           this.sshDebug.log('main', '连接已关闭')
           this.onStateChange('Disconnected', this.transcript, false)
