@@ -41,6 +41,12 @@
 }
 
 .terminal-host {
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+}
+
+.terminal-inner {
   height: 100%;
   min-height: 0;
 }

@@ -497,13 +497,14 @@ textarea:focus-visible,
 }
 
 .terminal-host {
-  padding: 15px 0 0 15px;
+  padding: 16px 18px 16px 15px;
   background: transparent;
   box-shadow: none;
 }
 
 .terminal-host .xterm {
   padding-top: 0;
+  padding-right: 0;
 }
 
 .file-manager {

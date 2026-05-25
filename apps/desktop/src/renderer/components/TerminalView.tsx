@@ -697,7 +697,9 @@ export function TerminalView({
 
   return (
     <>
-      <div className="terminal-host" ref={hostRef} />
+      <div className="terminal-host">
+        <div className="terminal-inner" ref={hostRef} />
+      </div>
       {findOpen ? (
         <div className="terminal-find" onClick={(event) => event.stopPropagation()}>
           <input

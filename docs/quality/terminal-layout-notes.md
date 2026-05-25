@@ -1,0 +1,77 @@
+# Terminal Layout Notes
+
+本文记录 TermDock 终端区域最近一次布局回归的原因和正确修法，避免后续继续通过“加 padding 试试”这类方式误判问题。
+
+## 1. 现象
+
+症状主要有两类：
+
+- terminal 最后一行 prompt 看起来紧贴底部文件 dock，没有之前预期的两行左右留白。
+- 给 `.terminal-host` 增加 bottom padding 之后，视觉上仍然几乎没有改善。
+
+## 2. 根因
+
+关键问题不只是样式数值，而是 `xterm` 的挂载层级：
+
+- `fitAddon.fit()` 会根据实际挂载节点的可用尺寸计算终端列数和行数。
+- 如果 `xterm` 直接挂在带内边距的 `.terminal-host` 上，padding 会混进可用高度计算。
+- 这样看起来虽然外层写了留白，但终端最后一行仍然会被挤到靠近底部边界的位置。
+
+一句话总结：
+
+```txt
+terminal spacing issue != pure CSS spacing issue
+terminal spacing issue = xterm mount box and fit box are the same node
+```
+
+## 3. 正确修法
+
+正确做法是把“视觉留白容器”和“xterm 实际挂载容器”拆开：
+
+- 外层 `terminal-host` 只负责 padding、背景和阴影边界。
+- 内层 `terminal-inner` 负责给 `xterm` 挂载和执行 `fitAddon.fit()`。
+- `terminal-host` 需要 `box-sizing: border-box`，确保 padding 不把外层高度撑爆。
+
+当前实现位置：
+
+- 结构调整在 [apps/desktop/src/renderer/components/TerminalView.tsx](/Users/stoffel/CodeFile/termdock/apps/desktop/src/renderer/components/TerminalView.tsx:700)
+- 通用尺寸约束在 [apps/desktop/src/renderer/styles/features/session.css](/Users/stoffel/CodeFile/termdock/apps/desktop/src/renderer/styles/features/session.css:43)
+- 视觉留白在 [apps/desktop/src/renderer/styles/features/workstation-skin.css](/Users/stoffel/CodeFile/termdock/apps/desktop/src/renderer/styles/features/workstation-skin.css:499)
+
+## 4. 历史背景
+
+之前样式里真正影响 terminal 四边留白的是：
+
+```css
+.terminal-host {
+  padding: 16px 18px 16px 15px;
+}
+```
+
+后续一次样式调整把它改成了：
+
+```css
+.terminal-host {
+  padding: 15px 0 0 15px;
+}
+```
+
+这会让右侧和底部留白一起消失，所以如果要恢复旧体验，不能只盯着 terminal 输出或文件面板高度。
+
+## 5. 排查顺序
+
+以后遇到 terminal 底部留白异常，建议按这个顺序排查：
+
+1. 先确认 `xterm` 挂载节点是不是直接等于带 padding 的容器。
+2. 再确认 `fitAddon.fit()` 使用的是不是内层纯内容区尺寸。
+3. 最后才调 `.terminal-host` 的 padding 数值。
+
+## 6. 不推荐的修法
+
+下面这些办法容易造成“看起来改了，但实际没解决根因”：
+
+- 只增加 `.terminal-host` 的 bottom padding。
+- 只调整 `.session-workspace` 或文件面板高度。
+- 只在 terminal transcript 里插入额外空行。
+
+这些方式可能短期改变视觉结果，但无法稳定保证 `xterm` 最后一行和文件 dock 的真实间距。
