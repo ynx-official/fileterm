@@ -10,6 +10,7 @@ export function FileActionModal({
   initialValue = '',
   inputLabel,
   inputPlaceholder,
+  isSubmitting = false,
   onClose,
   onConfirm,
   title
@@ -22,6 +23,7 @@ export function FileActionModal({
   initialValue?: string
   inputLabel?: string
   inputPlaceholder?: string
+  isSubmitting?: boolean
   onClose(): void
   onConfirm(value: string): void
   title: string
@@ -37,7 +39,7 @@ export function FileActionModal({
       <div className="modal-card file-action-modal">
         <div className="modal-header">
           <span>{title}</span>
-          <button className="icon-button" onClick={onClose} type="button">×</button>
+          <button className="icon-button" disabled={isSubmitting} onClick={onClose} type="button">×</button>
         </div>
         {description ? <div className="file-action-description">{description}</div> : null}
         {inputLabel ? (
@@ -45,11 +47,12 @@ export function FileActionModal({
             <span>{inputLabel}</span>
             <input
               autoFocus
+              disabled={isSubmitting}
               placeholder={inputPlaceholder}
               value={value}
               onChange={(event) => setValue(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') {
+                if (event.key === 'Enter' && !isSubmitting) {
                   onConfirm(value)
                 }
               }}
@@ -59,9 +62,15 @@ export function FileActionModal({
         {hint ? <div className="file-action-hint">{hint}</div> : null}
         {errorMessage ? <div className="modal-error">{errorMessage}</div> : null}
         <div className="form-actions">
-          <button className="flat-button" onClick={onClose} type="button">{t.cancel}</button>
-          <button className={danger ? 'flat-button danger' : 'primary-button'} onClick={() => onConfirm(value)} type="button">
-            {confirmLabel}
+          <button className="flat-button" disabled={isSubmitting} onClick={onClose} type="button">{t.cancel}</button>
+          <button
+            className={danger ? 'flat-button danger file-action-submit-button' : 'primary-button file-action-submit-button'}
+            disabled={isSubmitting}
+            onClick={() => onConfirm(value)}
+            type="button"
+          >
+            {isSubmitting ? <span aria-hidden="true" className="button-spinner" /> : null}
+            <span>{confirmLabel}</span>
           </button>
         </div>
       </div>

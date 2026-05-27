@@ -309,6 +309,7 @@ export function App() {
   const [fileEditorError, setFileEditorError] = useState<string | null>(null)
   const [fileActionDialog, setFileActionDialog] = useState<FileActionDialog | null>(null)
   const [fileActionError, setFileActionError] = useState<string | null>(null)
+  const [isFileActionSubmitting, setIsFileActionSubmitting] = useState(false)
   const [fileClipboard, setFileClipboard] = useState<FileClipboardState | null>(null)
   const [permissionDialog, setPermissionDialog] = useState<{
     target: FileDialogTarget & { permission?: string }
@@ -347,17 +348,30 @@ export function App() {
     setLocale(locale)
     window.localStorage.setItem(LOCALE_STORAGE_KEY, locale)
     void desktopApi?.setUiPreferences({ locale })
-    setLocalTabs((prev) => prev.map((tab) => {
-      if (tab.kind === 'home') {
-        return { ...tab, title: t.untitledTab }
-      }
-      const sourceTabTitle = workspace.tabs.find((entry) => entry.id === tab.sessionTabId)?.title ?? tab.sourceTabTitle
-      return {
-        ...tab,
-        sourceTabTitle,
-        title: formatSystemInfoTabTitle(sourceTabTitle)
-      }
-    }))
+    setLocalTabs((prev) => {
+      let changed = false
+      const next = prev.map((tab) => {
+        if (tab.kind === 'home') {
+          if (tab.title === t.untitledTab) {
+            return tab
+          }
+          changed = true
+          return { ...tab, title: t.untitledTab }
+        }
+        const sourceTabTitle = workspace.tabs.find((entry) => entry.id === tab.sessionTabId)?.title ?? tab.sourceTabTitle
+        const title = formatSystemInfoTabTitle(sourceTabTitle)
+        if (tab.sourceTabTitle === sourceTabTitle && tab.title === title) {
+          return tab
+        }
+        changed = true
+        return {
+          ...tab,
+          sourceTabTitle,
+          title
+        }
+      })
+      return changed ? next : prev
+    })
   }, [locale, workspace.tabs])
 
   useEffect(() => {
@@ -562,6 +576,22 @@ export function App() {
       window.clearTimeout(timeoutId)
     }
   }, [error])
+
+  useEffect(() => {
+    if (!fileClipboard) {
+      return
+    }
+
+    const handleEscapeClearClipboard = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return
+      }
+      setFileClipboard(null)
+    }
+
+    window.addEventListener('keydown', handleEscapeClearClipboard)
+    return () => window.removeEventListener('keydown', handleEscapeClearClipboard)
+  }, [fileClipboard])
 
   const activeLocalTab = activeLocalTabId ? localTabs.find((tab) => tab.id === activeLocalTabId) ?? null : null
   const showSidebar = activeLocalTab?.kind !== 'home'
@@ -1410,12 +1440,12 @@ export function App() {
         ? `已剪切 ${fileClipboard.items.length} 个文件，按 Esc 取消`
         : `Cut ${fileClipboard.items.length} files, press Esc to cancel`)
       : (locale === 'zhCN'
-        ? `已复制 ${fileClipboard.items.length} 个文件，可在其他目录粘贴`
-        : `Copied ${fileClipboard.items.length} files, ready to paste in another folder`)
+        ? `已复制 ${fileClipboard.items.length} 个文件，可在其他目录粘贴，按 Esc 取消`
+        : `Copied ${fileClipboard.items.length} files, ready to paste in another folder. Press Esc to cancel`)
     : null
 
   const clearCutState = () => {
-    setFileClipboard((current) => current?.operation === 'cut' ? null : current)
+    setFileClipboard(null)
   }
 
   const handlePasteIntoPane = (pane: 'local' | 'remote') => {
@@ -1507,12 +1537,14 @@ export function App() {
   const runFileAction = async (action: () => Promise<void>) => {
     try {
       setIsBusy(true)
+      setIsFileActionSubmitting(true)
       await action()
       setFileActionDialog(null)
       setFileActionError(null)
     } catch (err) {
       reportError(setFileActionError, '文件操作', err)
     } finally {
+      setIsFileActionSubmitting(false)
       setIsBusy(false)
     }
   }
@@ -1593,16 +1625,19 @@ export function App() {
 
   const requestNewFolder = (pane: 'local' | 'remote', directoryPath: string) => {
     setFileActionError(null)
+    setIsFileActionSubmitting(false)
     setFileActionDialog({ kind: 'new-folder', pane, directoryPath })
   }
 
   const requestNewFile = (pane: 'local' | 'remote', directoryPath: string) => {
     setFileActionError(null)
+    setIsFileActionSubmitting(false)
     setFileActionDialog({ kind: 'new-file', pane, directoryPath })
   }
 
   const requestRename = (pane: 'local' | 'remote', item: LocalFileItem | RemoteFileItem) => {
     setFileActionError(null)
+    setIsFileActionSubmitting(false)
     setFileActionDialog({
       kind: 'rename',
       target: { pane, path: item.path, name: item.name, type: item.type }
@@ -1611,6 +1646,7 @@ export function App() {
 
   const requestDelete = (pane: 'local' | 'remote', items: Array<LocalFileItem | RemoteFileItem>) => {
     setFileActionError(null)
+    setIsFileActionSubmitting(false)
     setFileActionDialog({
       kind: 'delete',
       targets: items.map((item) => ({ pane, path: item.path, name: item.name, type: item.type }))
@@ -1756,6 +1792,7 @@ export function App() {
     void (async () => {
       try {
         setIsBusy(true)
+        setFileClipboard(null)
         await openLocalDirectory(localPath)
         await openRemoteDirectory(activeTab.id, activeSession.remotePath)
       } catch (err) {
@@ -2385,6 +2422,7 @@ export function App() {
           initialValue={
             fileActionDialog.kind === 'rename' ? fileActionDialog.target.name : ''
           }
+          isSubmitting={isFileActionSubmitting}
           inputLabel={fileActionDialog.kind === 'delete' ? undefined : t.fileName}
           inputPlaceholder={
             fileActionDialog.kind === 'new-folder' ? t.folderName : t.fileName
@@ -2392,6 +2430,7 @@ export function App() {
           onClose={() => {
             setFileActionDialog(null)
             setFileActionError(null)
+            setIsFileActionSubmitting(false)
           }}
           onConfirm={(value) => {
             void handleSubmitFileAction(value)

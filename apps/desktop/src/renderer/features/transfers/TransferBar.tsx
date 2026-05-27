@@ -15,11 +15,13 @@ export function TransferBar({
   onOpen(): void
   transfers: TransferTask[]
 }) {
+  const runningCount = activeCount || runningTransfers(transfers)
+
   return (
     <footer className={`transfer-strip ${fullWidth ? 'full-width' : ''}`}>
       <strong>{t.transferTasks}</strong>
       <button className="transfer-summary-button" onClick={onOpen} type="button">
-        {isPending ? t.updating : `${activeCount || runningTransfers(transfers)} ${t.runningTasks}`}
+        {runningCount > 0 ? `${runningCount} ${t.runningTasks}` : isPending ? t.updating : `0 ${t.runningTasks}`}
       </button>
     </footer>
   )

@@ -24,6 +24,21 @@ import { CommandCenter } from '../commands/CommandCenter'
 import { FileContextMenu } from './FileContextMenu'
 import { FileTable, LocalFileTable, PanePathBar } from './FileTables'
 
+function areStringArraysEqual(left: string[], right: string[]) {
+  if (left === right) {
+    return true
+  }
+  if (left.length !== right.length) {
+    return false
+  }
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false
+    }
+  }
+  return true
+}
+
 export function FileManager({
   activeSession,
   activeTab,
@@ -126,13 +141,19 @@ export function FileManager({
   const remoteDragSelection = useRef<{ basePaths: string[]; startPath: string | null } | null>(null)
 
   useEffect(() => {
-    setLocalPathInput(localPath)
-    setSelectedLocalPaths((prev) => prev.filter((selectedPath) => localItems.some((item) => item.path === selectedPath)))
+    setLocalPathInput((prev) => prev === localPath ? prev : localPath)
+    setSelectedLocalPaths((prev) => {
+      const next = prev.filter((selectedPath) => localItems.some((item) => item.path === selectedPath))
+      return areStringArraysEqual(prev, next) ? prev : next
+    })
   }, [localItems, localPath])
 
   useEffect(() => {
-    setRemotePathInput(activeSession.remotePath)
-    setSelectedRemotePaths((prev) => prev.filter((selectedPath) => activeSession.remoteFiles.some((item) => item.path === selectedPath)))
+    setRemotePathInput((prev) => prev === activeSession.remotePath ? prev : activeSession.remotePath)
+    setSelectedRemotePaths((prev) => {
+      const next = prev.filter((selectedPath) => activeSession.remoteFiles.some((item) => item.path === selectedPath))
+      return areStringArraysEqual(prev, next) ? prev : next
+    })
   }, [activeSession.remoteFiles, activeSession.remotePath])
 
   const selectedRemoteItems = activeSession.remoteFiles.filter((item) => selectedRemotePaths.includes(item.path))
