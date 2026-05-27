@@ -422,8 +422,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
 
   async writeRemoteFile(targetPath: string, content: string, encoding = 'utf-8'): Promise<void> {
     if (this.fileAccessMode === 'root') {
-      await this.ensureRemoteDirectory(path.posix.dirname(targetPath))
-      await this.writeRemoteFileViaShell(targetPath, content, new Error('Root file access mode enabled'), encoding)
+      await this.writeRemoteFileAsPrivileged(targetPath, content, new Error('Root file access mode enabled'), encoding)
       return
     }
 
@@ -952,6 +951,29 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     this.ensureShellFileFallback(cause)
     const payload = encodeText(content, encoding).toString('base64')
     await this.execShellFileCommand(`base64 -d > ${shellQuote(targetPath)}`, undefined, this.fileAccessMode === 'root', `${payload}\n`)
+  }
+
+  private async writeRemoteFileAsPrivileged(targetPath: string, content: string, cause: unknown, encoding = 'utf-8'): Promise<void> {
+    this.ensureShellFileFallback(cause)
+    const tempRemotePath = await this.createTemporaryRemoteUploadPath(path.posix.basename(targetPath))
+    const payload = encodeText(content, encoding).toString('base64')
+
+    try {
+      await this.execCommand(`sh -lc ${shellQuote(`base64 -d > ${tempRemotePath}`)}`, undefined, false, `${payload}\n`)
+      await this.ensureRemoteDirectory(path.posix.dirname(targetPath))
+      await this.execShellFileCommand(
+        `mv ${shellQuote(tempRemotePath)} ${shellQuote(targetPath)}`,
+        { allowNonZeroWithStdout: true },
+        true
+      )
+    } catch (error) {
+      try {
+        await this.execCommand(`sh -lc ${shellQuote(`rm -f -- ${tempRemotePath}`)}`, { allowNonZeroWithStdout: true })
+      } catch {
+        // Best-effort cleanup for temp editor save artifacts.
+      }
+      throw error
+    }
   }
 
   private async uploadFileViaShell(

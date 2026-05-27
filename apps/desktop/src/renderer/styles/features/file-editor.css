@@ -56,6 +56,14 @@
   gap: 8px;
 }
 
+.file-editor-save-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 96px;
+}
+
 .file-editor-window,
 .file-editor-window .file-editor-modal.standalone {
   -webkit-app-region: drag;
@@ -185,6 +193,11 @@
   text-align: left;
   font-size: 12px;
   line-height: 26px;
+}
+
+.file-editor-menu button:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
 }
 
 .file-editor-menu-separator {
