@@ -342,7 +342,14 @@ export function TerminalView({
     renderedTranscriptRef.current = trimTranscript(`${renderedTranscriptRef.current}${chunk}`)
   }
 
-  const formatTerminalChunk = (value: string) => toDisplayTerminalText(value)
+  const formatTerminalChunk = (terminal: Terminal | null, value: string) => {
+    const localized = toDisplayTerminalText(value)
+    if (!terminal) {
+      return localized
+    }
+
+    return normalizeInlineRedrawChunk(terminal, localized)
+  }
 
   const replaceTerminalWithTranscript = (terminal: Terminal, transcript: string) => {
     renderedTranscriptRef.current = trimTranscript(transcript)
@@ -354,7 +361,7 @@ export function TerminalView({
     isWritingRef.current = false
     clearInlineRedrawState()
     terminal.reset()
-    terminal.write(formatTerminalChunk(renderedTranscriptRef.current))
+    terminal.write(formatTerminalChunk(terminal, renderedTranscriptRef.current))
     suppressHydratedChunksUntilRef.current = Date.now() + 1500
   }
 
@@ -582,7 +589,7 @@ export function TerminalView({
           return
         }
         appendRenderedTranscript(chunk)
-        scheduleTerminalWrite(formatTerminalChunk(chunk))
+        scheduleTerminalWrite(formatTerminalChunk(terminal, chunk))
       }
     })
 

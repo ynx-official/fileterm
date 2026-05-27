@@ -5,12 +5,14 @@ export function RootAccessModal({
   defaultSshUser,
   defaultSudoUser,
   errorMessage,
+  isSubmitting = false,
   onClose,
   onSubmit
 }: {
   defaultSshUser?: string
   defaultSudoUser?: string
   errorMessage?: string | null
+  isSubmitting?: boolean
   onClose(): void
   onSubmit(input: { sudoUser: string; sudoPassword: string }): void
 }) {
@@ -27,7 +29,7 @@ export function RootAccessModal({
       <div className="modal-card root-access-modal">
         <div className="modal-header">
           <span>{t.fileRootAccessTitle}</span>
-          <button className="icon-button" onClick={onClose} type="button">×</button>
+          <button className="icon-button" disabled={isSubmitting} onClick={onClose} type="button">×</button>
         </div>
 
         <div className="root-access-description">{t.fileRootAccessDescription}</div>
@@ -41,10 +43,11 @@ export function RootAccessModal({
           <span>{t.fileRootAccessTargetUser}</span>
           <input
             autoFocus
+            disabled={isSubmitting}
             value={sudoUser}
             onChange={(event) => setSudoUser(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') {
+              if (event.key === 'Enter' && !isSubmitting) {
                 onSubmit({ sudoUser, sudoPassword })
               }
             }}
@@ -55,10 +58,11 @@ export function RootAccessModal({
           <span>{t.fileRootAccessPassword}</span>
           <input
             type="password"
+            disabled={isSubmitting}
             value={sudoPassword}
             onChange={(event) => setSudoPassword(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === 'Enter') {
+              if (event.key === 'Enter' && !isSubmitting) {
                 onSubmit({ sudoUser, sudoPassword })
               }
             }}
@@ -69,16 +73,18 @@ export function RootAccessModal({
           <div className="root-access-note-title">{t.fileRootAccessPasswordHint}</div>
           <div className="root-access-note-body">{t.fileRootAccessPasswordHintDetail}</div>
         </div>
-        {errorMessage ? <div className="modal-error">{errorMessage}</div> : null}
+        {errorMessage ? <div className="modal-error" role="alert">{errorMessage}</div> : null}
 
         <div className="form-actions">
-          <button className="flat-button" onClick={onClose} type="button">{t.cancel}</button>
+          <button className="flat-button" disabled={isSubmitting} onClick={onClose} type="button">{t.cancel}</button>
           <button
-            className="primary-button"
+            className="primary-button file-action-submit-button"
+            disabled={isSubmitting}
             onClick={() => onSubmit({ sudoUser, sudoPassword })}
             type="button"
           >
-            {t.fileRootAccessConfirm}
+            {isSubmitting ? <span aria-hidden="true" className="button-spinner" /> : null}
+            <span>{t.fileRootAccessConfirm}</span>
           </button>
         </div>
       </div>

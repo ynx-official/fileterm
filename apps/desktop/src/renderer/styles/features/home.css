@@ -31,9 +31,6 @@
 }
 
 .flat-button {
-  min-width: 64px;
-  height: 32px;
-  padding: 0 16px;
   border-radius: var(--radius-md);
   font-size: 13px;
   font-weight: 500;

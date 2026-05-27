@@ -322,6 +322,7 @@ export function App() {
     sudoUser: string
   } | null>(null)
   const [rootAccessDialogError, setRootAccessDialogError] = useState<string | null>(null)
+  const [isRootAccessSubmitting, setIsRootAccessSubmitting] = useState(false)
   const [sshInteraction, setSshInteraction] = useState<SshInteractionRequest | null>(null)
   const [sshInteractionError, setSshInteractionError] = useState<string | null>(null)
   const [showTransfers, setShowTransfers] = useState(false)
@@ -1864,7 +1865,8 @@ export function App() {
 
     void (async () => {
       try {
-        setIsBusy(true)
+        setIsRootAccessSubmitting(true)
+        setRootAccessDialogError(null)
         const snapshot = await desktopApi.setRemoteFileAccessMode(rootAccessDialog.tabId, 'root', {
           sudoUser,
           sudoPassword
@@ -1875,7 +1877,7 @@ export function App() {
       } catch (err) {
         reportError(setRootAccessDialogError, '切换到 root 视角', err)
       } finally {
-        setIsBusy(false)
+        setIsRootAccessSubmitting(false)
       }
     })()
   }
@@ -2262,6 +2264,7 @@ export function App() {
             defaultSshUser={rootAccessDialog.sshUser}
             defaultSudoUser={rootAccessDialog.sudoUser}
             errorMessage={rootAccessDialogError}
+            isSubmitting={isRootAccessSubmitting}
             onClose={() => {
               setRootAccessDialog(null)
               setRootAccessDialogError(null)

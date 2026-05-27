@@ -373,13 +373,19 @@
   box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.08);
 }
 
+.flat-button,
 .primary-button {
-  height: 36px;
-  padding: 0 20px;
-  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--button-gap-md);
+  height: var(--button-height-md);
+  padding: 0 var(--button-padding-x-md);
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
   font-size: 13px;
   font-weight: 500;
+  line-height: 1;
 }
 
 .form-actions {
@@ -391,10 +397,6 @@
 }
 
 .file-action-submit-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
   min-width: 92px;
 }
 
