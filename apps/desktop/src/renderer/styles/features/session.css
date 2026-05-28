@@ -447,6 +447,14 @@
   border-bottom: 1px solid var(--border-light);
 }
 
+.transfer-hint {
+  display: block;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1.45;
+  opacity: 0.72;
+}
+
 .transfer-segments {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

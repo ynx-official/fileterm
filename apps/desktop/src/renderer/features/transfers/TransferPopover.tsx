@@ -49,6 +49,7 @@ export function TransferPopover({
           <button className={directionFilter === 'download' ? 'active' : ''} onClick={() => setDirectionFilter('download')} type="button">{t.download}</button>
           <button className={directionFilter === 'upload' ? 'active' : ''} onClick={() => setDirectionFilter('upload')} type="button">{t.upload}</button>
         </div>
+        <small className="transfer-hint">{t.transferUploadHint}</small>
       </div>
       <div className="transfer-popover-list">
         {visibleTransfers.length ? visibleTransfers.map((transfer) => (

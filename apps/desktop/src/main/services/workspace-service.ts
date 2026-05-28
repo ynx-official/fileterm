@@ -29,6 +29,7 @@ export class WorkspaceService {
   private readonly transfers = new WorkspaceTransfersState(seedTransfers)
   private readonly transferCancels = new Map<string, () => Promise<void> | void>()
   private readonly transferCanceling = new Set<string>()
+  private readonly transferTabs = new Map<string, string>()
   private readonly privilegedAccess = new Map<string, RemoteFileAccessOptions>()
   private readonly sessionRuntime = new WorkspaceSessionRuntime({
     getSnapshot: () => this.getSnapshot(),
@@ -348,7 +349,7 @@ export class WorkspaceService {
     options?: TransferTargetOptions
   ): Promise<WorkspaceSnapshot> {
     const controller = this.sessionRuntime.requireController(tabId)
-    const transferId = this.addTransfer('upload', path.basename(localPath), sender)
+    const transferId = this.addTransfer('upload', path.basename(localPath), tabId, sender)
     const transferState = { canceled: false }
     const transferTracker = createTransferSpeedTracker()
     this.setTransferCancel(transferId, async () => {
@@ -404,7 +405,7 @@ export class WorkspaceService {
   ): Promise<WorkspaceSnapshot> {
     const controller = this.sessionRuntime.requireController(tabId)
     const localPath = path.join(localDirectory, options?.targetName ?? path.posix.basename(remotePath))
-    const transferId = this.addTransfer('download', path.posix.basename(remotePath), sender)
+    const transferId = this.addTransfer('download', path.posix.basename(remotePath), tabId, sender)
     const transferState = { canceled: false }
     const transferTracker = createTransferSpeedTracker()
     this.setTransferCancel(transferId, async () => {
@@ -465,7 +466,7 @@ export class WorkspaceService {
     const controller = this.sessionRuntime.requireController(tabId)
     const transferName = options?.targetName ?? (path.posix.basename(remotePath) || 'folder')
     const localRootPath = path.join(localDirectory, transferName)
-    const transferId = this.addTransfer('download', transferName, sender)
+    const transferId = this.addTransfer('download', transferName, tabId, sender)
     const transferState = { canceled: false }
     this.setTransferCancel(transferId, async () => {
       transferState.canceled = true
@@ -821,9 +822,10 @@ export class WorkspaceService {
     await this.sessionRuntime.refreshRemoteFiles(tabId)
   }
 
-  private addTransfer(direction: 'upload' | 'download', name: string, sender: WebContents) {
+  private addTransfer(direction: 'upload' | 'download', name: string, tabId: string, sender: WebContents) {
     const transferId = this.transfers.add(direction, name)
-    void this.sessionRuntime.emitSnapshot(sender)
+    this.transferTabs.set(transferId, tabId)
+    void this.emitTransferSnapshot(transferId, sender)
     return transferId
   }
 
@@ -842,7 +844,25 @@ export class WorkspaceService {
     patch: Partial<Pick<TransferTask, 'progress' | 'status' | 'message' | 'speed'>>,
     sender: WebContents
   ) {
-    this.transfers.update(transferId, patch)
+    const changed = this.transfers.update(transferId, patch)
+    if (!changed) {
+      return
+    }
+
+    if (patch.status === 'done' || patch.status === 'failed' || patch.status === 'canceled') {
+      this.transferTabs.delete(transferId)
+    }
+
+    await this.emitTransferSnapshot(transferId, sender)
+  }
+
+  private async emitTransferSnapshot(transferId: string, sender: WebContents) {
+    const tabId = this.transferTabs.get(transferId)
+    if (tabId) {
+      await this.sessionRuntime.emitSnapshotForTab(tabId)
+      return
+    }
+
     await this.sessionRuntime.emitSnapshot(sender)
   }
 }

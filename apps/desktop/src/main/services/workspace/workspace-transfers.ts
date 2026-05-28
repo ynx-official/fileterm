@@ -59,7 +59,7 @@ export class WorkspaceTransfersState {
   ) {
     const index = this.transfers.findIndex((transfer) => transfer.id === transferId)
     if (index === -1) {
-      return
+      return false
     }
 
     const current = this.transfers[index]
@@ -67,13 +67,25 @@ export class WorkspaceTransfersState {
       (current.status === 'done' || current.status === 'failed' || current.status === 'canceled')
       && (patch.status === 'running' || patch.status === 'queued')
     ) {
-      return
+      return false
     }
 
-    this.transfers[index] = {
+    const next = {
       ...current,
       ...patch
     }
+
+    if (
+      next.progress === current.progress
+      && next.status === current.status
+      && next.message === current.message
+      && next.speed === current.speed
+    ) {
+      return false
+    }
+
+    this.transfers[index] = next
+    return true
   }
 
   get(transferId: string) {

@@ -1061,12 +1061,17 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
 
   private async readRemoteDirectoryViaShell(targetPath: string, cause: unknown): Promise<RemoteFileItem[]> {
     this.ensureShellFileFallback(cause)
+    const outputStartMarker = '__TERMDOCK_DIR_LIST_START__'
+    const outputEndMarker = '__TERMDOCK_DIR_LIST_END__'
     const output = await this.execShellFileCommand(`
 target=${shellQuote(targetPath)}
 if [ ! -d "$target" ]; then
+  printf "%s\\n" ${shellQuote(outputStartMarker)}
   echo "__NOT_DIR__"
+  printf "%s\\n" ${shellQuote(outputEndMarker)}
   exit 1
 fi
+printf "%s\\n" ${shellQuote(outputStartMarker)}
 cd "$target" || exit 1
 for name in .* *; do
   [ "$name" = "." ] && continue
@@ -1077,12 +1082,14 @@ for name in .* *; do
   stat_line=$(stat -c "%Y|%s|%A|%u|%g" -- "$name" 2>/dev/null || echo "0|0|||")
   printf "%s\t%s\t%s\n" "$name" "$kind" "$stat_line"
 done
+printf "%s\\n" ${shellQuote(outputEndMarker)}
 `, undefined, this.fileAccessMode === 'root')
-    if (output.trim() === '__NOT_DIR__') {
+    const body = extractMarkedOutput(output, outputStartMarker, outputEndMarker).trim()
+    if (body === '__NOT_DIR__') {
       throw new Error(`无法打开远程目录: ${targetPath}`)
     }
 
-    const rows = output
+    const rows = body
       .split('\n')
       .map((line) => line.trim())
       .filter(Boolean)
@@ -1468,6 +1475,16 @@ function computeHostFingerprint(key: Buffer | string) {
 
 function shellQuote(value: string) {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`
+}
+
+function extractMarkedOutput(output: string, startMarker: string, endMarker: string) {
+  const startIndex = output.indexOf(startMarker)
+  const endIndex = output.lastIndexOf(endMarker)
+  if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) {
+    return output
+  }
+
+  return output.slice(startIndex + startMarker.length, endIndex)
 }
 
 function validateMode(mode: string) {
