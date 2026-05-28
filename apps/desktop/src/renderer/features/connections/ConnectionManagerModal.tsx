@@ -1,5 +1,6 @@
 import type { ConnectionProfile, ConnectionFolder } from '@termdock/core'
-import { useState, useMemo, type MouseEvent, type DragEvent } from 'react'
+import { useState, useMemo, type DragEvent } from 'react'
+import { ConfirmActionDialog } from '../common/ConfirmActionDialog'
 import { t } from '../../i18n'
 
 export function ConnectionManagerModal({
@@ -20,7 +21,7 @@ export function ConnectionManagerModal({
   folders: ConnectionFolder[]
   onClose(): void
   onCreate(): void
-  onDeleteProfile(event: MouseEvent<HTMLButtonElement>, profileId: string): void
+  onDeleteProfile(profileId: string): void
   onEditProfile(profile: ConnectionProfile): void
   onOpenProfile(profileId: string): void
   onCreateFolder(name: string): void
@@ -35,6 +36,11 @@ export function ConnectionManagerModal({
   const [dragPosition, setDragPosition] = useState<'top' | 'bottom' | 'inside' | null>(null)
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
+  const [pendingDelete, setPendingDelete] = useState<
+    | { kind: 'folder'; id: string; name: string }
+    | { kind: 'profile'; id: string; name: string }
+    | null
+  >(null)
 
   const toggleFolder = (folderId: string, event?: React.MouseEvent) => {
     event?.stopPropagation()
@@ -244,8 +250,11 @@ export function ConnectionManagerModal({
               type="button"
               onClick={(e) => {
                 e.stopPropagation()
-                if (isFolder) onDeleteFolder(node.id)
-                else onDeleteProfile(e, node.id)
+                setPendingDelete({
+                  kind: isFolder ? 'folder' : 'profile',
+                  id: node.id,
+                  name: node.name
+                })
               }}
             >
               {t.delete}
@@ -272,7 +281,7 @@ export function ConnectionManagerModal({
         <span>{t.connectionManager}</span>
         {!standalone ? <button className="icon-button" onClick={onClose} type="button">×</button> : null}
       </div>
-      <div className="manager-toolbar" style={{ gap: '10px' }}>
+      <div className="manager-toolbar manager-toolbar-spacious">
         <button 
           className="flat-button" 
           type="button" 
@@ -347,6 +356,22 @@ export function ConnectionManagerModal({
   return (
     <div className="modal-backdrop">
       {content}
+      {pendingDelete ? (
+        <ConfirmActionDialog
+          confirmLabel={t.delete}
+          description={`${t.deleteConfirmPrefix}${pendingDelete.name}${t.deleteConfirmSuffix}`}
+          onClose={() => setPendingDelete(null)}
+          onConfirm={() => {
+            if (pendingDelete.kind === 'folder') {
+              onDeleteFolder(pendingDelete.id)
+            } else {
+              onDeleteProfile(pendingDelete.id)
+            }
+            setPendingDelete(null)
+          }}
+          title={t.delete}
+        />
+      ) : null}
     </div>
   )
 }

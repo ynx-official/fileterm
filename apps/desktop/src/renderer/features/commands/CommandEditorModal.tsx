@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ClipboardEvent, type ReactNode } from 'react'
 import type { CommandFolder, CommandTemplate, CommandTemplateInput } from '@termdock/core'
 import { t } from '../../i18n'
 import { extractCommandParams, sortByOrder } from './command-utils'
@@ -24,30 +24,24 @@ export function toCommandTemplateInput(command: CommandTemplate): CommandTemplat
 
 function CommandDialogShell({
   title,
-  standalone = false,
   onClose,
   children
 }: {
   title: string
-  standalone?: boolean
   onClose(): void
   children: ReactNode
 }) {
   const dialog = (
-    <div className={`modal-card command-dialog command-editor-page ${standalone ? 'standalone' : ''}`} onClick={(event) => event.stopPropagation()}>
+    <div className="modal-card command-dialog command-editor-page" onClick={(event) => event.stopPropagation()}>
       <div className="modal-header">
         <span>{title}</span>
-        {!standalone ? <button className="icon-button" onClick={onClose} type="button">×</button> : null}
+        <button className="icon-button" onClick={onClose} type="button">×</button>
       </div>
-      <div className="command-dialog-body">
+      <div className="command-dialog-body scrollbar-scroll">
         {children}
       </div>
     </div>
   )
-
-  if (standalone) {
-    return <div className="command-editor-window">{dialog}</div>
-  }
 
   return (
     <div className="modal-backdrop command-dialog-backdrop" onClick={onClose}>
@@ -72,11 +66,13 @@ export function CommandEditorModal({
   onSubmit(input: CommandTemplateInput): void
 }) {
   const [form, setForm] = useState<CommandTemplateInput>(initialValue)
+  const [showValidation, setShowValidation] = useState(false)
   const orderedFolders = useMemo(() => sortByOrder(folders), [folders])
   const title = mode === 'edit' && initialValue.name ? `${t.commandEdit}-${initialValue.name}` : t.commandCreate
 
   useEffect(() => {
     setForm(initialValue)
+    setShowValidation(false)
   }, [
     mode,
     initialValue.name,
@@ -87,93 +83,132 @@ export function CommandEditorModal({
     initialValue.appendCarriageReturn
   ])
 
-  return (
-    <CommandDialogShell title={title} standalone={standalone} onClose={onClose}>
-      <div className="command-editor-dialog-form">
-        <div className="command-editor-grid">
-          <label className="command-editor-field full">
-            <span>{t.name}</span>
-            <input
-              type="text"
-              value={form.name}
-              onChange={(event) => setForm((prev) => ({ ...prev, name: event.currentTarget.value }))}
-            />
-          </label>
-          <label className="command-editor-field">
-            <span>{t.commandCategory}</span>
-            <select
-              value={form.parentId ?? ''}
-              onChange={(event) => setForm((prev) => ({ ...prev, parentId: event.currentTarget.value || undefined }))}
+  const submitForm = () => {
+    if (!form.name?.trim() || !form.command?.trim()) {
+      setShowValidation(true)
+      return
+    }
+    onSubmit({
+      ...form,
+      name: form.name.trim(),
+      command: form.command.trim(),
+      description: form.description?.trim() || undefined
+    })
+  }
+
+  const editorFields = (
+    <div className="command-editor-grid">
+      <label className="command-editor-field full">
+        <span>{t.name}</span>
+        <input
+          type="text"
+          value={form.name}
+          className={showValidation && !form.name?.trim() ? 'is-invalid' : ''}
+          onChange={(event) => {
+            const { value } = event.target
+            setForm((prev) => ({ ...prev, name: value }))
+          }}
+        />
+      </label>
+      <label className="command-editor-field">
+        <span>{t.commandCategory}</span>
+        <select
+          value={form.parentId ?? ''}
+          onChange={(event) => {
+            const { value } = event.target
+            setForm((prev) => ({ ...prev, parentId: value || undefined }))
+          }}
+        >
+          <option value="">{t.commandUncategorized}</option>
+          {orderedFolders.map((folder) => (
+            <option key={folder.id} value={folder.id}>{folder.name}</option>
+          ))}
+        </select>
+      </label>
+      <label className="command-editor-field">
+        <span>{t.note}</span>
+        <input
+          type="text"
+          value={form.description ?? ''}
+          onChange={(event) => {
+            const { value } = event.target
+            setForm((prev) => ({ ...prev, description: value }))
+          }}
+        />
+      </label>
+      <label className="command-editor-field full command-editor-dialog-textarea">
+        <span>{t.commandTemplate}</span>
+        <textarea
+          rows={12}
+          value={form.command}
+          className={showValidation && !form.command?.trim() ? 'is-invalid' : ''}
+          onChange={(event) => {
+            const { value } = event.target
+            setForm((prev) => ({ ...prev, command: value }))
+          }}
+        />
+      </label>
+      <div className="command-editor-field full command-editor-dialog-params">
+        <span>{t.commandParamHint}</span>
+        <div className="command-param-hints">
+          {[1, 2, 3, 4, 5].map((index) => (
+            <button
+              key={index}
+              type="button"
+              onClick={() => setForm((prev) => ({ ...prev, command: `${prev.command}[p#${index}]` }))}
             >
-              <option value="">{t.commandUncategorized}</option>
-              {orderedFolders.map((folder) => (
-                <option key={folder.id} value={folder.id}>{folder.name}</option>
-              ))}
-            </select>
-          </label>
-          <label className="command-editor-field">
-            <span>{t.note}</span>
-            <input
-              type="text"
-              value={form.description ?? ''}
-              onChange={(event) => setForm((prev) => ({ ...prev, description: event.currentTarget.value }))}
-            />
-          </label>
-          <label className="command-editor-field full command-editor-dialog-textarea">
-            <span>{t.commandTemplate}</span>
-            <textarea
-              rows={12}
-              value={form.command}
-              onChange={(event) => setForm((prev) => ({ ...prev, command: event.currentTarget.value }))}
-            />
-          </label>
-          <div className="command-editor-field full command-editor-dialog-params">
-            <span>{t.commandParamHint}</span>
-            <div className="command-param-hints">
-              {[1, 2, 3, 4, 5].map((index) => (
-                <button
-                  key={index}
-                  type="button"
-                  onClick={() => setForm((prev) => ({ ...prev, command: `${prev.command}[p#${index}]` }))}
-                >
-                  {`${t.commandParam}${index}`}
-                </button>
-              ))}
-            </div>
-            <small>{t.commandParamExplain}</small>
+              {`${t.commandParam}${index}`}
+            </button>
+          ))}
+        </div>
+        <small>{t.commandParamExplain}</small>
+      </div>
+      <label className="command-editor-field full command-editor-checkbox-row">
+        <input
+          checked={form.appendCarriageReturn ?? true}
+          type="checkbox"
+          onChange={(event) => {
+            const { checked } = event.target
+            setForm((prev) => ({ ...prev, appendCarriageReturn: checked }))
+          }}
+        />
+        <span>{t.commandAppendCr}</span>
+      </label>
+      <div className="command-editor-field full command-preview">
+        <span>{t.commandDetectedParams}</span>
+        <code>{extractCommandParams(form.command).join(', ') || '-'}</code>
+      </div>
+    </div>
+  )
+
+  if (standalone) {
+    return (
+      <div className="connection-form-window">
+        <div className="modal-card command-form-standalone">
+          <div className="modal-header">
+            <span>{title}</span>
           </div>
-          <label className="command-editor-field full command-editor-checkbox-row">
-            <input
-              checked={form.appendCarriageReturn ?? true}
-              type="checkbox"
-              onChange={(event) => setForm((prev) => ({ ...prev, appendCarriageReturn: event.currentTarget.checked }))}
-            />
-            <span>{t.commandAppendCr}</span>
-          </label>
-          <div className="command-editor-field full command-preview">
-            <span>{t.commandDetectedParams}</span>
-            <code>{extractCommandParams(form.command).join(', ') || '-'}</code>
+          <div className="command-form-standalone-body">
+            <div className="command-form-standalone-page scrollbar-scroll">
+              {editorFields}
+            </div>
+            <div className="form-actions command-dialog-actions">
+              <button className="flat-button" type="button" onClick={onClose}>{t.cancel}</button>
+              <button className="primary-button" type="button" onClick={submitForm}>{t.save}</button>
+            </div>
           </div>
         </div>
+      </div>
+    )
+  }
+
+  return (
+    <CommandDialogShell title={title} onClose={onClose}>
+      <div className="command-editor-dialog-form">
+        {editorFields}
         <div className="form-actions command-dialog-actions">
           <button className="flat-button" type="button" onClick={onClose}>{t.cancel}</button>
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => {
-              if (!form.name?.trim() || !form.command?.trim()) {
-                return
-              }
-              onSubmit({
-                ...form,
-                name: form.name.trim(),
-                command: form.command.trim(),
-                description: form.description?.trim() || undefined
-              })
-            }}
-          >
-            {t.save}
-          </button>
+          <button className="primary-button" type="button" onClick={submitForm}>{t.save}</button>
         </div>
       </div>
     </CommandDialogShell>

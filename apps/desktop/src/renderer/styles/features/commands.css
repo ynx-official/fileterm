@@ -686,12 +686,118 @@
   max-height: calc(100vh - 48px);
 }
 
+.command-form-standalone {
+  position: relative;
+  width: 100%;
+  height: 100vh;
+  box-sizing: border-box;
+  padding: 46px 20px 20px;
+  border: 0;
+  border-radius: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.command-form-standalone .modal-header {
+  position: absolute;
+  top: 14px;
+  left: 0;
+  width: 100%;
+  padding: 0 max(76px, env(safe-area-inset-left, 0px) + 76px) 0 max(76px, env(safe-area-inset-right, 0px) + 76px);
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+  -webkit-app-region: drag;
+}
+
+.command-form-standalone .modal-header span {
+  pointer-events: auto;
+}
+
+.command-form-standalone-body,
+.command-form-standalone-page,
+.command-form-standalone input,
+.command-form-standalone select,
+.command-form-standalone textarea,
+.command-form-standalone button {
+  -webkit-app-region: no-drag;
+}
+
+.command-form-standalone-body {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.command-form-standalone-page {
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.command-form-standalone-page label:not(.command-editor-checkbox-row) {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.command-form-standalone-page label.command-editor-checkbox-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+
+.command-form-standalone-page input:not([type='checkbox']),
+.command-form-standalone-page select,
+.command-form-standalone-page textarea {
+  width: 100%;
+  border-width: 1px;
+  border-style: solid;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+  box-sizing: border-box;
+}
+
+.command-form-standalone-page input:not([type='checkbox']),
+.command-form-standalone-page select {
+  height: 36px;
+  padding: 0 12px;
+}
+
+.command-form-standalone-page textarea {
+  min-height: 200px;
+  padding: 12px;
+  resize: vertical;
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  line-height: 1.55;
+}
+
+.command-form-standalone-page select {
+  padding-right: 24px;
+}
+
 .command-editor-window,
 .standalone-shell {
   min-height: 100vh;
   background: var(--bg-main);
   display: flex;
   flex-direction: column;
+  position: relative;
+  isolation: isolate;
 }
 
 .command-editor-page.standalone,
@@ -704,8 +810,9 @@
   box-shadow: none;
   margin: 0;
   padding: 46px 20px 20px !important;
-  background: transparent !important;
+  background: var(--bg-main) !important;
   flex: 1;
+  position: relative;
 }
 
 .command-editor-page.standalone .modal-header,
@@ -729,11 +836,6 @@
   font-weight: 600;
   color: var(--text-muted);
   pointer-events: auto;
-}
-
-.command-editor-window,
-.standalone-shell {
-  -webkit-app-region: drag;
 }
 
 .command-editor-page.standalone button,
@@ -924,7 +1026,10 @@
   gap: 8px;
 }
 
-.command-manager-modal .manager-toolbar .primary-button,
+.manager-toolbar-spacious {
+  gap: 10px !important;
+}
+
 .command-manager-modal .manager-toolbar .flat-button,
 .command-manager-modal .command-manager-sidebar-head button,
 .command-manager-modal .command-manager-submit button {
@@ -938,7 +1043,6 @@
   box-shadow: none;
 }
 
-.command-manager-modal .manager-toolbar .primary-button:hover:not(:disabled),
 .command-manager-modal .manager-toolbar .flat-button:hover:not(:disabled),
 .command-manager-modal .command-manager-sidebar-head button:hover,
 .command-manager-modal .command-manager-submit button:hover {

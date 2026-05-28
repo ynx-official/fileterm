@@ -60,6 +60,7 @@
   --popover-bg: #2a2a2a;
   --popover-border: var(--border-light);
   --popover-shadow: var(--shadow-lg);
+  --confirm-dialog-text: #cfd4dc;
 }
 
 /* Extracted dark theme overrides */
@@ -2255,4 +2256,72 @@
   background: #151515;
   border-color: rgba(255, 255, 255, 0.12);
   color: #e7e7e7;
+}
+
+/* Standalone Command Form Theme Styles */
+:root:not([data-theme]) .command-form-standalone-page label,
+:root[data-theme='default-dark'] .command-form-standalone-page label,
+:root[data-theme='default'] .command-form-standalone-page label {
+  color: var(--text-muted);
+}
+
+:root:not([data-theme]) .command-form-standalone-page input:not([type='checkbox']),
+:root[data-theme='default-dark'] .command-form-standalone-page input:not([type='checkbox']),
+:root[data-theme='default'] .command-form-standalone-page input:not([type='checkbox']),
+:root:not([data-theme]) .command-form-standalone-page select,
+:root[data-theme='default-dark'] .command-form-standalone-page select,
+:root[data-theme='default'] .command-form-standalone-page select,
+:root:not([data-theme]) .command-form-standalone-page textarea,
+:root[data-theme='default-dark'] .command-form-standalone-page textarea,
+:root[data-theme='default'] .command-form-standalone-page textarea {
+  background: #151515;
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #e7e7e7;
+}
+
+:root:not([data-theme]) .command-form-standalone-page input:not([type='checkbox']):focus,
+:root[data-theme='default-dark'] .command-form-standalone-page input:not([type='checkbox']):focus,
+:root[data-theme='default'] .command-form-standalone-page input:not([type='checkbox']):focus,
+:root:not([data-theme]) .command-form-standalone-page select:focus,
+:root[data-theme='default-dark'] .command-form-standalone-page select:focus,
+:root[data-theme='default'] .command-form-standalone-page select:focus,
+:root:not([data-theme]) .command-form-standalone-page textarea:focus,
+:root[data-theme='default-dark'] .command-form-standalone-page textarea:focus,
+:root[data-theme='default'] .command-form-standalone-page textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 124, 255, 0.18);
+  background: var(--bg-hover);
+  outline: none;
+}
+
+/* Invalid State Theme Colors (Dark) */
+:root:not([data-theme]) .command-form-standalone-page input.is-invalid,
+:root[data-theme='default-dark'] .command-form-standalone-page input.is-invalid,
+:root[data-theme='default'] .command-form-standalone-page input.is-invalid,
+:root:not([data-theme]) .command-form-standalone-page textarea.is-invalid,
+:root[data-theme='default-dark'] .command-form-standalone-page textarea.is-invalid,
+:root[data-theme='default'] .command-form-standalone-page textarea.is-invalid,
+:root:not([data-theme]) .command-editor-dialog-form input.is-invalid,
+:root[data-theme='default-dark'] .command-editor-dialog-form input.is-invalid,
+:root[data-theme='default'] .command-editor-dialog-form input.is-invalid,
+:root:not([data-theme]) .command-editor-dialog-form textarea.is-invalid,
+:root[data-theme='default-dark'] .command-editor-dialog-form textarea.is-invalid,
+:root[data-theme='default'] .command-editor-dialog-form textarea.is-invalid {
+  border-color: var(--danger) !important;
+}
+
+:root:not([data-theme]) .command-form-standalone-page input.is-invalid:focus,
+:root[data-theme='default-dark'] .command-form-standalone-page input.is-invalid:focus,
+:root[data-theme='default'] .command-form-standalone-page input.is-invalid:focus,
+:root:not([data-theme]) .command-form-standalone-page textarea.is-invalid:focus,
+:root[data-theme='default-dark'] .command-form-standalone-page textarea.is-invalid:focus,
+:root[data-theme='default'] .command-form-standalone-page textarea.is-invalid:focus,
+:root:not([data-theme]) .command-editor-dialog-form input.is-invalid:focus,
+:root[data-theme='default-dark'] .command-editor-dialog-form input.is-invalid:focus,
+:root[data-theme='default'] .command-editor-dialog-form input.is-invalid:focus,
+:root:not([data-theme]) .command-editor-dialog-form textarea.is-invalid:focus,
+:root[data-theme='default-dark'] .command-editor-dialog-form textarea.is-invalid:focus,
+:root[data-theme='default'] .command-editor-dialog-form textarea.is-invalid:focus {
+  border-color: var(--danger) !important;
+  box-shadow: 0 0 0 3px rgba(201, 61, 61, 0.22) !important;
 }

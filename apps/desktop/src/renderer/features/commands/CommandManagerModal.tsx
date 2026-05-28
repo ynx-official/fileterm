@@ -1,5 +1,6 @@
 import { useMemo, useState, type DragEvent } from 'react'
 import type { CommandFolder, CommandTemplate, CommandTemplateInput } from '@termdock/core'
+import { ConfirmActionDialog } from '../common/ConfirmActionDialog'
 import { t } from '../../i18n'
 import { CommandEditorModal, emptyCommandForm, toCommandTemplateInput } from './CommandEditorModal'
 
@@ -39,6 +40,11 @@ export function CommandManagerModal({
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [editorState, setEditorState] = useState<{ mode: 'create' | 'edit'; commandId?: string } | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<
+    | { kind: 'folder'; id: string; name: string }
+    | { kind: 'command'; id: string; name: string }
+    | null
+  >(null)
 
   const desktopApi = window.termdock
 
@@ -262,8 +268,11 @@ export function CommandManagerModal({
               type="button"
               onClick={(e) => {
                 e.stopPropagation()
-                if (isFolder) onDeleteFolder(node.id)
-                else onDeleteCommand(node.id)
+                setPendingDelete({
+                  kind: isFolder ? 'folder' : 'command',
+                  id: node.id,
+                  name: node.name
+                })
               }}
             >
               {t.delete}
@@ -290,7 +299,7 @@ export function CommandManagerModal({
         <span>{t.commandManager}</span>
         {!standalone ? <button className="icon-button" onClick={onClose} type="button">×</button> : null}
       </div>
-      <div className="manager-toolbar" style={{ gap: '10px' }}>
+      <div className="manager-toolbar manager-toolbar-spacious">
         <button 
           className="flat-button" 
           type="button" 
@@ -371,6 +380,22 @@ export function CommandManagerModal({
             }
             setEditorState(null)
           }}
+        />
+      ) : null}
+      {pendingDelete ? (
+        <ConfirmActionDialog
+          confirmLabel={t.delete}
+          description={`${t.deleteConfirmPrefix}${pendingDelete.name}${t.deleteConfirmSuffix}`}
+          onClose={() => setPendingDelete(null)}
+          onConfirm={() => {
+            if (pendingDelete.kind === 'folder') {
+              onDeleteFolder(pendingDelete.id)
+            } else {
+              onDeleteCommand(pendingDelete.id)
+            }
+            setPendingDelete(null)
+          }}
+          title={t.delete}
         />
       ) : null}
     </>

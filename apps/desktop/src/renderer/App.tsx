@@ -895,11 +895,7 @@ export function App() {
     }
   }
 
-  const handleDeleteProfile = async (
-    event: MouseEvent<HTMLButtonElement>,
-    profileId: string
-  ) => {
-    event.stopPropagation()
+  const handleDeleteProfile = async (profileId: string) => {
     if (!desktopApi) {
       setError(t.desktopOnlyDelete)
       return

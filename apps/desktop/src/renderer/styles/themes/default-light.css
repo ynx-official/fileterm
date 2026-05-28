@@ -48,6 +48,7 @@
   --popover-bg: #ffffff;
   --popover-border: var(--border-light);
   --popover-shadow: 0 12px 32px rgba(15, 23, 42, 0.12);
+  --confirm-dialog-text: #475569;
 
   --terminal-bg: #ffffff;
   --terminal-text: #111827;
@@ -634,4 +635,42 @@
 
 :root[data-theme='default-light'] .status-message-close:hover {
   background: rgba(183, 121, 0, 0.08);
+}
+
+/* Standalone Command Form Theme Styles */
+:root[data-theme='default-light'] .command-form-standalone-page label {
+  color: var(--text-muted);
+}
+
+:root[data-theme='default-light'] .command-form-standalone-page input:not([type='checkbox']),
+:root[data-theme='default-light'] .command-form-standalone-page select,
+:root[data-theme='default-light'] .command-form-standalone-page textarea {
+  background: #ffffff;
+  border-color: var(--border-light);
+  color: var(--text-main);
+}
+
+:root[data-theme='default-light'] .command-form-standalone-page input:not([type='checkbox']):focus,
+:root[data-theme='default-light'] .command-form-standalone-page select:focus,
+:root[data-theme='default-light'] .command-form-standalone-page textarea:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(79, 124, 255, 0.15);
+  background: #ffffff;
+  outline: none;
+}
+
+/* Invalid State Theme Colors (Light) */
+:root[data-theme='default-light'] .command-form-standalone-page input.is-invalid,
+:root[data-theme='default-light'] .command-form-standalone-page textarea.is-invalid,
+:root[data-theme='default-light'] .command-editor-dialog-form input.is-invalid,
+:root[data-theme='default-light'] .command-editor-dialog-form textarea.is-invalid {
+  border-color: var(--danger) !important;
+}
+
+:root[data-theme='default-light'] .command-form-standalone-page input.is-invalid:focus,
+:root[data-theme='default-light'] .command-form-standalone-page textarea.is-invalid:focus,
+:root[data-theme='default-light'] .command-editor-dialog-form input.is-invalid:focus,
+:root[data-theme='default-light'] .command-editor-dialog-form textarea.is-invalid:focus {
+  border-color: var(--danger) !important;
+  box-shadow: 0 0 0 3px rgba(201, 61, 61, 0.18) !important;
 }

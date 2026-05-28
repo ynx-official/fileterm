@@ -43,6 +43,26 @@ function safeConsoleError(...args: unknown[]) {
   }
 }
 
+function attachWindowDiagnostics(win: BrowserWindow, label: string) {
+  win.webContents.on('render-process-gone', (_event, details) => {
+    safeConsoleError(`[TermDock] ${label} render-process-gone`, details)
+  })
+  win.webContents.on('unresponsive', () => {
+    safeConsoleError(`[TermDock] ${label} became unresponsive`)
+  })
+  win.webContents.on('responsive', () => {
+    safeConsoleError(`[TermDock] ${label} responsive again`)
+  })
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    safeConsoleError(`[TermDock] ${label} did-fail-load`, {
+      errorCode,
+      errorDescription,
+      validatedURL,
+      isMainFrame
+    })
+  })
+}
+
 process.stdout.on('error', (error) => {
   if (!isBrokenPipeError(error)) {
     throw error
@@ -190,6 +210,9 @@ function createNativeChildWindow(options: {
   minWidth: number
   minHeight: number
   backgroundColor?: string
+  useVibrancy?: boolean
+  visualEffectState?: 'followWindow' | 'active' | 'inactive'
+  titleBarStyle?: 'default' | 'hidden' | 'hiddenInset' | 'customButtonsOnHover'
 }) {
   return new BrowserWindow({
     width: options.width,
@@ -200,11 +223,11 @@ function createNativeChildWindow(options: {
     title: options.title,
     backgroundColor: options.backgroundColor ?? getWindowBackgroundColor(uiPreferences.theme),
     autoHideMenuBar: true,
-    titleBarStyle: isMac ? 'hiddenInset' : 'default',
+    titleBarStyle: isMac ? options.titleBarStyle ?? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
     minimizable: false,
-    vibrancy: isMac ? 'sidebar' : undefined,
-    visualEffectState: isMac ? 'active' : undefined,
+    vibrancy: isMac && options.useVibrancy !== false ? 'sidebar' : undefined,
+    visualEffectState: isMac ? options.visualEffectState ?? 'active' : undefined,
     ...getWindowIconOptions(),
     webPreferences: {
       preload: path.join(__dirname, '../preload/preload.cjs'),
@@ -244,6 +267,7 @@ function openConnectionManagerWindow(parent: BrowserWindow) {
   })
 
   connectionManagerWindow = win
+  attachWindowDiagnostics(win, 'connection-manager')
   win.once('ready-to-show', () => {
     win.show()
   })
@@ -268,10 +292,14 @@ function openCommandManagerWindow(parent: BrowserWindow) {
     width: 1180,
     height: 760,
     minWidth: 980,
-    minHeight: 640
+    minHeight: 640,
+    useVibrancy: false,
+    visualEffectState: undefined,
+    titleBarStyle: 'hiddenInset'
   })
 
   commandManagerWindow = win
+  attachWindowDiagnostics(win, 'command-manager')
   win.once('ready-to-show', () => {
     win.show()
   })
@@ -298,6 +326,7 @@ function openConnectionFormWindow(parent: BrowserWindow, mode: 'create' | 'edit'
   })
 
   connectionFormWindow = win
+  attachWindowDiagnostics(win, 'connection-form')
   win.once('ready-to-show', () => {
     centerChildWindowToParent(parent, win)
     win.show()
@@ -326,11 +355,16 @@ function openCommandFormWindow(parent: BrowserWindow, mode: 'create' | 'edit', c
     width: 960,
     height: 760,
     minWidth: 760,
-    minHeight: 620
+    minHeight: 620,
+    useVibrancy: false,
+    visualEffectState: undefined,
+    titleBarStyle: 'hiddenInset'
   })
 
   commandFormWindow = win
+  attachWindowDiagnostics(win, `command-form:${mode}`)
   win.once('ready-to-show', () => {
+    centerChildWindowToParent(parent, win)
     win.show()
   })
   win.on('closed', () => {
@@ -369,6 +403,7 @@ function openFileEditorWindow(parent: BrowserWindow, input: {
   })
 
   fileEditorWindow = win
+  attachWindowDiagnostics(win, 'file-editor')
   win.once('ready-to-show', () => {
     win.center()
     win.show()
