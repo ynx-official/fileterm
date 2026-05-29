@@ -41,6 +41,7 @@ const STATUS_MESSAGE_TIMEOUT_MS = 15_000
 const REMOTE_METHOD_ERROR_PREFIX = /Error invoking remote method '[^']+':\s*/i
 const THEME_STORAGE_KEY = 'termdock.theme'
 const LOCALE_STORAGE_KEY = 'termdock.locale'
+const MAIN_TAB_UI_STORAGE_KEY = 'termdock.main.tab-ui'
 
 type ErrorDetails = {
   item?: RemoteFileItem
@@ -50,6 +51,13 @@ type ErrorDetails = {
 type LocalTab =
   | { id: string; kind: 'home'; title: string }
   | { id: string; kind: 'system'; title: string; sessionTabId: string; sourceTabTitle: string }
+
+type StoredMainTabUiState = {
+  localTabs: LocalTab[]
+  activeLocalTabId: string | null
+  nextHomeTabNumber: number
+  tabOrder: string[]
+}
 
 function formatSystemInfoTabTitle(sourceTabTitle: string) {
   return `${t.systemInfoTabTitle} · ${sourceTabTitle || t.untitledTab}`
@@ -209,6 +217,59 @@ function readStoredLocale(): AppLocale {
   }
 }
 
+function readStoredMainTabUiState(enabled: boolean): StoredMainTabUiState | null {
+  if (!enabled || typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    const raw = window.localStorage.getItem(MAIN_TAB_UI_STORAGE_KEY)
+    if (!raw) {
+      return null
+    }
+    const parsed = JSON.parse(raw) as Partial<StoredMainTabUiState>
+    const localTabs = Array.isArray(parsed.localTabs)
+      ? parsed.localTabs.filter((tab): tab is LocalTab => {
+          if (!tab || typeof tab !== 'object' || typeof tab.id !== 'string' || typeof tab.title !== 'string') {
+            return false
+          }
+          if (tab.kind === 'home') {
+            return true
+          }
+          return tab.kind === 'system'
+            && typeof (tab as Extract<LocalTab, { kind: 'system' }>).sessionTabId === 'string'
+            && typeof (tab as Extract<LocalTab, { kind: 'system' }>).sourceTabTitle === 'string'
+        })
+      : []
+    const tabOrder = Array.isArray(parsed.tabOrder)
+      ? parsed.tabOrder.filter((entry): entry is string => typeof entry === 'string')
+      : []
+
+    return {
+      localTabs,
+      activeLocalTabId: typeof parsed.activeLocalTabId === 'string' ? parsed.activeLocalTabId : null,
+      nextHomeTabNumber: typeof parsed.nextHomeTabNumber === 'number' && Number.isFinite(parsed.nextHomeTabNumber)
+        ? Math.max(1, Math.floor(parsed.nextHomeTabNumber))
+        : 1,
+      tabOrder
+    }
+  } catch {
+    return null
+  }
+}
+
+function writeStoredMainTabUiState(enabled: boolean, state: StoredMainTabUiState) {
+  if (!enabled || typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(MAIN_TAB_UI_STORAGE_KEY, JSON.stringify(state))
+  } catch {
+    // Ignore persistence failures; tab UI state should remain in-memory.
+  }
+}
+
 function readInitialTheme(searchParams: URLSearchParams): ThemeMode {
   const queryTheme = searchParams.get('theme')
   if (queryTheme === 'default-light' || queryTheme === 'default-dark') {
@@ -253,6 +314,10 @@ function areStringArraysEqual(left: string[], right: string[]) {
   return true
 }
 
+function isDefaultPlaceholderHomeTab(tab: LocalTab) {
+  return tab.kind === 'home' && tab.id === 'home-1' && tab.title === t.untitledTab
+}
+
 export function App() {
   const searchParams = new URLSearchParams(window.location.search)
   const windowMode = searchParams.get('window') ?? 'main'
@@ -261,6 +326,11 @@ export function App() {
   const isConnectionFormWindow = windowMode === 'connection-form'
   const isCommandFormWindow = windowMode === 'command-form'
   const isFileEditorWindow = windowMode === 'file-editor'
+  const isMainWorkspaceWindow = !isConnectionManagerWindow
+    && !isCommandManagerWindow
+    && !isConnectionFormWindow
+    && !isCommandFormWindow
+    && !isFileEditorWindow
   const formWindowMode = (searchParams.get('mode') as ConnectionFormMode | null) ?? 'create'
   const formWindowProfileId = searchParams.get('profileId')
   const formWindowCommandId = searchParams.get('commandId')
@@ -275,6 +345,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null)
   const [formError, setFormError] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState(false)
+  const [hasLoadedInitialSnapshot, setHasLoadedInitialSnapshot] = useState(false)
   const [showForm, setShowForm] = useState(false)
   const [showConnectionManager, setShowConnectionManager] = useState(false)
   const [showCommandManager, setShowCommandManager] = useState(false)
@@ -282,10 +353,15 @@ export function App() {
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
   const [localPath, setLocalPath] = useState(previewLocalPath)
   const [localItems, setLocalItems] = useState<LocalFileItem[]>(localPreviewFiles)
-  const [localTabs, setLocalTabs] = useState<LocalTab[]>([{ id: 'home-1', kind: 'home', title: t.untitledTab }])
-  const [activeLocalTabId, setActiveLocalTabId] = useState<string | null>('home-1')
-  const [nextHomeTabNumber, setNextHomeTabNumber] = useState(2)
-  const [tabOrder, setTabOrder] = useState<string[]>(['home:home-1'])
+  const storedMainTabUiStateRef = useRef<StoredMainTabUiState | null>(null)
+  if (storedMainTabUiStateRef.current === null) {
+    storedMainTabUiStateRef.current = readStoredMainTabUiState(isMainWorkspaceWindow)
+  }
+  const storedMainTabUiState = storedMainTabUiStateRef.current
+  const [localTabs, setLocalTabs] = useState<LocalTab[]>(() => storedMainTabUiState?.localTabs ?? [])
+  const [activeLocalTabId, setActiveLocalTabId] = useState<string | null>(() => storedMainTabUiState?.activeLocalTabId ?? null)
+  const [nextHomeTabNumber, setNextHomeTabNumber] = useState(() => storedMainTabUiState?.nextHomeTabNumber ?? 1)
+  const [tabOrder, setTabOrder] = useState<string[]>(() => storedMainTabUiState?.tabOrder ?? [])
   const [draggingTabKey, setDraggingTabKey] = useState<string | null>(null)
   const [tabContextMenu, setTabContextMenu] = useState<{
     x: number
@@ -334,6 +410,7 @@ export function App() {
   const localTabsRef = useRef(localTabs)
   const previousActiveTransferCountRef = useRef(0)
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
+  const hasSanitizedStoredPlaceholderRef = useRef(false)
   const desktopApi = window.termdock
 
   useEffect(() => {
@@ -402,6 +479,7 @@ export function App() {
       setLocalPath(previewLocalPath)
       setLocalItems(localPreviewFiles)
       setActiveLocalTabId(null)
+      setHasLoadedInitialSnapshot(true)
       if (!isFileEditorWindow) {
         setTabOrder(['session:preview-tab-ssh'])
         setError(t.browserPreview)
@@ -411,8 +489,12 @@ export function App() {
 
     desktopApi
       .getSnapshot()
-      .then(setWorkspace)
+      .then((snapshot) => {
+        setWorkspace(snapshot)
+        setHasLoadedInitialSnapshot(true)
+      })
       .catch((err: Error) => reportError(setError, '获取工作区快照', err))
+      .finally(() => setHasLoadedInitialSnapshot(true))
   }, [desktopApi, isFileEditorWindow])
 
   useEffect(() => {
@@ -537,6 +619,64 @@ export function App() {
       return areStringArraysEqual(prev, nextOrder) ? prev : nextOrder
     })
   }, [localTabs, workspace.tabs])
+
+  useEffect(() => {
+    if (!hasLoadedInitialSnapshot || localTabs.length > 0 || workspace.tabs.length > 0) {
+      return
+    }
+
+    setLocalTabs([{ id: 'home-1', kind: 'home', title: t.untitledTab }])
+    setActiveLocalTabId((current) => current ?? 'home-1')
+    setTabOrder((prev) => prev.includes('home:home-1') ? prev : ['home:home-1', ...prev])
+    setNextHomeTabNumber((prev) => Math.max(prev, 2))
+  }, [hasLoadedInitialSnapshot, localTabs.length, workspace.tabs.length])
+
+  useEffect(() => {
+    if (!hasLoadedInitialSnapshot) {
+      return
+    }
+
+    if (!hasSanitizedStoredPlaceholderRef.current) {
+      hasSanitizedStoredPlaceholderRef.current = true
+      const onlyPlaceholderHomeTab = localTabs.length === 1 && isDefaultPlaceholderHomeTab(localTabs[0]!)
+      const hasRemoteSessions = workspace.tabs.length > 0
+      const isPlaceholderInactive = activeLocalTabId === null
+
+      if (onlyPlaceholderHomeTab && hasRemoteSessions && isPlaceholderInactive) {
+        setLocalTabs([])
+        setTabOrder((prev) => prev.filter((key) => key !== 'home:home-1'))
+        setNextHomeTabNumber(1)
+        return
+      }
+    }
+
+    const validSessionTabIds = new Set(workspace.tabs.map((tab) => tab.id))
+    const nextLocalTabs = localTabs.filter((tab) => tab.kind === 'home' || validSessionTabIds.has(tab.sessionTabId))
+    if (nextLocalTabs.length !== localTabs.length) {
+      setLocalTabs(nextLocalTabs)
+    }
+    setActiveLocalTabId((prev) => {
+      if (!prev) {
+        return prev
+      }
+      return nextLocalTabs.some((tab) => tab.id === prev)
+        ? prev
+        : null
+    })
+  }, [activeLocalTabId, hasLoadedInitialSnapshot, localTabs, workspace.tabs])
+
+  useEffect(() => {
+    if (!hasLoadedInitialSnapshot) {
+      return
+    }
+
+    writeStoredMainTabUiState(isMainWorkspaceWindow, {
+      localTabs,
+      activeLocalTabId,
+      nextHomeTabNumber,
+      tabOrder
+    })
+  }, [activeLocalTabId, hasLoadedInitialSnapshot, isMainWorkspaceWindow, localTabs, nextHomeTabNumber, tabOrder])
 
   useEffect(() => {
     if (!isResizingSidebar) {
