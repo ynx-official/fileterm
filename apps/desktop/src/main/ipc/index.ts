@@ -13,7 +13,10 @@ import { registerWorkspaceHandlers } from './workspace-handlers.js'
 
 export function registerIpcHandlers(userDataPath: string, options: IpcWindowOptions) {
   const workspaceService = new WorkspaceService(
-    new FileProfileRepository(userDataPath, seedProfiles, seedCommandTemplates, seedCommandFolders)
+    new FileProfileRepository(userDataPath, seedProfiles, seedCommandTemplates, seedCommandFolders),
+    {
+      getLocale: () => options.getUiPreferences().locale
+    }
   )
   const services: IpcServices = {
     workspaceService,

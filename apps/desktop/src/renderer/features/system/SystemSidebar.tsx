@@ -21,12 +21,12 @@ export function SystemSidebar({
   activeSession: SessionSnapshot | null
   onOpenSystemInfo(): void
 }) {
-  if (!activeSession) {
+  if (!activeSession || activeSession.connected !== true || !activeSession.systemMetrics) {
     return (
       <section className="sys-card sys-card-empty">
         <div className="sidebar-empty-state">
-          <strong>{t.noConnection}</strong>
-          <p>{t.noConnectionDescription}</p>
+          <strong>{activeSession ? t.remoteDisconnected : t.noConnection}</strong>
+          <p>{activeSession ? t.remoteDisconnectedDescription : t.noConnectionDescription}</p>
         </div>
       </section>
     )

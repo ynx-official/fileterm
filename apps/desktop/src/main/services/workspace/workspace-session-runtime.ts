@@ -36,6 +36,7 @@ export class WorkspaceSessionRuntime {
       updateTabStatus(tabId: string, status: WorkspaceTab['status']): void
       getTabStatus(tabId: string): WorkspaceTab['status'] | undefined
       rememberTrustedHostFingerprint(profileId: string, fingerprint: string): Promise<void>
+      onTabDisconnected?(tabId: string, summary: string): void | Promise<void>
     }
   ) {}
 
@@ -160,6 +161,7 @@ export class WorkspaceSessionRuntime {
             if (!current) {
               return
             }
+            const wasConnected = current.connected === true
 
             this.sessions.set(tabId, {
               ...current,
@@ -181,6 +183,9 @@ export class WorkspaceSessionRuntime {
               transcript,
               connected
             })
+            if (wasConnected && !connected) {
+              void this.options.onTabDisconnected?.(tabId, summary)
+            }
             void this.emitSnapshotForTab(tabId)
           },
           initialTranscript
@@ -506,7 +511,8 @@ export class WorkspaceSessionRuntime {
       }
 
       const latest = this.sessions.get(tabId)
-      if (!latest) {
+      const liveController = this.liveControllers.get(tabId)
+      if (!latest || !latest.connected || liveController !== controller) {
         return
       }
 

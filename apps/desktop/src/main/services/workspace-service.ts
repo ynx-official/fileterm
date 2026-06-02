@@ -24,6 +24,10 @@ import { WorkspaceTabsState } from './workspace/workspace-tabs.js'
 import { WorkspaceTransfersState } from './workspace/workspace-transfers.js'
 
 export class WorkspaceService {
+  private static readonly DISCONNECTED_TRANSFER_MESSAGES = {
+    zhCN: '连接已断开，传输已终止',
+    enUS: 'Connection closed, transfer terminated'
+  } as const
   private readonly profileRepository: ProfileRepository
   private readonly tabs = new WorkspaceTabsState()
   private readonly transfers = new WorkspaceTransfersState(seedTransfers)
@@ -37,10 +41,16 @@ export class WorkspaceService {
       this.tabs.updateStatus(tabId, status)
     },
     getTabStatus: (tabId) => this.tabs.getById(tabId)?.status,
-    rememberTrustedHostFingerprint: (profileId, fingerprint) => this.rememberTrustedHostFingerprint(profileId, fingerprint)
+    rememberTrustedHostFingerprint: (profileId, fingerprint) => this.rememberTrustedHostFingerprint(profileId, fingerprint),
+    onTabDisconnected: (tabId) => this.finalizeTransfersForTab(tabId, this.getDisconnectedTransferMessage())
   })
 
-  constructor(profileRepository: ProfileRepository) {
+  constructor(
+    profileRepository: ProfileRepository,
+    private readonly options?: {
+      getLocale?(): 'zhCN' | 'enUS'
+    }
+  ) {
     this.profileRepository = profileRepository
   }
 
@@ -210,6 +220,7 @@ export class WorkspaceService {
     this.sessionRuntime.setSender(tabId, reusableSender)
 
     await this.sessionRuntime.disconnect(tabId)
+    await this.finalizeTransfersForTab(tabId, this.getDisconnectedTransferMessage())
 
     const profile = await this.profileRepository.getById(tab.profileId)
     if (!profile) {
@@ -281,6 +292,7 @@ export class WorkspaceService {
     }
 
     await this.sessionRuntime.disconnect(tabId)
+    await this.finalizeTransfersForTab(tabId, this.getDisconnectedTransferMessage())
     this.privilegedAccess.delete(tabId)
     const disconnectedTranscript = appendDisconnectedTranscript(current.terminalTranscript)
     this.sessionRuntime.set(tabId, {
@@ -856,6 +868,44 @@ export class WorkspaceService {
 
   private setTransferCancel(transferId: string, cancel: () => Promise<void> | void) {
     this.transferCancels.set(transferId, cancel)
+  }
+
+  private getDisconnectedTransferMessage() {
+    const locale = this.options?.getLocale?.() ?? 'zhCN'
+    return WorkspaceService.DISCONNECTED_TRANSFER_MESSAGES[locale]
+  }
+
+  private async finalizeTransfersForTab(tabId: string, message: string) {
+    const transferIds = [...this.transferTabs.entries()]
+      .filter(([, mappedTabId]) => mappedTabId === tabId)
+      .map(([transferId]) => transferId)
+
+    if (!transferIds.length) {
+      return
+    }
+
+    let changed = false
+    for (const transferId of transferIds) {
+      const transfer = this.transfers.get(transferId)
+      if (!transfer || (transfer.status !== 'running' && transfer.status !== 'queued')) {
+        continue
+      }
+
+      this.transferTabs.delete(transferId)
+      this.transferCancels.delete(transferId)
+      this.transferCanceling.delete(transferId)
+      changed = this.transfers.update(transferId, {
+        status: 'canceled',
+        speed: undefined,
+        message
+      }) || changed
+    }
+
+    if (!changed) {
+      return
+    }
+
+    await this.sessionRuntime.emitSnapshotForTab(tabId)
   }
 
   private ensureTransferActive(transferState: { canceled: boolean }) {

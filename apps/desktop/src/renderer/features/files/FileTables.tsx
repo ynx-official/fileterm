@@ -7,12 +7,14 @@ export function PanePathBar({
   hint,
   label,
   value,
+  disabled = false,
   onChange,
   onSubmit
 }: {
   hint?: string
   label: string
   value: string
+  disabled?: boolean
   onChange(value: string): void
   onSubmit(event: FormEvent<HTMLFormElement>): void
 }) {
@@ -21,6 +23,7 @@ export function PanePathBar({
       <strong>{label}</strong>
       <input
         aria-label={`${label}路径`}
+        disabled={disabled}
         value={value}
         onChange={(event) => onChange(event.target.value)}
       />
@@ -32,6 +35,7 @@ export function PanePathBar({
 export function FileTable({
   rows,
   compact = false,
+  emptyText,
   cutPaths,
   selectedPaths,
   onClearSelection,
@@ -44,6 +48,7 @@ export function FileTable({
 }: {
   rows: RemoteFileItem[]
   compact?: boolean
+  emptyText?: string
   cutPaths?: string[]
   selectedPaths?: string[]
   onClearSelection?(): void
@@ -111,7 +116,7 @@ export function FileTable({
             {!compact ? <td>{row.ownerGroup ?? ''}</td> : null}
           </tr>
         )) : (
-          <tr><td colSpan={compact ? 1 : 6}>{t.emptyFiles}</td></tr>
+          <tr><td colSpan={compact ? 1 : 6}>{emptyText ?? t.emptyFiles}</td></tr>
         )}
       </tbody>
     </table>

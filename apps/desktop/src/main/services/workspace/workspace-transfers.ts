@@ -65,7 +65,8 @@ export class WorkspaceTransfersState {
     const current = this.transfers[index]
     if (
       (current.status === 'done' || current.status === 'failed' || current.status === 'canceled')
-      && (patch.status === 'running' || patch.status === 'queued')
+      && patch.status
+      && patch.status !== current.status
     ) {
       return false
     }

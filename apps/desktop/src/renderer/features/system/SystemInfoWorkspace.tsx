@@ -11,12 +11,12 @@ export function SystemInfoWorkspace({
 }) {
   const metrics = activeSession?.systemMetrics
 
-  if (!activeSession || !metrics) {
+  if (!activeSession || activeSession.connected !== true || !metrics) {
     return (
       <section className="system-info-workspace system-info-workspace-empty">
         <div className="system-info-empty">
-          <strong>{t.noConnection}</strong>
-          <p>{t.noConnectionDescription}</p>
+          <strong>{activeSession ? t.remoteDisconnected : t.noConnection}</strong>
+          <p>{activeSession ? t.remoteDisconnectedDescription : t.noConnectionDescription}</p>
         </div>
       </section>
     )

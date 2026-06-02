@@ -114,6 +114,7 @@ export function FileManager({
   onToggleRemoteFileAccessMode(): void
   remoteFileAccessMode: 'user' | 'root'
 }) {
+  const isRemoteConnected = activeSession.connected === true
   const [activeView, setActiveView] = useState<'file' | 'command'>('file')
   const [localPaneWidth, setLocalPaneWidth] = useState(230)
   const [localPathInput, setLocalPathInput] = useState(localPath)
@@ -155,6 +156,15 @@ export function FileManager({
       return areStringArraysEqual(prev, next) ? prev : next
     })
   }, [activeSession.remoteFiles, activeSession.remotePath])
+
+  useEffect(() => {
+    if (isRemoteConnected) {
+      return
+    }
+    setSelectedRemotePaths([])
+    setRemoteAnchorPath(null)
+    setContextMenu((prev) => prev?.pane === 'remote' ? null : prev)
+  }, [isRemoteConnected])
 
   const selectedRemoteItems = activeSession.remoteFiles.filter((item) => selectedRemotePaths.includes(item.path))
   const selectedRemoteFileItems = selectedRemoteItems.filter((item) => item.type === 'file')
@@ -199,6 +209,9 @@ export function FileManager({
 
   const submitRemotePath = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (!isRemoteConnected) {
+      return
+    }
     const targetPath = remotePathInput.trim() || activeSession.remotePath
     onOpenRemotePath(targetPath)
   }
@@ -206,6 +219,9 @@ export function FileManager({
   const handleRemotePaneDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     event.stopPropagation()
+    if (!isRemoteConnected) {
+      return
+    }
 
     const draggedLocalPath = event.dataTransfer.getData(localFileDragType)
     if (draggedLocalPath) {
@@ -420,11 +436,12 @@ export function FileManager({
         </span>
         {activeView === 'file' ? (
           <div className="file-tab-actions">
-            <button title={t.refresh} type="button" onClick={onRefresh}><AppIcon name="refresh" /></button>
+            <button title={t.refresh} type="button" disabled={!isRemoteConnected} onClick={onRefresh}><AppIcon name="refresh" /></button>
             {activeTab?.sessionType === 'ssh' ? (
               <button
                 aria-pressed={remoteFileAccessMode === 'root'}
                 className={remoteFileAccessMode === 'root' ? 'active' : ''}
+                disabled={!isRemoteConnected}
                 title={`${remoteFileAccessMode === 'root' ? t.fileRootView : t.fileUserView} - ${t.fileRootViewHint}`}
                 type="button"
                 onClick={onToggleRemoteFileAccessMode}
@@ -432,10 +449,10 @@ export function FileManager({
                 {remoteFileAccessMode === 'root' ? 'root' : 'user'}
               </button>
             ) : null}
-            <button title={t.downloadTo} type="button" disabled={!selectedRemoteFileItems.length} onClick={() => onDownloadFiles(selectedRemoteFileItems)}>
+            <button title={t.downloadTo} type="button" disabled={!isRemoteConnected || !selectedRemoteFileItems.length} onClick={() => onDownloadFiles(selectedRemoteFileItems)}>
               <AppIcon name="download" />
             </button>
-            <button title={t.upload} type="button" onClick={onChooseUploadFiles}><AppIcon name="upload" /></button>
+            <button title={t.upload} type="button" disabled={!isRemoteConnected} onClick={onChooseUploadFiles}><AppIcon name="upload" /></button>
           </div>
         ) : (
           <div className="file-tab-actions">
@@ -578,14 +595,24 @@ export function FileManager({
           }}
           onDragOver={(event) => {
             event.preventDefault()
-            event.dataTransfer.dropEffect = 'copy'
+            if (isRemoteConnected) {
+              event.dataTransfer.dropEffect = 'copy'
+            }
           }}
           onDrop={handleRemotePaneDrop}
         >
-          <PanePathBar hint={t.dragUpload} label={t.remoteHost} value={remotePathInput} onChange={setRemotePathInput} onSubmit={submitRemotePath} />
+          <PanePathBar
+            disabled={!isRemoteConnected}
+            hint={isRemoteConnected ? t.dragUpload : t.remoteDisconnectedDescription}
+            label={t.remoteHost}
+            value={remotePathInput}
+            onChange={setRemotePathInput}
+            onSubmit={submitRemotePath}
+          />
           <div
             className="file-table-shell"
             onContextMenu={(event) => {
+              if (!isRemoteConnected) return
               if (event.target !== event.currentTarget) return
               event.preventDefault()
               event.stopPropagation()
@@ -594,6 +621,7 @@ export function FileManager({
               setContextMenu({ pane: 'remote', x: event.clientX, y: event.clientY, path: null })
             }}
             onMouseDown={(event) => {
+              if (!isRemoteConnected) return
               if (event.target !== event.currentTarget || event.button !== 0) return
               isSelectingRemote.current = true
               didDragSelect.current = false
@@ -614,17 +642,24 @@ export function FileManager({
           >
             <FileTable
               cutPaths={remoteCutPaths}
-              rows={activeSession.remoteFiles}
+              emptyText={isRemoteConnected ? t.emptyFiles : t.remoteDisconnectedDescription}
+              rows={isRemoteConnected ? activeSession.remoteFiles : []}
               selectedPaths={selectedRemotePaths}
               onDragItem={(event, item) => {
+                if (!isRemoteConnected) return
                 event.dataTransfer.effectAllowed = 'copy'
                 const payload = selectedRemotePaths.includes(item.path) ? selectedRemotePaths : [item.path]
                 const previewItems = activeSession.remoteFiles.filter((row) => payload.includes(row.path))
                 event.dataTransfer.setData(remoteFileDragType, JSON.stringify(payload))
                 setFileDragPreview(event, previewItems.map((row) => row.name))
               }}
-              onOpenItem={onOpenRemoteItem}
+              onOpenItem={(item) => {
+                if (isRemoteConnected) {
+                  onOpenRemoteItem(item)
+                }
+              }}
               onContextItem={(event, item) => {
+                if (!isRemoteConnected) return
                 event.preventDefault()
                 event.stopPropagation()
                 if (!selectedRemotePaths.includes(item.path)) {
@@ -641,8 +676,13 @@ export function FileManager({
                 setSelectedRemotePaths([])
                 setRemoteAnchorPath(null)
               }}
-              onSelectItem={selectRemoteItem}
+              onSelectItem={(event, item) => {
+                if (isRemoteConnected) {
+                  selectRemoteItem(event, item)
+                }
+              }}
               onSelectionDragStart={(event, item) => {
+                if (!isRemoteConnected) return
                 setKeyboardPane('remote')
                 isSelectingRemote.current = true
                 didDragSelect.current = false
@@ -659,7 +699,11 @@ export function FileManager({
                 }))
                 setRemoteAnchorPath(startPath)
               }}
-              onSelectionDragEnter={extendRemoteDragSelection}
+              onSelectionDragEnter={(item) => {
+                if (isRemoteConnected) {
+                  extendRemoteDragSelection(item)
+                }
+              }}
             />
           </div>
         </div>
