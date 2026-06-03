@@ -1,0 +1,149 @@
+# TermDock Integration Inventory
+
+本文归总 TermDock 当前已经接入的核心第三方项目、采用理由、实现位置和维护边界。它不是依赖清单的替代品；精确版本仍以 `apps/desktop/package.json` 和 `package-lock.json` 为准。
+
+## 1. 终端：xterm.js
+
+### 已采用包
+
+| 包 | 当前用途 | 实现位置 | 维护结论 |
+| --- | --- | --- | --- |
+| `@xterm/xterm` | 终端主体渲染、输入、selection、控制序列解析 | `apps/desktop/src/renderer/components/TerminalView.tsx` | 实时 PTY 数据必须原样交给 xterm 解析，renderer 不改写 `\r` / `\n` 控制流。 |
+| `@xterm/addon-fit` | 根据容器尺寸计算行列数 | `TerminalView.tsx` | 配合 `ResizeObserver` 使用；resize 后必须把同一套 `cols/rows` 同步给后端 PTY。 |
+| `@xterm/addon-search` | 终端内搜索 | `TerminalView.tsx` | 绑定 `Cmd/Ctrl+F` 的终端搜索 UI，支持上一条/下一条、大小写和正则。 |
+| `@xterm/addon-unicode11` | Unicode 11 宽字符支持 | `TerminalView.tsx` | 用于中文、Emoji、Powerline / Oh My Zsh 字符宽度计算，减少光标错位。 |
+| `@xterm/addon-web-links` | HTTP/HTTPS 链接识别 | `TerminalView.tsx` | 终端输出中的链接可点击并通过浏览器打开。 |
+
+### 当前终端实例配置
+
+当前终端初始化保留这些关键配置：
+
+```ts
+allowProposedApi: true
+scrollback: 6000
+reflowCursorLine: false
+```
+
+维护结论：
+
+- `scrollback` 不能设为 `0`，否则历史输出和用户回看体验会退化。
+- `allowProposedApi` 已保留，便于 xterm 内部 reflow / viewport 能力正常工作。
+- `reflowCursorLine: false` 用于降低 readline 当前输入行在 resize 时被重新折行污染的概率。
+
+### 尺寸同步原则
+
+TermDock 当前采用“稳定列数 + 动态行数”的策略：
+
+- 列数按主窗口最小宽度、默认左侧栏宽度和终端 padding 计算。
+- 本地 `terminal.resize(cols, rows)` 和后端 PTY resize 必须使用同一个 `cols`。
+- 窗口变宽时，多出来的空间作为视觉空白，不参与终端逻辑列数。
+- 行数继续来自 `fitAddon.proposeDimensions()`，但保留 1 行安全余量，避免 `nano/vim` 底部菜单和文件面板边界互相挤压。
+
+这条边界非常重要。不要恢复成：
+
+```txt
+前端 xterm 一个 cols
+后端 PTY 另一个 cols
+```
+
+这种分裂状态会导致 bash/readline 上下键历史记录“吃上去”，也会影响 `nano/vim` 的菜单、状态栏和光标定位。
+
+### 未采用或已撤回项
+
+| 包 / 能力 | 当前状态 | 原因 |
+| --- | --- | --- |
+| `@xterm/addon-webgl` | 已撤回，不默认加载 | 本轮验证中会放大 selection、resize、TUI 重绘问题。先保证 PTY 控制流和尺寸同步正确，再单独评估硬件加速。 |
+| `@xterm/addon-canvas` | 未采用 | WebGL 未默认启用，因此暂不需要 Canvas fallback。 |
+| `@xterm/addon-clipboard` | 未采用 | 当前复制/粘贴走 Electron preload 暴露的剪贴板 API 与 xterm 自身 paste/selection 行为。 |
+| `xterm-addon-zmodem` | 未采用 | TermDock 文件传输已走 SFTP/FTP 文件面板，不把 `rz/sz` 二进制流混入终端通道。 |
+
+### 回归文档
+
+终端相关改动必须参考：
+
+- `docs/quality/terminal-regression-checklist.md`
+- `docs/quality/terminal-layout-notes.md`
+
+尤其要复测：
+
+- `nano`
+- `vim`
+- 单行 `\r` 进度条
+- 三行进度条 + 拖拽窗口
+- bash/readline 上下键历史记录
+- 终端搜索和普通 selection
+
+## 2. 文件编辑器：Monaco Editor
+
+### 已采用包
+
+| 包 | 当前用途 | 实现位置 | 维护结论 |
+| --- | --- | --- | --- |
+| `monaco-editor` | 编辑器核心 | `apps/desktop/src/renderer/features/files/FileEditorModal.tsx` | 用于远程文件编辑，提供语言模式、查找、快捷键和编辑器主题。 |
+| `@monaco-editor/react` | React 封装 | `FileEditorModal.tsx` | 用 React 组件管理 Monaco 生命周期和 mount 回调。 |
+| `opencc-js` | 简繁转换 | `FileEditorModal.tsx` | 对选中文本执行简体/繁体转换，不在协议层处理文本转换。 |
+
+### 当前 Monaco 能力
+
+- 自定义 `termdock-default-dark` 主题，与 TermDock 深色界面保持一致。
+- `Cmd/Ctrl+S` 保存当前文件内容。
+- `Cmd/Ctrl+F` 触发 Monaco 自带查找，而不是终端搜索。
+- 支持语言列表读取与 model language 切换。
+- 支持行号开关、自动换行、空白字符显示、Tab size 等编辑器选项。
+- 支持编码字段与保存时编码传递。
+
+维护结论：
+
+- 终端搜索和文件编辑器搜索是两套不同入口：终端在 `TerminalView`，文件编辑器在 `FileEditorModal`。
+- 不要把 Monaco 的 `Cmd/Ctrl+F` 交给全局终端搜索拦截。
+- 文本编码、文件保存、权限提升仍通过 main/preload 暴露的文件能力，renderer 不直接访问远程协议 client。
+
+## 3. 桌面壳与前端运行时
+
+| 包 | 当前用途 | 实现位置 | 维护结论 |
+| --- | --- | --- | --- |
+| `electron` | 桌面窗口、main/preload/renderer 边界、剪贴板、系统能力 | `apps/desktop/src/main`, `apps/desktop/src/preload` | Renderer 不直接访问系统和协议能力；统一走 preload 暴露的安全 API。 |
+| `electron-builder` | macOS 打包 | `apps/desktop/package.json`, `docs/quality/release-beta-mac.md` | 发布产物通过 `npm run release:mac` 生成。 |
+| `react` / `react-dom` | Renderer UI | `apps/desktop/src/renderer` | 当前 UI 主要由 React state 和 feature components 组织。 |
+| `vite` / `@vitejs/plugin-react` | Renderer 构建与开发服务器 | `apps/desktop/vite.config.ts` | `npm run dev` 同时启动 Vite、main watch 和 Electron。 |
+| `typescript` | 类型检查与构建 | `apps/desktop/tsconfig*.json` | 修改跨层 API 时必须跑 `npm run typecheck -w @termdock/desktop`。 |
+
+## 4. 远程协议与文件传输
+
+| 包 | 当前用途 | 实现位置 | 维护结论 |
+| --- | --- | --- | --- |
+| `ssh2` | SSH shell、SFTP、远程命令/文件能力 | `apps/desktop/src/main/services/sessions/ssh-session-controller.ts` | SSH/SFTP 只在 main process 运行；renderer 通过 IPC 调用。 |
+| `basic-ftp` | FTP 会话和文件操作 | `apps/desktop/src/main/services/sessions/ftp-session-controller.ts` | FTP 和 SSH/SFTP 在 controller/protocol 层保持分离。 |
+| `iconv-lite` | 文件内容编码处理 | main / file service 相关链路 | 编码处理属于文件读写链路，不放进 UI 组件零散处理。 |
+
+### SSH 终端约定
+
+当前 SSH shell 创建时使用：
+
+```ts
+term: 'xterm-256color'
+```
+
+维护结论：
+
+- 后端 PTY resize 需要和前端 xterm resize 保持同一套 `cols/rows`。
+- 如果后续补 `COLORTERM=truecolor`，应在 SSH shell / 会话环境边界统一处理，并记录到本文件。
+- 不要为了文件传输把 zmodem 二进制流塞进 shell 通道；优先使用已有 SFTP/FTP transfer system。
+
+## 5. 工作区内部包
+
+| 包 | 当前用途 | 维护结论 |
+| --- | --- | --- |
+| `@termdock/core` | 领域类型和核心模型 | 新状态优先进入 core，再下沉到 main services 和 renderer。 |
+| `@termdock/storage` | 存储抽象 | 敏感信息和持久化策略不要散落在 UI 组件。 |
+| `@termdock/shared` | 共享常量与轻量工具 | 只放跨层稳定共享内容，避免变成杂物包。 |
+
+## 6. 新依赖准入规则
+
+新增或替换第三方项目时，至少补齐这些信息：
+
+1. 在对应 `package.json` 添加依赖。
+2. 在本文件登记用途、实现位置、维护边界。
+3. 如果涉及终端、文件传输、协议、安全或发布，补充 `docs/quality/` 下的回归清单。
+4. 如果改变 main/preload/renderer 边界，同步更新 `docs/architecture.md` 或 `docs/decisions/`。
+5. 跑 `npm run typecheck -w @termdock/desktop`；涉及打包或构建链路时再跑 `npm run build -w @termdock/desktop`。

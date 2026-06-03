@@ -3,7 +3,6 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
-import { WebglAddon } from '@xterm/addon-webgl'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { copyText } from '../app/app-utils'
@@ -64,37 +63,15 @@ function encodeBase64Utf8(value: string) {
   return btoa(binary)
 }
 
-function isWideCodePoint(codePoint: number) {
-  return (
-    (codePoint >= 0x1100 && codePoint <= 0x115f)
-    || (codePoint >= 0x2329 && codePoint <= 0x232a)
-    || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
-    || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
-    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
-    || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
-    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
-    || (codePoint >= 0xff00 && codePoint <= 0xff60)
-    || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
-    || (codePoint >= 0x1f300 && codePoint <= 0x1faf6)
-    || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
-  )
-}
-
-function getTerminalCellWidth(value: string) {
-  const stripped = value.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
-  return Array.from(stripped).reduce((width, char) => {
-    const codePoint = char.codePointAt(0) ?? 0
-    return width + (isWideCodePoint(codePoint) ? 2 : 1)
-  }, 0)
-}
-
-function rowsForDisplayWidth(width: number, cols: number) {
-  return Math.max(1, Math.ceil(Math.max(0, width) / Math.max(1, cols)))
-}
-
 const TERMINAL_TRANSCRIPT_LIMIT = 200_000
+const TERMINAL_MIN_WINDOW_WIDTH = 1040
+const TERMINAL_DEFAULT_SIDEBAR_WIDTH = 214
+const TERMINAL_HOST_HORIZONTAL_PADDING = 26
+const TERMINAL_REMOTE_GUARD_COLS = 2
 const TERMINAL_FIT_GUARD_ROWS = 1
-const TERMINAL_RESIZE_DEBOUNCE_MS = 140
+const TERMINAL_MIN_CONTENT_WIDTH = TERMINAL_MIN_WINDOW_WIDTH
+  - TERMINAL_DEFAULT_SIDEBAR_WIDTH
+  - TERMINAL_HOST_HORIZONTAL_PADDING
 const TERMINAL_SEARCH_DECORATIONS = {
   matchBackground: '#4b5563',
   matchOverviewRuler: '#9ca3af',
@@ -108,32 +85,6 @@ function trimTranscript(transcript: string) {
   }
 
   return transcript.slice(transcript.length - TERMINAL_TRANSCRIPT_LIMIT)
-}
-
-function loadAcceleratedRenderer(terminal: Terminal) {
-  const disposables: Array<{ dispose(): void }> = []
-
-  try {
-    const webglAddon = new WebglAddon()
-    terminal.loadAddon(webglAddon)
-    disposables.push(webglAddon)
-    const contextLossDisposable = webglAddon.onContextLoss(() => {
-      contextLossDisposable.dispose()
-      webglAddon.dispose()
-      console.warn('xterm WebGL renderer context was lost. Falling back to the default renderer.')
-    })
-    disposables.push(contextLossDisposable)
-  } catch (error) {
-    console.warn('Failed to initialize xterm WebGL renderer. Falling back to the default renderer.', error)
-  }
-
-  return {
-    dispose: () => {
-      for (let index = disposables.length - 1; index >= 0; index -= 1) {
-        disposables[index].dispose()
-      }
-    }
-  }
 }
 
 export function TerminalView({
@@ -156,9 +107,6 @@ export function TerminalView({
   const resizeTimerRef = useRef<number | null>(null)
   const pendingResizeForceRef = useRef(false)
   const isWritingRef = useRef(false)
-  const activeInlineRedrawRef = useRef(false)
-  const inlineRedrawContentRef = useRef('')
-  const inlineRedrawRowsRef = useRef(1)
   const suppressHydratedChunksUntilRef = useRef(0)
   const preserveVisibleBufferRef = useRef(false)
   const bootedTabs = useRef(new Set<string>())
@@ -184,7 +132,7 @@ export function TerminalView({
   const readColor = (name: string, fallback: string) =>
     getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback
 
-  const buildTerminalTheme = (highlightFind: boolean) => ({
+  const buildTerminalTheme = () => ({
     background: readColor('--terminal-bg', '#1e1e1e'),
     foreground: readColor('--terminal-text', '#e0e0e0'),
     cursor: readColor('--terminal-text', '#e0e0e0'),
@@ -193,10 +141,10 @@ export function TerminalView({
     blue: readColor('--accent-text', '#c8d0da'),
     brightBlue: readColor('--text-main', '#f1f5f9'),
     selectionBackground: readColor(
-      highlightFind ? '--terminal-search-highlight' : '--terminal-cmd-bg',
-      highlightFind ? '#f3f4f6' : 'rgba(148, 163, 184, 0.24)'
+      '--terminal-cmd-bg',
+      'rgba(148, 163, 184, 0.24)'
     ),
-    selectionForeground: highlightFind ? '#111827' : undefined
+    selectionForeground: readColor('--terminal-text', '#e0e0e0')
   })
 
   const applyTerminalTheme = () => {
@@ -204,7 +152,7 @@ export function TerminalView({
     if (!terminal) {
       return
     }
-    terminal.options.theme = buildTerminalTheme(findOpen && Boolean(findQuery))
+    terminal.options.theme = buildTerminalTheme()
     terminal.refresh(0, Math.max(terminal.rows - 1, 0))
   }
 
@@ -213,6 +161,16 @@ export function TerminalView({
     const terminal = terminalRef.current
     if (terminal?.hasSelection()) {
       terminal.clearSelection()
+    }
+  }
+
+  const clearEphemeralHighlight = () => {
+    const terminal = terminalRef.current
+    if (terminal?.hasSelection()) {
+      terminal.clearSelection()
+    }
+    if (!findOpen) {
+      searchAddonRef.current?.clearDecorations()
     }
   }
 
@@ -259,6 +217,7 @@ export function TerminalView({
       ? await window.termdock.readClipboardText()
       : await navigator.clipboard?.readText?.()
     if (value) {
+      clearEphemeralHighlight()
       terminal.paste(value)
     }
     terminal.focus()
@@ -362,12 +321,6 @@ export function TerminalView({
     }
   }
 
-  const clearInlineRedrawState = () => {
-    activeInlineRedrawRef.current = false
-    inlineRedrawContentRef.current = ''
-    inlineRedrawRowsRef.current = 1
-  }
-
   const buildExitAlternateScreenSequence = () =>
     '\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[?25h'
 
@@ -396,7 +349,7 @@ export function TerminalView({
 
   const formatTerminalChunk = (terminal: Terminal | null, value: string) => {
     const displayText = toDisplayTerminalText(value)
-    return terminal ? normalizeInlineRedrawChunk(terminal, displayText) : displayText
+    return displayText
   }
 
   const replaceTerminalWithTranscript = (terminal: Terminal, transcript: string) => {
@@ -407,7 +360,6 @@ export function TerminalView({
       writeFrameRef.current = null
     }
     isWritingRef.current = false
-    clearInlineRedrawState()
     terminal.reset()
     terminal.write(formatTerminalChunk(terminal, renderedTranscriptRef.current))
     suppressHydratedChunksUntilRef.current = Date.now() + 1500
@@ -441,100 +393,6 @@ export function TerminalView({
     return true
   }
 
-  const buildInlineRedrawPrefix = (rows: number) => {
-    if (rows <= 1) {
-      return '\r\x1b[2K'
-    }
-
-    let prefix = '\r'
-    for (let index = 1; index < rows; index += 1) {
-      prefix += '\x1b[F'
-    }
-    for (let index = 0; index < rows; index += 1) {
-      prefix += '\x1b[2K'
-      if (index < rows - 1) {
-        prefix += '\x1b[E'
-      }
-    }
-    for (let index = 1; index < rows; index += 1) {
-      prefix += '\x1b[F'
-    }
-    return prefix
-  }
-
-  const normalizeInlineRedrawChunk = (terminal: Terminal, value: string) => {
-    if (!value.includes('\r')) {
-      if (activeInlineRedrawRef.current) {
-        inlineRedrawContentRef.current += value
-        inlineRedrawRowsRef.current = rowsForDisplayWidth(
-          getTerminalCellWidth(inlineRedrawContentRef.current),
-          terminal.cols
-        )
-      }
-      if (value.includes('\n')) {
-        clearInlineRedrawState()
-      }
-      return value.replaceAll('\n', '\r\n')
-    }
-
-    let normalized = ''
-    let cursor = 0
-
-    while (cursor < value.length) {
-      const carriageIndex = value.indexOf('\r', cursor)
-      const newlineIndex = value.indexOf('\n', cursor)
-
-      if (carriageIndex === -1 && newlineIndex === -1) {
-        const tail = value.slice(cursor)
-        normalized += tail
-        if (activeInlineRedrawRef.current) {
-          inlineRedrawContentRef.current += tail
-          inlineRedrawRowsRef.current = rowsForDisplayWidth(
-            getTerminalCellWidth(inlineRedrawContentRef.current),
-            terminal.cols
-          )
-        }
-        break
-      }
-
-      const nextBreakIndex = [carriageIndex, newlineIndex]
-        .filter((index) => index !== -1)
-        .sort((left, right) => left - right)[0]
-
-      const segment = value.slice(cursor, nextBreakIndex)
-      normalized += segment
-      if (activeInlineRedrawRef.current) {
-        inlineRedrawContentRef.current += segment
-        inlineRedrawRowsRef.current = rowsForDisplayWidth(
-          getTerminalCellWidth(inlineRedrawContentRef.current),
-          terminal.cols
-        )
-      }
-
-      if (nextBreakIndex === carriageIndex && value[nextBreakIndex + 1] === '\n') {
-        normalized += '\r\n'
-        clearInlineRedrawState()
-        cursor = nextBreakIndex + 2
-        continue
-      }
-
-      if (nextBreakIndex === carriageIndex) {
-        normalized += buildInlineRedrawPrefix(inlineRedrawRowsRef.current)
-        activeInlineRedrawRef.current = true
-        inlineRedrawContentRef.current = ''
-        inlineRedrawRowsRef.current = 1
-        cursor = nextBreakIndex + 1
-        continue
-      }
-
-      normalized += '\r\n'
-      clearInlineRedrawState()
-      cursor = nextBreakIndex + 1
-    }
-
-    return normalized
-  }
-
   const syncTerminalSize = (fitAddon: FitAddon, terminal: Terminal, force = false) => {
     const host = hostRef.current
     if (!host) {
@@ -551,13 +409,24 @@ export function TerminalView({
       return
     }
 
-    // xterm's fit calculation can be optimistic by a sliver in Electron split panes.
-    // Keep one row of breathing room so full-screen TUIs do not draw their status
-    // bars under the file panel/resizer.
+    // Keep xterm and the remote PTY on the exact same column count. Readline,
+    // vim, nano and progress bars all depend on that agreement for wrapping
+    // and cursor-addressing. The column count is capped to the minimum-window
+    // content width so enlarging the app adds local blank space instead of
+    // stretching remote redraw output to the real right edge.
+    const displayCols = Math.max(1, proposed.cols)
     const rows = Math.max(1, proposed.rows - TERMINAL_FIT_GUARD_ROWS)
-    if (terminal.cols !== proposed.cols || terminal.rows !== rows) {
-      clearInlineRedrawState()
-      terminal.resize(proposed.cols, rows)
+    const cellWidth = width / displayCols
+    const minWindowCols = Math.max(
+      1,
+      Math.floor(TERMINAL_MIN_CONTENT_WIDTH / Math.max(cellWidth, 1)) - TERMINAL_REMOTE_GUARD_COLS
+    )
+    const cols = Math.max(
+      1,
+      Math.min(displayCols - TERMINAL_REMOTE_GUARD_COLS, minWindowCols)
+    )
+    if (terminal.cols !== cols || terminal.rows !== rows) {
+      terminal.resize(cols, rows)
       terminal.refresh(0, Math.max(terminal.rows - 1, 0))
     }
 
@@ -603,9 +472,9 @@ export function TerminalView({
       cursorBlink: true,
       allowProposedApi: true,
       allowTransparency: true,
+      reflowCursorLine: false,
       scrollback: 6000,
-      theme: buildTerminalTheme(false),
-      convertEol: true
+      theme: buildTerminalTheme()
     })
     const fitAddon = new FitAddon()
     const searchAddon = new SearchAddon({ highlightLimit: 2000 })
@@ -619,7 +488,6 @@ export function TerminalView({
     terminal.loadAddon(webLinksAddon)
     terminal.unicode.activeVersion = '11'
     terminal.open(hostRef.current)
-    const rendererDisposable = loadAcceleratedRenderer(terminal)
     terminalRef.current = terminal
     searchAddonRef.current = searchAddon
 
@@ -658,7 +526,6 @@ export function TerminalView({
     })
 
     syncTerminalSize(fitAddon, terminal)
-    clearInlineRedrawState()
 
     if (bootTextRef.current) {
       replaceTerminalWithTranscript(terminal, bootTextRef.current)
@@ -672,21 +539,19 @@ export function TerminalView({
       pendingResizeForceRef.current = pendingResizeForceRef.current || force
 
       if (resizeTimerRef.current !== null) {
-        window.clearTimeout(resizeTimerRef.current)
+        window.cancelAnimationFrame(resizeTimerRef.current)
       }
 
-      resizeTimerRef.current = window.setTimeout(() => {
+      resizeTimerRef.current = window.requestAnimationFrame(() => {
         resizeTimerRef.current = null
         const shouldForce = pendingResizeForceRef.current
         pendingResizeForceRef.current = false
         resize(shouldForce)
-      }, TERMINAL_RESIZE_DEBOUNCE_MS)
+      })
     }
 
     const onDataDispose = terminal.onData((data) => {
-      if (terminal.hasSelection()) {
-        terminal.clearSelection()
-      }
+      clearEphemeralHighlight()
       setContextMenu(null)
       void window.termdock?.writeTerminal(tabId, data)
     })
@@ -701,6 +566,7 @@ export function TerminalView({
           return
         }
         appendRenderedTranscript(chunk)
+        clearEphemeralHighlight()
         scheduleTerminalWrite(formatTerminalChunk(terminal, chunk))
       }
     })
@@ -810,7 +676,7 @@ export function TerminalView({
         window.cancelAnimationFrame(writeFrameRef.current)
       }
       if (resizeTimerRef.current !== null) {
-        window.clearTimeout(resizeTimerRef.current)
+        window.cancelAnimationFrame(resizeTimerRef.current)
       }
       writeFrameRef.current = null
       resizeTimerRef.current = null
@@ -821,8 +687,6 @@ export function TerminalView({
       suppressHydratedChunksUntilRef.current = 0
       preserveVisibleBufferRef.current = false
       lastSyncedSizeRef.current = null
-      clearInlineRedrawState()
-      rendererDisposable.dispose()
       searchResultsDisposable.dispose()
       osc52Disposable.dispose()
       resizeObserver.disconnect()

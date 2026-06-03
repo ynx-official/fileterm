@@ -60,6 +60,16 @@
   padding-right: 15px;
 }
 
+.terminal-host .xterm .xterm-selection div {
+  background: rgba(148, 163, 184, 0.24) !important;
+}
+
+.terminal-host .xterm .xterm-screen ::selection,
+.terminal-host .xterm textarea::selection {
+  color: var(--terminal-text);
+  background: rgba(148, 163, 184, 0.24);
+}
+
 .terminal-host .xterm-viewport {
   overflow-y: auto !important;
   min-height: 0;

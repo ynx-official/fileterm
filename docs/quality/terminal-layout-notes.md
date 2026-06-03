@@ -38,6 +38,8 @@ terminal spacing issue = xterm mount box and fit box are the same node
 - 这个余量专门留给 nano / vim 这类全屏 TUI 的底部状态行和菜单行，避免它们和文件 dock 的边界抢高度。
 - `xterm` 内部的 `.xterm-screen` / `.xterm-helpers` 不再被额外强制拉成 `height: 100%`，让 xterm 自己按渲染尺寸管理内部画布。
 
+2026-06 的 nano / 进度条回归又确认了一条边界：终端列数不能出现“前端 xterm 一个 cols、后端 PTY 另一个 cols”的分裂状态。当前做法是按主窗口最小宽度、左侧栏宽度和终端 padding 算出稳定列数，并让本地 `terminal.resize(cols, rows)` 与后端 `pty.resize(cols, rows)` 使用同一个 `cols`。详细排查结论见 [terminal-regression-checklist.md](/Users/stoffel/CodeFile/termdock/docs/quality/terminal-regression-checklist.md)。
+
 当前实现位置：
 
 - 结构调整在 [apps/desktop/src/renderer/components/TerminalView.tsx](/Users/stoffel/CodeFile/termdock/apps/desktop/src/renderer/components/TerminalView.tsx:700)
