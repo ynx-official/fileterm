@@ -61,15 +61,18 @@ theme system   ████████████████░░░░  tok
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
-| SSH profile 管理 | 进行中 | 新增、编辑、删除、文件持久化 |
-| FTP profile 管理 | 进行中 | 独立于 SSH 的连接模型 |
-| SSH shell | 进行中 | xterm.js 渲染、输入、输出、resize |
-| 文件编辑器 | 进行中 | Monaco Editor 提供语法高亮、编辑、查找替换 |
-| SFTP 文件管理 | 进行中 | 远程目录浏览、读取、写回 |
-| FTP 文件管理 | 进行中 | FTP 会话与远程文件能力 |
-| Transfer center | 进行中 | 上传下载任务队列与进度状态 |
-| Workspace tabs | 进行中 | 多标签工作区模型 |
-| Theme system | 进行中 | tokens、theme vars、component skins、terminal colors |
+| SSH profile 管理 | 已完成 | 新增、编辑、删除、文件夹分组、JSON 文件持久化 |
+| FTP profile 管理 | 已完成 | 独立于 SSH 的连接模型 |
+| SSH shell | 已完成 | xterm.js 渲染、输入输出、自适应 resize、搜索、剪贴板互通 |
+| 文件编辑器 | 已完成 | Monaco Editor 提供语法高亮、编辑、查找替换、远程文件直编 |
+| SFTP 文件管理 | 已完成 | 远程目录浏览、读/写/新建/删除/重命名/权限修改 |
+| FTP 文件管理 | 已完成 | FTP 会话与远程文件能力 |
+| Transfer center | 已完成 | 上传下载任务队列、进度、速度、取消、文件/文件夹递归 |
+| Workspace tabs | 已完成 | 多标签并行连接、断开/重连、session 状态持久化 |
+| Theme system | 已完成 | tokens → CSS vars → skin，深色/浅色主题一键切换 |
+| 远程连接状态 | 已完成 | 连接状态提示、系统资源监控面板 |
+| 命令模板 | 已完成 | 快捷命令模板、文件夹分组、参数占位符、一键发送 |
+| 窗口管理 | 已完成 | 主窗口、连接管理器、命令管理器、文件编辑器独立窗口 |
 
 ## 外部开源项目
 
