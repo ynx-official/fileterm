@@ -14,6 +14,7 @@ let commandFormWindow: BrowserWindow | null = null
 let fileEditorWindow: BrowserWindow | null = null
 
 const isMac = process.platform === 'darwin'
+const isWindows = process.platform === 'win32'
 const DEFAULT_WINDOW_BOUNDS = {
   main: {
     width: 1280,
@@ -205,6 +206,8 @@ function createMainWindow() {
     minHeight: DEFAULT_WINDOW_BOUNDS.main.minHeight,
     center: true,
     title: 'TermDock',
+    autoHideMenuBar: true,
+    frame: isWindows ? false : undefined,
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 20, y: 18 } : undefined,
     backgroundColor: getWindowBackgroundColor(uiPreferences.theme),
@@ -218,6 +221,9 @@ function createMainWindow() {
   })
 
   mainWindow = win
+  if (isWindows) {
+    win.setMenuBarVisibility(false)
+  }
   win.on('closed', () => {
     if (mainWindow === win) {
       mainWindow = null

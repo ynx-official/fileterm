@@ -69,6 +69,7 @@ const TERMINAL_DEFAULT_SIDEBAR_WIDTH = 214
 const TERMINAL_HOST_HORIZONTAL_PADDING = 26
 const TERMINAL_REMOTE_GUARD_COLS = 2
 const TERMINAL_FIT_GUARD_ROWS = 1
+const TERMINAL_RESIZE_PIXEL_EPSILON = 2
 const TERMINAL_MIN_CONTENT_WIDTH = TERMINAL_MIN_WINDOW_WIDTH
   - TERMINAL_DEFAULT_SIDEBAR_WIDTH
   - TERMINAL_HOST_HORIZONTAL_PADDING
@@ -439,13 +440,11 @@ export function TerminalView({
     const previousSize = lastSyncedSizeRef.current
     if (
       !force
-      && (
-      previousSize
+      && previousSize
       && previousSize.cols === nextSize.cols
       && previousSize.rows === nextSize.rows
-      && previousSize.width === nextSize.width
-      && previousSize.height === nextSize.height
-      )
+      && Math.abs(previousSize.width - nextSize.width) <= TERMINAL_RESIZE_PIXEL_EPSILON
+      && Math.abs(previousSize.height - nextSize.height) <= TERMINAL_RESIZE_PIXEL_EPSILON
     ) {
       return
     }

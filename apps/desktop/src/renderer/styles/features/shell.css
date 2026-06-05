@@ -7,6 +7,52 @@
   overflow: hidden;
 }
 
+.fs-shell.has-window-menubar {
+  grid-template-rows: 32px 48px minmax(0, 1fr) 24px;
+}
+
+.window-menubar {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  min-width: 0;
+  height: 32px;
+  border-bottom: 1px solid var(--border-light);
+  -webkit-app-region: drag;
+}
+
+.window-menu-items,
+.window-control-buttons {
+  display: flex;
+  align-items: stretch;
+  -webkit-app-region: no-drag;
+}
+
+.window-menu-items button,
+.window-control-buttons button {
+  display: grid;
+  place-items: center;
+  height: 32px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.window-menu-items button {
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+.window-control-buttons button {
+  width: 46px;
+  font-size: 16px;
+  line-height: 1;
+}
+
 .fs-sidebar {
   grid-column: 1;
   grid-row: 2 / 4;
@@ -14,6 +60,10 @@
   grid-template-rows: auto 1fr;
   min-height: 0;
   border-right: 1px solid var(--border-light);
+}
+
+.fs-shell.has-window-menubar .fs-sidebar {
+  grid-row: 3 / 5;
 }
 
 .sidebar-resizer {
@@ -447,6 +497,10 @@
   height: auto;
 }
 
+.fs-shell.has-window-menubar .fs-main {
+  grid-row: 3;
+}
+
 .fs-main.full-width {
   grid-column: 1 / -1;
 }
@@ -482,6 +536,10 @@
   -webkit-app-region: drag;
 }
 
+.fs-shell.has-window-menubar .fs-tabbar {
+  grid-row: 2;
+}
+
 .fs-tabbar::after {
   content: "";
   position: absolute;
@@ -508,13 +566,11 @@
 
 .titlebar-brand strong {
   overflow: hidden;
-  font-family: "Outfit", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 15px;
   font-weight: 700;
-  letter-spacing: -0.015em;
+  line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
-  margin-left: 2px;
 }
 
 .titlebar-tabarea {

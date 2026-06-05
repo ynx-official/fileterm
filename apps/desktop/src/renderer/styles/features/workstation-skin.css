@@ -19,6 +19,10 @@ textarea:focus-visible,
   grid-template-rows: 48px minmax(0, 1fr) 24px;
 }
 
+.fs-shell.has-window-menubar {
+  grid-template-rows: 32px 48px minmax(0, 1fr) 24px;
+}
+
 .fs-sidebar {
   grid-column: 1;
   grid-row: 2 / 4;
@@ -27,11 +31,19 @@ textarea:focus-visible,
   position: relative;
 }
 
+.fs-shell.has-window-menubar .fs-sidebar {
+  grid-row: 3 / 5;
+}
+
 .fs-main {
   grid-column: 2;
   grid-row: 2;
   grid-template-rows: auto minmax(0, 1fr);
   height: auto;
+}
+
+.fs-shell.has-window-menubar .fs-main {
+  grid-row: 3;
 }
 
 .fs-main.full-width {
@@ -53,6 +65,10 @@ textarea:focus-visible,
   height: 48px;
   z-index: 10;
   position: relative;
+}
+
+.fs-shell.has-window-menubar .fs-tabbar {
+  grid-row: 2;
 }
 
 .titlebar-brand {
@@ -706,6 +722,10 @@ textarea:focus-visible,
   position: relative;
 }
 
+.fs-shell.has-window-menubar .transfer-strip {
+  grid-row: 4;
+}
+
 .transfer-strip.full-width {
   grid-column: 1 / -1;
 }
@@ -897,11 +917,11 @@ textarea:focus-visible,
   }
 
   .titlebar-brand {
-    padding: 0 12px 0 82px;
+    padding: 0 12px 0 72px;
   }
 
   .titlebar-brand strong {
-    font-size: 14px;
+    font-size: 13px;
   }
 
   .session-workspace {

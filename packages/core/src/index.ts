@@ -384,6 +384,8 @@ export interface TermdockDesktopApi {
   openConnectionFormWindow(mode: ConnectionFormMode, profileId?: string): Promise<void>
   openCommandFormWindow(mode: ConnectionFormMode, commandId?: string, folderId?: string): Promise<void>
   openFileEditorWindow(input: FileEditorWindowInput): Promise<void>
+  minimizeCurrentWindow(): Promise<void>
+  toggleMaximizeCurrentWindow(): Promise<void>
   closeCurrentWindow(): Promise<void>
   getSnapshot(): Promise<WorkspaceSnapshot>
   createFolder(name: string, parentId?: string): Promise<WorkspaceSnapshot>

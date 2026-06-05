@@ -38,6 +38,10 @@ const api: TermdockDesktopApi = {
     ipcRenderer.invoke('app:openCommandFormWindow', mode, commandId, folderId),
   openFileEditorWindow: (input: FileEditorWindowInput): Promise<void> =>
     ipcRenderer.invoke('app:openFileEditorWindow', input),
+  minimizeCurrentWindow: (): Promise<void> =>
+    ipcRenderer.invoke('app:minimizeCurrentWindow'),
+  toggleMaximizeCurrentWindow: (): Promise<void> =>
+    ipcRenderer.invoke('app:toggleMaximizeCurrentWindow'),
   closeCurrentWindow: (): Promise<void> =>
     ipcRenderer.invoke('app:closeCurrentWindow'),
   getSnapshot: (): Promise<WorkspaceSnapshot> => ipcRenderer.invoke('workspace:getSnapshot'),

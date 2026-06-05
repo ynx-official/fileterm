@@ -838,7 +838,12 @@
 .command-manager-modal.standalone select,
 .command-manager-modal.standalone textarea,
 .command-manager-modal.standalone .manager-toolbar,
-.command-manager-modal.standalone .manager-table {
+.command-manager-modal.standalone .manager-table,
+.command-manager-modal.standalone .manager-head,
+.command-manager-modal.standalone .manager-body,
+.command-manager-modal.standalone .manager-row,
+.command-manager-modal.standalone .manager-actions,
+.command-manager-modal.standalone .folder-children {
   -webkit-app-region: no-drag;
 }
 
@@ -1002,6 +1007,12 @@
 .command-manager-modal.standalone select,
 .command-manager-modal.standalone textarea,
 .command-manager-modal.standalone button,
+.command-manager-modal.standalone .manager-table,
+.command-manager-modal.standalone .manager-head,
+.command-manager-modal.standalone .manager-body,
+.command-manager-modal.standalone .manager-row,
+.command-manager-modal.standalone .manager-actions,
+.command-manager-modal.standalone .folder-children,
 .command-manager-modal.standalone table {
   -webkit-app-region: no-drag;
 }

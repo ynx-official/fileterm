@@ -93,6 +93,7 @@ export function SessionWorkspace({
   const hasUserResizedFilePanel = useRef(false)
   const isSnappedToDiskHead = useRef(false)
   const dragStateRef = useRef<{ bottom: number; height: number; snapHeight: number | null } | null>(null)
+  const layoutFrameRef = useRef<number | null>(null)
 
   const clampFilePanelHeight = (workspaceHeight: number, nextHeight: number) => {
     const minHeight = 25 // Allow it to shrink to just the tabs row height
@@ -203,7 +204,7 @@ export function SessionWorkspace({
     })
 
     return () => window.cancelAnimationFrame(frame)
-  }, [isFileOnly, activeTab.id, activeSession.systemMetrics])
+  }, [isFileOnly, activeTab.id])
 
   useEffect(() => {
     if (isFileOnly || !workspaceRef.current) {
@@ -211,7 +212,12 @@ export function SessionWorkspace({
     }
 
     const syncAfterLayout = () => {
-      window.requestAnimationFrame(() => {
+      if (layoutFrameRef.current !== null) {
+        window.cancelAnimationFrame(layoutFrameRef.current)
+      }
+
+      layoutFrameRef.current = window.requestAnimationFrame(() => {
+        layoutFrameRef.current = null
         const mode = !hasUserResizedFilePanel.current || isSnappedToDiskHead.current ? 'align' : 'clamp'
         syncFilePanelHeight(mode)
       })
@@ -225,6 +231,10 @@ export function SessionWorkspace({
     window.addEventListener('resize', syncAfterLayout)
 
     return () => {
+      if (layoutFrameRef.current !== null) {
+        window.cancelAnimationFrame(layoutFrameRef.current)
+        layoutFrameRef.current = null
+      }
       resizeObserver.disconnect()
       window.removeEventListener('resize', syncAfterLayout)
     }

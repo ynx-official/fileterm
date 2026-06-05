@@ -412,6 +412,11 @@ export function App() {
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
   const hasSanitizedStoredPlaceholderRef = useRef(false)
   const desktopApi = window.termdock
+  const isWindowsDesktop = desktopApi?.platform === 'win32'
+
+  useEffect(() => {
+    document.documentElement.dataset.platform = desktopApi?.platform ?? 'browser'
+  }, [desktopApi])
 
   useEffect(() => {
     localTabsRef.current = localTabs
@@ -481,7 +486,7 @@ export function App() {
       setActiveLocalTabId(null)
       setHasLoadedInitialSnapshot(true)
       if (!isFileEditorWindow) {
-        setTabOrder(['session:preview-tab-ssh'])
+        setTabOrder([])
         setError(t.browserPreview)
       }
       return
@@ -2262,7 +2267,23 @@ export function App() {
 
   return (
     <>
-      <div className="fs-shell" style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
+      <div className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
+        {isWindowsDesktop ? (
+          <div className="window-menubar">
+            <nav className="window-menu-items" aria-label="Application menu">
+              <button type="button">File</button>
+              <button type="button">Edit</button>
+              <button type="button">View</button>
+              <button type="button">Window</button>
+              <button type="button">Help</button>
+            </nav>
+            <div className="window-control-buttons">
+              <button aria-label="Minimize" type="button" onClick={() => { void desktopApi?.minimizeCurrentWindow() }}>−</button>
+              <button aria-label="Maximize" type="button" onClick={() => { void desktopApi?.toggleMaximizeCurrentWindow() }}>□</button>
+              <button aria-label="Close" className="window-close-button" type="button" onClick={() => { void desktopApi?.closeCurrentWindow() }}>×</button>
+            </div>
+          </div>
+        ) : null}
         <TabBar
           activeHomeTabId={activeLocalTabId}
           activeSessionTabId={workspace.activeTabId}
