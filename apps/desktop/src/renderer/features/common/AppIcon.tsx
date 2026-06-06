@@ -2,7 +2,7 @@ export function AppIcon({
   name,
   size = 14
 }: {
-  name: 'grid' | 'menu' | 'server' | 'connections' | 'folder' | 'file' | 'history' | 'refresh' | 'upload' | 'download' | 'flash'
+  name: 'brand' | 'grid' | 'menu' | 'server' | 'connections' | 'folder' | 'file' | 'history' | 'refresh' | 'upload' | 'download' | 'flash'
   size?: number
 }) {
   const commonProps = {
@@ -15,6 +15,13 @@ export function AppIcon({
 
   return (
     <svg aria-hidden="true" className={`app-icon app-icon-${name}`} height={size} viewBox="0 0 16 16" width={size}>
+      {name === 'brand' ? (
+        <>
+          <rect {...commonProps} x="2.25" y="2.5" width="11.5" height="11" rx="2" />
+          <path {...commonProps} d="m5.2 5.7 2 1.8-2 1.8" />
+          <path {...commonProps} d="M8.5 10.3h3" />
+        </>
+      ) : null}
       {name === 'grid' ? (
         <>
           <rect {...commonProps} x="2.25" y="2.25" width="4.5" height="4.5" />

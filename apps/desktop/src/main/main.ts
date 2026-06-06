@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, nativeTheme } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -133,6 +133,10 @@ function normalizeUiPreferences(input?: Partial<UiPreferences> | null): UiPrefer
   }
 }
 
+function updateNativeThemeSource(theme: UiPreferences['theme']) {
+  nativeTheme.themeSource = theme === 'default-light' ? 'light' : 'dark'
+}
+
 function readUiPreferences() {
   try {
     const raw = fs.readFileSync(getUiPreferencesPath(), 'utf-8')
@@ -140,6 +144,7 @@ function readUiPreferences() {
   } catch {
     uiPreferences = { ...DEFAULT_UI_PREFERENCES }
   }
+  updateNativeThemeSource(uiPreferences.theme)
 }
 
 function writeUiPreferences(next: UiPreferences) {
@@ -207,7 +212,7 @@ function createMainWindow() {
     center: true,
     title: 'TermDock',
     autoHideMenuBar: true,
-    frame: isWindows ? false : undefined,
+    frame: isMac ? undefined : true,
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 20, y: 18 } : undefined,
     backgroundColor: getWindowBackgroundColor(uiPreferences.theme),
@@ -270,6 +275,7 @@ function createNativeChildWindow(options: {
     title: options.title,
     backgroundColor: options.backgroundColor ?? getWindowBackgroundColor(uiPreferences.theme),
     autoHideMenuBar: true,
+    frame: isMac ? undefined : true,
     titleBarStyle: isMac ? options.titleBarStyle ?? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
     minimizable: false,
@@ -480,6 +486,7 @@ app.whenReady().then(() => {
     getUiPreferences: () => uiPreferences,
     setUiPreferences: (input) => {
       const next = updateUiPreferences(input)
+      updateNativeThemeSource(next.theme)
       for (const window of BrowserWindow.getAllWindows()) {
         if (!window.isDestroyed()) {
           window.setBackgroundColor(getWindowBackgroundColor(next.theme))

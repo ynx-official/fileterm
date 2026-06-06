@@ -376,7 +376,10 @@
 
 :root:not([data-theme]) .window-menubar,
 :root[data-theme='default-dark'] .window-menubar,
-:root[data-theme='default'] .window-menubar {
+:root[data-theme='default'] .window-menubar,
+:root:not([data-theme]) .standalone-window-titlebar,
+:root[data-theme='default-dark'] .standalone-window-titlebar,
+:root[data-theme='default'] .standalone-window-titlebar {
   background: var(--bg-sidebar);
   color: var(--text-main);
 }

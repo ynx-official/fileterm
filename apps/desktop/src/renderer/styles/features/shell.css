@@ -30,6 +30,47 @@
   -webkit-app-region: no-drag;
 }
 
+.window-brandmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.window-brandmark .app-icon {
+  flex: 0 0 auto;
+}
+
+.window-brandmark strong,
+.window-brandmark span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.window-brandmark span {
+  font-weight: 500;
+  opacity: 0.72;
+}
+
+.standalone-window-titlebar {
+  position: fixed;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 300;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  height: 32px;
+  border-bottom: 1px solid var(--border-light);
+  -webkit-app-region: drag;
+}
+
 .window-menu-items button,
 .window-control-buttons button {
   display: grid;
@@ -560,8 +601,12 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0 14px 0 86px;
+  padding: 0 14px;
   border-right: 1px solid var(--border-light);
+}
+
+:root[data-platform='darwin'] .titlebar-brand {
+  padding-left: 86px;
 }
 
 .titlebar-brand strong {

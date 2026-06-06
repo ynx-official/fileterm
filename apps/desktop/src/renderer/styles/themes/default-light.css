@@ -82,6 +82,7 @@
 :root[data-theme='default-light'] .titlebar-brand,
 :root[data-theme='default-light'] .tabbar-folder-button,
 :root[data-theme='default-light'] .window-menubar,
+:root[data-theme='default-light'] .standalone-window-titlebar,
 :root[data-theme='default-light'] .file-tabs,
 :root[data-theme='default-light'] .disk-head,
 :root[data-theme='default-light'] .transfer-strip {
