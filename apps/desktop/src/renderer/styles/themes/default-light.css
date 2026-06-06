@@ -81,12 +81,24 @@
 :root[data-theme='default-light'] .fs-sidebar,
 :root[data-theme='default-light'] .titlebar-brand,
 :root[data-theme='default-light'] .tabbar-folder-button,
+:root[data-theme='default-light'] .window-menubar,
+:root[data-theme='default-light'] .standalone-window-titlebar,
 :root[data-theme='default-light'] .file-tabs,
 :root[data-theme='default-light'] .disk-head,
 :root[data-theme='default-light'] .transfer-strip {
   background: var(--bg-sidebar);
   border-color: var(--border-light);
   color: var(--text-main);
+}
+
+:root[data-theme='default-light'] .window-menu-items button:hover,
+:root[data-theme='default-light'] .window-control-buttons button:hover {
+  background: var(--bg-hover);
+}
+
+:root[data-theme='default-light'] .window-control-buttons .window-close-button:hover {
+  background: #c42b1c;
+  color: #ffffff;
 }
 
 :root[data-theme='default-light'] .sys-card,

@@ -63,7 +63,13 @@ export function TabBar({
         <strong>{t.appTitle}</strong>
       </div>
       <div className="titlebar-tabarea">
-        <button aria-label={t.connectionManager} className="tabbar-folder-button" onClick={onOpenConnectionManager} title={t.connectionManager} type="button">
+        <button
+          aria-label={t.connectionManager}
+          className="tabbar-folder-button"
+          onClick={onOpenConnectionManager}
+          title={t.connectionManager}
+          type="button"
+        >
           <AppIcon name="connections" size={16} />
         </button>
         <div

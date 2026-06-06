@@ -28,6 +28,7 @@ import { FileActionModal } from './features/files/FileActionModal'
 import { FileEditorModal } from './features/files/FileEditorModal'
 import { FilePermissionModal } from './features/files/FilePermissionModal'
 import { RootAccessModal } from './features/files/RootAccessModal'
+import { AppIcon } from './features/common/AppIcon'
 import { TabBar, type OrderedTabEntry, type TabContextTarget } from './features/layout/TabBar'
 import { TabContextMenu } from './features/layout/TabContextMenu'
 import { SystemSidebar } from './features/system/SystemSidebar'
@@ -404,14 +405,53 @@ export function App() {
   const [showTransfers, setShowTransfers] = useState(false)
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readInitialTheme(searchParams))
   const [locale, setLocaleState] = useState<AppLocale>(() => readInitialLocale(searchParams))
+  const [closeConfirmDialog, setCloseConfirmDialog] = useState<{ isQuit: boolean; hasActiveConnections: boolean } | null>(null)
 
   useThemeMode(themeMode)
+
+  const workspaceRef = useRef(workspace)
+  useEffect(() => {
+    workspaceRef.current = workspace
+  }, [workspace])
 
   const localTabsRef = useRef(localTabs)
   const previousActiveTransferCountRef = useRef(0)
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
   const hasSanitizedStoredPlaceholderRef = useRef(false)
   const desktopApi = window.termdock
+  const isWindowsDesktop = false
+
+  useEffect(() => {
+    if (!desktopApi || !isMainWorkspaceWindow) {
+      return
+    }
+
+    const unsubscribe = desktopApi.onWindowCloseRequest((event) => {
+      const hasActive = workspaceRef.current.tabs.some(
+        (tab) => workspaceRef.current.sessions[tab.id]?.connected
+      )
+
+      if (desktopApi.platform === 'darwin') {
+        if (event.isQuit) {
+          setCloseConfirmDialog({ isQuit: true, hasActiveConnections: hasActive })
+        } else {
+          void desktopApi.confirmCloseWindow('hide')
+        }
+      } else {
+        if (event.isQuit) {
+          setCloseConfirmDialog({ isQuit: true, hasActiveConnections: hasActive })
+        } else {
+          setCloseConfirmDialog({ isQuit: false, hasActiveConnections: hasActive })
+        }
+      }
+    })
+
+    return () => unsubscribe()
+  }, [desktopApi, isMainWorkspaceWindow])
+
+  useEffect(() => {
+    document.documentElement.dataset.platform = desktopApi?.platform ?? 'browser'
+  }, [desktopApi])
 
   useEffect(() => {
     localTabsRef.current = localTabs
@@ -481,7 +521,7 @@ export function App() {
       setActiveLocalTabId(null)
       setHasLoadedInitialSnapshot(true)
       if (!isFileEditorWindow) {
-        setTabOrder(['session:preview-tab-ssh'])
+        setTabOrder([])
         setError(t.browserPreview)
       }
       return
@@ -2097,6 +2137,7 @@ export function App() {
   if (isConnectionManagerWindow) {
     return (
       <>
+        <StandaloneWindowTitlebar isWindows={isWindowsDesktop} title={t.connectionManager} />
         <ConnectionManagerModal
           profiles={workspace.profiles}
           folders={workspace.folders || []}
@@ -2150,33 +2191,36 @@ export function App() {
 
   if (isCommandManagerWindow) {
     return (
-      <CommandManagerModal
-        commandFolders={workspace.commandFolders || []}
-        commandTemplates={workspace.commandTemplates || []}
-        standalone
-        onClose={closeCurrentWindow}
-        onCreateFolder={(name) => {
-          void createCommandFolder(name)
-        }}
-        onDeleteFolder={(folderId) => {
-          void deleteCommandFolder(folderId)
-        }}
-        onUpdateFolder={(folderId, updates) => {
-          void updateCommandFolder(folderId, updates)
-        }}
-        onUpdateOrder={(id, parentId, order) => {
-          void updateCommandOrder(id, parentId, order)
-        }}
-        onCreateCommand={(input) => {
-          void saveCommandTemplate(null, input)
-        }}
-        onUpdateCommand={(commandId, input) => {
-          void saveCommandTemplate(commandId, input)
-        }}
-        onDeleteCommand={(commandId) => {
-          void deleteCommandTemplate(commandId)
-        }}
-      />
+      <>
+        <StandaloneWindowTitlebar isWindows={isWindowsDesktop} title={t.commandManager} />
+        <CommandManagerModal
+          commandFolders={workspace.commandFolders || []}
+          commandTemplates={workspace.commandTemplates || []}
+          standalone
+          onClose={closeCurrentWindow}
+          onCreateFolder={(name) => {
+            void createCommandFolder(name)
+          }}
+          onDeleteFolder={(folderId) => {
+            void deleteCommandFolder(folderId)
+          }}
+          onUpdateFolder={(folderId, updates) => {
+            void updateCommandFolder(folderId, updates)
+          }}
+          onUpdateOrder={(id, parentId, order) => {
+            void updateCommandOrder(id, parentId, order)
+          }}
+          onCreateCommand={(input) => {
+            void saveCommandTemplate(null, input)
+          }}
+          onUpdateCommand={(commandId, input) => {
+            void saveCommandTemplate(commandId, input)
+          }}
+          onDeleteCommand={(commandId) => {
+            void deleteCommandTemplate(commandId)
+          }}
+        />
+      </>
     )
   }
 
@@ -2186,26 +2230,31 @@ export function App() {
       : null
 
     return (
-      <CommandEditorModal
-        folders={workspace.commandFolders || []}
-        initialValue={editingCommand
-          ? toCommandTemplateInput(editingCommand)
-          : {
-              ...emptyCommandForm,
-              parentId: formWindowFolderId || undefined
-            }}
-        mode={editingCommand ? 'edit' : formWindowMode}
-        standalone
-        onClose={closeCurrentWindow}
-        onSubmit={(input) => {
-          void saveCommandTemplate(editingCommand?.id ?? null, input)
-        }}
-      />
+      <>
+        <StandaloneWindowTitlebar isWindows={isWindowsDesktop} title={editingCommand ? t.commandEdit : t.commandCreate} />
+        <CommandEditorModal
+          folders={workspace.commandFolders || []}
+          initialValue={editingCommand
+            ? toCommandTemplateInput(editingCommand)
+            : {
+                ...emptyCommandForm,
+                parentId: formWindowFolderId || undefined
+              }}
+          mode={editingCommand ? 'edit' : formWindowMode}
+          standalone
+          onClose={closeCurrentWindow}
+          onSubmit={(input) => {
+            void saveCommandTemplate(editingCommand?.id ?? null, input)
+          }}
+        />
+      </>
     )
   }
 
   if (isConnectionFormWindow) {
     return (
+      <>
+        <StandaloneWindowTitlebar isWindows={isWindowsDesktop} title={editingProfileId ? t.editConnection : t.newConnection} />
         <ConnectionModal
           errorMessage={formError}
           mode={editingProfileId ? 'edit' : formWindowMode}
@@ -2223,46 +2272,66 @@ export function App() {
           standalone
           onSubmit={handleSaveProfile}
           onClose={closeCurrentWindow}
-      />
+        />
+      </>
     )
   }
 
   if (isFileEditorWindow && fileEditor) {
     return (
-      <FileEditorModal
-        errorMessage={fileEditorError}
-        file={fileEditor}
-        isBusy={isBusy}
-        onClose={closeCurrentWindow}
-        onReloadWithEncoding={(encoding) => {
-          void handleReloadFileEditorWithEncoding(encoding)
-        }}
-        onSave={handleSaveFileEditor}
-        standalone
-        themeMode={themeMode}
-      />
+      <>
+        <StandaloneWindowTitlebar isWindows={isWindowsDesktop} title={fileEditor.name} />
+        <FileEditorModal
+          errorMessage={fileEditorError}
+          file={fileEditor}
+          isBusy={isBusy}
+          onClose={closeCurrentWindow}
+          onReloadWithEncoding={(encoding) => {
+            void handleReloadFileEditorWithEncoding(encoding)
+          }}
+          onSave={handleSaveFileEditor}
+          standalone
+          themeMode={themeMode}
+        />
+      </>
     )
   }
 
   if (isFileEditorWindow) {
     return (
-      <div className="standalone-shell file-editor-window">
-        <div className={`modal-card file-editor-modal ${themeMode === 'default-dark' ? 'file-editor-modal--dark' : ''} standalone`}>
-          <div className="modal-header">
-            <div className="file-editor-title">
-              <span>{fileEditorWindowSource === 'remote' ? t.editRemoteFile : t.editLocalFile}</span>
-              <strong>{fileEditorWindowName ?? ''}</strong>
+      <>
+        <StandaloneWindowTitlebar isWindows={isWindowsDesktop} title={fileEditorWindowName ?? t.appTitle} />
+        <div className="standalone-shell file-editor-window">
+          <div className={`modal-card file-editor-modal ${themeMode === 'default-dark' ? 'file-editor-modal--dark' : ''} standalone`}>
+            <div className="modal-header">
+              <div className="file-editor-title">
+                <span>{fileEditorWindowSource === 'remote' ? t.editRemoteFile : t.editLocalFile}</span>
+                <strong>{fileEditorWindowName ?? ''}</strong>
+              </div>
             </div>
+            {fileEditorError ? <div className="modal-error">{fileEditorError}</div> : <div className="file-editor-path">{t.updating}</div>}
           </div>
-          {fileEditorError ? <div className="modal-error">{fileEditorError}</div> : <div className="file-editor-path">{t.updating}</div>}
         </div>
-      </div>
+      </>
     )
   }
 
   return (
     <>
-      <div className="fs-shell" style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
+      <div className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''}`} style={{ '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
+        {isWindowsDesktop ? (
+          <div className="window-menubar">
+            <div className="window-brandmark" aria-label={t.appTitle}>
+              <AppIcon name="brand" size={18} />
+              <strong>{t.appTitle}</strong>
+            </div>
+            <div className="window-control-buttons">
+              <button aria-label="Minimize" type="button" onClick={() => { void desktopApi?.minimizeCurrentWindow() }}>−</button>
+              <button aria-label="Maximize" type="button" onClick={() => { void desktopApi?.toggleMaximizeCurrentWindow() }}>□</button>
+              <button aria-label="Close" className="window-close-button" type="button" onClick={() => { void desktopApi?.closeCurrentWindow() }}>×</button>
+            </div>
+          </div>
+        ) : null}
         <TabBar
           activeHomeTabId={activeLocalTabId}
           activeSessionTabId={workspace.activeTabId}
@@ -2615,7 +2684,95 @@ export function App() {
           supportsRecursive={permissionDialog.supportsRecursive}
         />
       ) : null}
+
+      {closeConfirmDialog ? (
+        <div className="modal-backdrop">
+          <div className="modal-card confirm-action-dialog">
+            <div className="modal-header">
+              <span>{t.closeConfirmTitle}</span>
+              <button
+                className="icon-button"
+                onClick={() => {
+                  setCloseConfirmDialog(null)
+                  void desktopApi?.confirmCloseWindow('cancel')
+                }}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+            <div className="confirm-action-dialog__description">
+              {closeConfirmDialog.hasActiveConnections ? (
+                <div style={{ color: 'var(--danger, #ef4444)', marginBottom: '12px', fontWeight: 'bold' }}>
+                  {t.closeConfirmActiveWarn}
+                </div>
+              ) : closeConfirmDialog.isQuit ? (
+                <div>{t.closeConfirmQuitMsg}</div>
+              ) : null}
+              {!closeConfirmDialog.isQuit ? (
+                <div>{t.closeConfirmWindowsMsg}</div>
+              ) : null}
+            </div>
+            <div className="form-actions confirm-action-dialog__actions" style={{ justifyContent: 'flex-end', gap: '8px' }}>
+              <button
+                className="flat-button"
+                onClick={() => {
+                  setCloseConfirmDialog(null)
+                  void desktopApi?.confirmCloseWindow('cancel')
+                }}
+                type="button"
+              >
+                {t.cancel}
+              </button>
+              {!closeConfirmDialog.isQuit ? (
+                <button
+                  className="primary-button"
+                  onClick={() => {
+                    setCloseConfirmDialog(null)
+                    void desktopApi?.confirmCloseWindow('hide')
+                  }}
+                  type="button"
+                >
+                  {t.closeConfirmHide}
+                </button>
+              ) : null}
+              <button
+                className="flat-button danger"
+                onClick={() => {
+                  setCloseConfirmDialog(null)
+                  void desktopApi?.confirmCloseWindow('quit')
+                }}
+                type="button"
+              >
+                {t.closeConfirmQuit}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </>
+  )
+}
+
+function StandaloneWindowTitlebar({ isWindows, title }: { isWindows: boolean; title: string }) {
+  const desktopApi = window.termdock
+  if (!isWindows) {
+    return null
+  }
+
+  return (
+    <div className="standalone-window-titlebar">
+      <div className="window-brandmark">
+        <AppIcon name="brand" size={18} />
+        <strong>{t.appTitle}</strong>
+        <span>{title}</span>
+      </div>
+      <div className="window-control-buttons">
+        <button aria-label="Minimize" type="button" onClick={() => { void desktopApi?.minimizeCurrentWindow() }}>−</button>
+        <button aria-label="Maximize" type="button" onClick={() => { void desktopApi?.toggleMaximizeCurrentWindow() }}>□</button>
+        <button aria-label="Close" className="window-close-button" type="button" onClick={() => { void desktopApi?.closeCurrentWindow() }}>×</button>
+      </div>
+    </div>
   )
 }
 

@@ -19,6 +19,10 @@ textarea:focus-visible,
   grid-template-rows: 48px minmax(0, 1fr) 24px;
 }
 
+.fs-shell.has-window-menubar {
+  grid-template-rows: 32px 48px minmax(0, 1fr) 24px;
+}
+
 .fs-sidebar {
   grid-column: 1;
   grid-row: 2 / 4;
@@ -27,11 +31,19 @@ textarea:focus-visible,
   position: relative;
 }
 
+.fs-shell.has-window-menubar .fs-sidebar {
+  grid-row: 3 / 5;
+}
+
 .fs-main {
   grid-column: 2;
   grid-row: 2;
   grid-template-rows: auto minmax(0, 1fr);
   height: auto;
+}
+
+.fs-shell.has-window-menubar .fs-main {
+  grid-row: 3;
 }
 
 .fs-main.full-width {
@@ -55,8 +67,16 @@ textarea:focus-visible,
   position: relative;
 }
 
+.fs-shell.has-window-menubar .fs-tabbar {
+  grid-row: 2;
+}
+
 .titlebar-brand {
-  padding: 0 16px 0 90px;
+  padding: 0 16px;
+}
+
+:root[data-platform='darwin'] .titlebar-brand {
+  padding-left: 90px;
 }
 
 .titlebar-brand strong {
@@ -706,6 +726,10 @@ textarea:focus-visible,
   position: relative;
 }
 
+.fs-shell.has-window-menubar .transfer-strip {
+  grid-row: 4;
+}
+
 .transfer-strip.full-width {
   grid-column: 1 / -1;
 }
@@ -823,7 +847,8 @@ textarea:focus-visible,
 }
 
 .quick-panel {
-  width: min(980px, calc(100% - 56px));
+  width: clamp(720px, 60vw, 1080px);
+  max-width: 100%;
 }
 
 .quick-list {
@@ -897,11 +922,15 @@ textarea:focus-visible,
   }
 
   .titlebar-brand {
-    padding: 0 12px 0 82px;
+    padding: 0 12px;
+  }
+
+  :root[data-platform='darwin'] .titlebar-brand {
+    padding-left: 72px;
   }
 
   .titlebar-brand strong {
-    font-size: 14px;
+    font-size: 13px;
   }
 
   .session-workspace {

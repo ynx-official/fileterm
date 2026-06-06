@@ -1,4 +1,4 @@
-import { useMemo, useState, type DragEvent } from 'react'
+import { useMemo, useRef, useState, type DragEvent } from 'react'
 import type { CommandFolder, CommandTemplate, CommandTemplateInput } from '@termdock/core'
 import { ConfirmActionDialog } from '../common/ConfirmActionDialog'
 import { t } from '../../i18n'
@@ -45,8 +45,13 @@ export function CommandManagerModal({
     | { kind: 'command'; id: string; name: string }
     | null
   >(null)
+  const suppressRowClickRef = useRef(false)
 
   const desktopApi = window.termdock
+
+  const stopInteractiveEvent = (event: React.SyntheticEvent) => {
+    event.stopPropagation()
+  }
 
   const tree = useMemo(() => {
     const items: CommandTreeNode[] = [
@@ -100,6 +105,7 @@ export function CommandManagerModal({
 
   const handleDragStart = (e: DragEvent, id: string) => {
     e.stopPropagation()
+    suppressRowClickRef.current = true
     setDraggingId(id)
     e.dataTransfer.effectAllowed = 'move'
     e.dataTransfer.setData('text/plain', id)
@@ -191,6 +197,15 @@ export function CommandManagerModal({
     setDragPosition(null)
   }
 
+  const handleDragEnd = () => {
+    setDraggingId(null)
+    setDragOverId(null)
+    setDragPosition(null)
+    window.setTimeout(() => {
+      suppressRowClickRef.current = false
+    }, 0)
+  }
+
   const openEditorWindow = (mode: 'create' | 'edit', commandId?: string) => {
     if (!desktopApi) {
       setEditorState({ mode, commandId })
@@ -228,13 +243,36 @@ export function CommandManagerModal({
           onDragOver={(e) => handleDragOver(e, node.id, isFolder ? 'command-folder' : 'command-template')}
           onDragLeave={handleDragLeave}
           onDrop={(e) => handleDrop(e, node.id)}
-          onDragEnd={() => {
-            setDraggingId(null)
-            setDragOverId(null)
-            setDragPosition(null)
+          onDragEnd={handleDragEnd}
+          onDoubleClick={() => {
+            if (suppressRowClickRef.current) {
+              return
+            }
+            if (isFolder) {
+              toggleFolder(node.id)
+              return
+            }
+            openEditorWindow('edit', node.id)
           }}
-          onDoubleClick={() => isFolder ? toggleFolder(node.id) : openEditorWindow('edit', node.id)}
-          onClick={() => isFolder ? toggleFolder(node.id) : undefined}
+          onClick={() => {
+            if (suppressRowClickRef.current) {
+              return
+            }
+            if (isFolder) {
+              toggleFolder(node.id)
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') {
+              return
+            }
+            event.preventDefault()
+            if (isFolder) {
+              toggleFolder(node.id)
+              return
+            }
+            openEditorWindow('edit', node.id)
+          }}
           role="button"
           tabIndex={0}
         >
@@ -255,6 +293,8 @@ export function CommandManagerModal({
               <button
                 className="flat-button compact"
                 type="button"
+                onMouseDown={stopInteractiveEvent}
+                onPointerDown={stopInteractiveEvent}
                 onClick={(e) => {
                   e.stopPropagation()
                   openEditorWindow('edit', node.id)
@@ -266,6 +306,8 @@ export function CommandManagerModal({
             <button
               className="flat-button compact danger"
               type="button"
+              onMouseDown={stopInteractiveEvent}
+              onPointerDown={stopInteractiveEvent}
               onClick={(e) => {
                 e.stopPropagation()
                 setPendingDelete({

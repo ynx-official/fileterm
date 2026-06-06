@@ -1,5 +1,5 @@
 import type { ConnectionProfile, ConnectionFolder } from '@termdock/core'
-import { useState, useMemo, type DragEvent } from 'react'
+import { useState, useMemo, useRef, type DragEvent } from 'react'
 import { ConfirmActionDialog } from '../common/ConfirmActionDialog'
 import { t } from '../../i18n'
 
@@ -41,6 +41,11 @@ export function ConnectionManagerModal({
     | { kind: 'profile'; id: string; name: string }
     | null
   >(null)
+  const suppressRowClickRef = useRef(false)
+
+  const stopInteractiveEvent = (event: React.SyntheticEvent) => {
+    event.stopPropagation()
+  }
 
   const toggleFolder = (folderId: string, event?: React.MouseEvent) => {
     event?.stopPropagation()
@@ -93,6 +98,7 @@ export function ConnectionManagerModal({
 
   const handleDragStart = (e: DragEvent, id: string) => {
     e.stopPropagation()
+    suppressRowClickRef.current = true
     setDraggingId(id)
     e.dataTransfer.effectAllowed = 'move'
     // For firefox
@@ -190,6 +196,9 @@ export function ConnectionManagerModal({
     setDraggingId(null)
     setDragOverId(null)
     setDragPosition(null)
+    window.setTimeout(() => {
+      suppressRowClickRef.current = false
+    }, 0)
   }
 
   const renderNode = (node: any, depth: number) => {
@@ -213,8 +222,35 @@ export function ConnectionManagerModal({
           onDragLeave={handleDragLeave}
           onDrop={(e) => handleDrop(e, node.id)}
           onDragEnd={handleDragEnd}
-          onDoubleClick={() => isFolder ? toggleFolder(node.id) : onOpenProfile(node.id)}
-          onClick={() => isFolder ? toggleFolder(node.id) : onOpenProfile(node.id)}
+          onDoubleClick={() => {
+            if (suppressRowClickRef.current) {
+              return
+            }
+            if (isFolder) {
+              toggleFolder(node.id)
+              return
+            }
+            onOpenProfile(node.id)
+          }}
+          onClick={() => {
+            if (suppressRowClickRef.current) {
+              return
+            }
+            if (isFolder) {
+              toggleFolder(node.id)
+            }
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') {
+              return
+            }
+            event.preventDefault()
+            if (isFolder) {
+              toggleFolder(node.id)
+              return
+            }
+            onOpenProfile(node.id)
+          }}
           role="button"
           tabIndex={0}
         >
@@ -237,6 +273,8 @@ export function ConnectionManagerModal({
               <button
                 className="flat-button compact"
                 type="button"
+                onMouseDown={stopInteractiveEvent}
+                onPointerDown={stopInteractiveEvent}
                 onClick={(e) => {
                   e.stopPropagation()
                   onEditProfile(node)
@@ -248,6 +286,8 @@ export function ConnectionManagerModal({
             <button
               className="flat-button compact danger"
               type="button"
+              onMouseDown={stopInteractiveEvent}
+              onPointerDown={stopInteractiveEvent}
               onClick={(e) => {
                 e.stopPropagation()
                 setPendingDelete({
@@ -349,13 +389,13 @@ export function ConnectionManagerModal({
     </div>
   )
 
-  if (standalone) {
-    return <div className="manager-window">{content}</div>
-  }
-
   return (
-    <div className="modal-backdrop">
-      {content}
+    <>
+      {standalone ? (
+        <div className="manager-window">{content}</div>
+      ) : (
+        <div className="modal-backdrop">{content}</div>
+      )}
       {pendingDelete ? (
         <ConfirmActionDialog
           confirmLabel={t.delete}
@@ -372,6 +412,6 @@ export function ConnectionManagerModal({
           title={t.delete}
         />
       ) : null}
-    </div>
+    </>
   )
 }

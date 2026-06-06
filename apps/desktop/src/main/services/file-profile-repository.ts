@@ -11,6 +11,23 @@ import type {
 } from '@termdock/core'
 import type { ProfileRepository } from '@termdock/storage'
 
+const legacyDemoProfileIds = new Set([
+  'profile-ssh-prod',
+  'profile-ssh-nas',
+  'profile-ftp-archive'
+])
+
+const legacyDemoCommandFolderIds = new Set([
+  'cmd-folder-default',
+  'cmd-folder-deploy'
+])
+
+const legacyDemoCommandTemplateIds = new Set([
+  'cmd-docker-ps',
+  'cmd-tail-log',
+  'cmd-restart-service'
+])
+
 export class FileProfileRepository implements ProfileRepository {
   private readonly filePath: string
   private readonly foldersPath: string
@@ -272,6 +289,35 @@ export class FileProfileRepository implements ProfileRepository {
     } catch {
       await this.writeCommandTemplates(this.seedCommandTemplates)
     }
+
+    await this.removeLegacyDemoData()
+  }
+
+  private async removeLegacyDemoData() {
+    const [profiles, commandFolders, commandTemplates] = await Promise.all([
+      readJsonFile<ConnectionProfile[]>(this.filePath, []),
+      readJsonFile<CommandFolder[]>(this.commandFoldersPath, []),
+      readJsonFile<CommandTemplate[]>(this.commandsPath, [])
+    ])
+
+    const nextProfiles = profiles.filter((profile) => !legacyDemoProfileIds.has(profile.id))
+    const nextCommandFolders = commandFolders.filter((folder) => !legacyDemoCommandFolderIds.has(folder.id))
+    const nextCommandTemplates = commandTemplates
+      .filter((command) => !legacyDemoCommandTemplateIds.has(command.id))
+      .map((command) => (
+        command.parentId && legacyDemoCommandFolderIds.has(command.parentId)
+          ? { ...command, parentId: undefined }
+          : command
+      ))
+
+    await Promise.all([
+      nextProfiles.length === profiles.length ? undefined : this.writeProfiles(nextProfiles),
+      nextCommandFolders.length === commandFolders.length ? undefined : this.writeCommandFolders(nextCommandFolders),
+      nextCommandTemplates.length === commandTemplates.length
+        && nextCommandTemplates.every((command, index) => command.parentId === commandTemplates[index]?.parentId)
+        ? undefined
+        : this.writeCommandTemplates(nextCommandTemplates)
+    ])
   }
 
   private async readProfiles(): Promise<ConnectionProfile[]> {
@@ -316,6 +362,14 @@ export class FileProfileRepository implements ProfileRepository {
   private async writeCommandTemplates(commands: CommandTemplate[]) {
     await mkdir(path.dirname(this.commandsPath), { recursive: true })
     await writeFile(this.commandsPath, JSON.stringify(commands, null, 2), 'utf8')
+  }
+}
+
+async function readJsonFile<T>(filePath: string, fallback: T): Promise<T> {
+  try {
+    return JSON.parse(await readFile(filePath, 'utf8')) as T
+  } catch {
+    return fallback
   }
 }
 

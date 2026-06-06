@@ -44,7 +44,27 @@ export function registerAppHandlers(options: IpcWindowOptions) {
     }
   })
 
+  ipcMain.handle('app:minimizeCurrentWindow', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.minimize()
+  })
+
+  ipcMain.handle('app:toggleMaximizeCurrentWindow', (event) => {
+    const senderWindow = BrowserWindow.fromWebContents(event.sender)
+    if (!senderWindow) {
+      return
+    }
+    if (senderWindow.isMaximized()) {
+      senderWindow.unmaximize()
+      return
+    }
+    senderWindow.maximize()
+  })
+
   ipcMain.handle('app:closeCurrentWindow', (event) => {
     BrowserWindow.fromWebContents(event.sender)?.close()
+  })
+
+  ipcMain.handle('app:confirmCloseWindow', (_event, action: 'quit' | 'hide' | 'cancel') => {
+    options.confirmCloseWindow(action)
   })
 }

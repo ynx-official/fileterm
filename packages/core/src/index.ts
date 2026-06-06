@@ -384,6 +384,8 @@ export interface TermdockDesktopApi {
   openConnectionFormWindow(mode: ConnectionFormMode, profileId?: string): Promise<void>
   openCommandFormWindow(mode: ConnectionFormMode, commandId?: string, folderId?: string): Promise<void>
   openFileEditorWindow(input: FileEditorWindowInput): Promise<void>
+  minimizeCurrentWindow(): Promise<void>
+  toggleMaximizeCurrentWindow(): Promise<void>
   closeCurrentWindow(): Promise<void>
   getSnapshot(): Promise<WorkspaceSnapshot>
   createFolder(name: string, parentId?: string): Promise<WorkspaceSnapshot>
@@ -444,6 +446,8 @@ export interface TermdockDesktopApi {
   onTerminalState(listener: (payload: TerminalStatePayload) => void): () => void
   onWorkspaceSnapshot(listener: (snapshot: WorkspaceSnapshot) => void): () => void
   onSshInteraction(listener: (request: SshInteractionRequest) => void): () => void
+  onWindowCloseRequest(listener: (event: { isQuit: boolean }) => void): () => void
+  confirmCloseWindow(action: 'quit' | 'hide' | 'cancel'): Promise<void>
 }
 
 export interface SessionController {

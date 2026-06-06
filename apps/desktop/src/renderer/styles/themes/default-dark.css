@@ -374,6 +374,32 @@
   background: var(--bg-sidebar);
 }
 
+:root:not([data-theme]) .window-menubar,
+:root[data-theme='default-dark'] .window-menubar,
+:root[data-theme='default'] .window-menubar,
+:root:not([data-theme]) .standalone-window-titlebar,
+:root[data-theme='default-dark'] .standalone-window-titlebar,
+:root[data-theme='default'] .standalone-window-titlebar {
+  background: var(--bg-sidebar);
+  color: var(--text-main);
+}
+
+:root:not([data-theme]) .window-menu-items button:hover,
+:root[data-theme='default-dark'] .window-menu-items button:hover,
+:root[data-theme='default'] .window-menu-items button:hover,
+:root:not([data-theme]) .window-control-buttons button:hover,
+:root[data-theme='default-dark'] .window-control-buttons button:hover,
+:root[data-theme='default'] .window-control-buttons button:hover {
+  background: var(--bg-hover);
+}
+
+:root:not([data-theme]) .window-control-buttons .window-close-button:hover,
+:root[data-theme='default-dark'] .window-control-buttons .window-close-button:hover,
+:root[data-theme='default'] .window-control-buttons .window-close-button:hover {
+  background: #c42b1c;
+  color: #ffffff;
+}
+
 :root:not([data-theme]) .fs-tabbar::after,
 :root[data-theme='default-dark'] .fs-tabbar::after,
 :root[data-theme='default'] .fs-tabbar::after {

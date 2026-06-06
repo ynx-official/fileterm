@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, nativeTheme, Tray, Menu, nativeImage } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -12,8 +12,11 @@ let connectionFormWindow: BrowserWindow | null = null
 let commandManagerWindow: BrowserWindow | null = null
 let commandFormWindow: BrowserWindow | null = null
 let fileEditorWindow: BrowserWindow | null = null
+let isQuitting = false
+let tray: Tray | null = null
 
 const isMac = process.platform === 'darwin'
+const isWindows = process.platform === 'win32'
 const DEFAULT_WINDOW_BOUNDS = {
   main: {
     width: 1280,
@@ -132,6 +135,10 @@ function normalizeUiPreferences(input?: Partial<UiPreferences> | null): UiPrefer
   }
 }
 
+function updateNativeThemeSource(theme: UiPreferences['theme']) {
+  nativeTheme.themeSource = theme === 'default-light' ? 'light' : 'dark'
+}
+
 function readUiPreferences() {
   try {
     const raw = fs.readFileSync(getUiPreferencesPath(), 'utf-8')
@@ -139,6 +146,7 @@ function readUiPreferences() {
   } catch {
     uiPreferences = { ...DEFAULT_UI_PREFERENCES }
   }
+  updateNativeThemeSource(uiPreferences.theme)
 }
 
 function writeUiPreferences(next: UiPreferences) {
@@ -171,9 +179,30 @@ function getAppIconPath() {
   ].find((candidate) => fs.existsSync(candidate))
 }
 
+function getTrayTemplateIconPath() {
+  return [
+    path.join(__dirname, '../../build/trayTemplate.png'),
+    path.join(__dirname, '../../public/trayTemplate.png'),
+    path.join(__dirname, '../../dist/trayTemplate.png')
+  ].find((candidate) => fs.existsSync(candidate))
+}
+
 function getWindowIconOptions() {
   const icon = getAppIconPath()
   return icon ? { icon } : {}
+}
+
+function requestQuitConfirmation() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+    mainWindow.webContents.send('app:window-close-request', { isQuit: true })
+    return
+  }
+
+  isQuitting = true
+  void ipcServices?.workspaceService.shutdown()
+  app.quit()
 }
 
 function loadAppWindow(win: BrowserWindow, searchParams?: Record<string, string>, preferences: UiPreferences = uiPreferences) {
@@ -197,6 +226,66 @@ function loadAppWindow(win: BrowserWindow, searchParams?: Record<string, string>
   })
 }
 
+function createTray() {
+  const iconPath = isMac
+    ? getTrayTemplateIconPath() ?? getAppIconPath()
+    : getAppIconPath()
+  if (!iconPath) {
+    return
+  }
+
+  const image = nativeImage.createFromPath(iconPath)
+  const trayImage = process.platform === 'darwin'
+    ? image.resize({ width: 18, height: 18 })
+    : image.resize({ width: 16, height: 16 })
+
+  if (process.platform === 'darwin') {
+    trayImage.setTemplateImage(true)
+  }
+
+  tray = new Tray(trayImage)
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: '显示主窗口',
+      click: () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.show()
+          mainWindow.focus()
+        } else {
+          createMainWindow()
+        }
+      }
+    },
+    { type: 'separator' },
+    {
+      label: '退出',
+      click: () => {
+        requestQuitConfirmation()
+      }
+    }
+  ])
+
+  tray.setToolTip('TermDock')
+  tray.setContextMenu(contextMenu)
+
+  tray.on('click', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isVisible()) {
+        if (mainWindow.isFocused()) {
+          mainWindow.hide()
+        } else {
+          mainWindow.focus()
+        }
+      } else {
+        mainWindow.show()
+        mainWindow.focus()
+      }
+    } else {
+      createMainWindow()
+    }
+  })
+}
+
 function createMainWindow() {
   const win = new BrowserWindow({
     width: DEFAULT_WINDOW_BOUNDS.main.width,
@@ -205,6 +294,8 @@ function createMainWindow() {
     minHeight: DEFAULT_WINDOW_BOUNDS.main.minHeight,
     center: true,
     title: 'TermDock',
+    autoHideMenuBar: true,
+    frame: isMac ? undefined : true,
     titleBarStyle: isMac ? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 20, y: 18 } : undefined,
     backgroundColor: getWindowBackgroundColor(uiPreferences.theme),
@@ -218,8 +309,31 @@ function createMainWindow() {
   })
 
   mainWindow = win
+  if (isWindows) {
+    win.setMenuBarVisibility(false)
+  }
+  win.on('close', (event) => {
+    if (isQuitting) {
+      return
+    }
+    event.preventDefault()
+    win.webContents.send('app:window-close-request', { isQuit: false })
+  })
+
   win.on('closed', () => {
     if (mainWindow === win) {
+      const childWindows = [
+        connectionManagerWindow,
+        connectionFormWindow,
+        commandManagerWindow,
+        commandFormWindow,
+        fileEditorWindow
+      ]
+      for (const child of childWindows) {
+        if (child && !child.isDestroyed()) {
+          child.close()
+        }
+      }
       mainWindow = null
     }
   })
@@ -264,6 +378,7 @@ function createNativeChildWindow(options: {
     title: options.title,
     backgroundColor: options.backgroundColor ?? getWindowBackgroundColor(uiPreferences.theme),
     autoHideMenuBar: true,
+    frame: isMac ? undefined : true,
     titleBarStyle: isMac ? options.titleBarStyle ?? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
     minimizable: false,
@@ -465,6 +580,7 @@ function openFileEditorWindow(parent: BrowserWindow, input: {
 
 app.whenReady().then(() => {
   readUiPreferences()
+  createTray()
   const appIconPath = getAppIconPath()
   if (isMac && appIconPath) {
     app.dock?.setIcon(appIconPath)
@@ -474,6 +590,7 @@ app.whenReady().then(() => {
     getUiPreferences: () => uiPreferences,
     setUiPreferences: (input) => {
       const next = updateUiPreferences(input)
+      updateNativeThemeSource(next.theme)
       for (const window of BrowserWindow.getAllWindows()) {
         if (!window.isDestroyed()) {
           window.setBackgroundColor(getWindowBackgroundColor(next.theme))
@@ -485,7 +602,44 @@ app.whenReady().then(() => {
     openCommandManagerWindow,
     openConnectionFormWindow,
     openCommandFormWindow,
-    openFileEditorWindow
+    openFileEditorWindow,
+    confirmCloseWindow: (action) => {
+      if (action === 'quit') {
+        isQuitting = true
+        const childWindows = [
+          connectionManagerWindow,
+          connectionFormWindow,
+          commandManagerWindow,
+          commandFormWindow,
+          fileEditorWindow
+        ]
+        for (const child of childWindows) {
+          if (child && !child.isDestroyed()) {
+            child.close()
+          }
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.close()
+        }
+        app.quit()
+      } else if (action === 'hide') {
+        const childWindows = [
+          connectionManagerWindow,
+          connectionFormWindow,
+          commandManagerWindow,
+          commandFormWindow,
+          fileEditorWindow
+        ]
+        for (const child of childWindows) {
+          if (child && !child.isDestroyed()) {
+            child.close()
+          }
+        }
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.hide()
+        }
+      }
+    }
   })
   createMainWindow()
 
@@ -503,6 +657,12 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
-  void ipcServices?.workspaceService.shutdown()
+app.on('before-quit', (event) => {
+  if (isQuitting) {
+    void ipcServices?.workspaceService.shutdown()
+    return
+  }
+
+  event.preventDefault()
+  requestQuitConfirmation()
 })
