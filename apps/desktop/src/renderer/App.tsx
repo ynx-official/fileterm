@@ -466,7 +466,7 @@ export function App() {
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
   const hasSanitizedStoredPlaceholderRef = useRef(false)
   const desktopApi = window.termdock
-  const isWindowsDesktop = false
+  const isWindowsDesktop = desktopApi?.platform === 'win32'
 
   useEffect(() => {
     if (!desktopApi || !isMainWorkspaceWindow) {
