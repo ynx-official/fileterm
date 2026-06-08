@@ -486,7 +486,7 @@ function createMainWindow() {
   return win
 }
 
-function createNativeChildWindow(options: {
+function createNativeChildWindow(parent: BrowserWindow, options: {
   title: string
   width: number
   height: number
@@ -505,13 +505,15 @@ function createNativeChildWindow(options: {
     minHeight: options.minHeight,
     center: true,
     show: false,
+    parent,
+    modal: false,
     title: options.title,
     backgroundColor: options.backgroundColor ?? getWindowBackgroundColor(uiPreferences.theme),
     autoHideMenuBar: true,
     frame: isWindows ? false : isMac ? undefined : true,
     titleBarStyle: isMac ? options.titleBarStyle ?? 'hiddenInset' : 'default',
     trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
-    minimizable: false,
+    minimizable: isWindows,
     vibrancy: enableVibrancy ? 'sidebar' : undefined,
     visualEffectState: enableVibrancy ? options.visualEffectState ?? 'active' : undefined,
     ...getWindowIconOptions(),
@@ -544,7 +546,7 @@ function openConnectionManagerWindow(parent: BrowserWindow) {
     return
   }
 
-  const win = createNativeChildWindow({
+  const win = createNativeChildWindow(parent, {
     title: '连接管理器',
     width: DEFAULT_WINDOW_BOUNDS.connectionManager.width,
     height: DEFAULT_WINDOW_BOUNDS.connectionManager.height,
@@ -573,7 +575,7 @@ function openCommandManagerWindow(parent: BrowserWindow) {
     return
   }
 
-  const win = createNativeChildWindow({
+  const win = createNativeChildWindow(parent, {
     title: '命令管理器',
     width: DEFAULT_WINDOW_BOUNDS.commandManager.width,
     height: DEFAULT_WINDOW_BOUNDS.commandManager.height,
@@ -604,7 +606,7 @@ function openConnectionFormWindow(parent: BrowserWindow, mode: 'create' | 'edit'
     connectionFormWindow.close()
   }
 
-  const win = createNativeChildWindow({
+  const win = createNativeChildWindow(parent, {
     title: mode === 'edit' ? '编辑连接' : '新建连接',
     width: DEFAULT_WINDOW_BOUNDS.connectionForm.width,
     height: DEFAULT_WINDOW_BOUNDS.connectionForm.height,
@@ -636,7 +638,7 @@ function openCommandFormWindow(parent: BrowserWindow, mode: 'create' | 'edit', c
     commandFormWindow.close()
   }
 
-  const win = createNativeChildWindow({
+  const win = createNativeChildWindow(parent, {
     title: mode === 'edit' ? '编辑命令' : '新建命令',
     width: DEFAULT_WINDOW_BOUNDS.commandForm.width,
     height: DEFAULT_WINDOW_BOUNDS.commandForm.height,
@@ -678,7 +680,7 @@ function openFileEditorWindow(parent: BrowserWindow, input: {
     fileEditorWindow.close()
   }
 
-  const win = createNativeChildWindow({
+  const win = createNativeChildWindow(parent, {
     title: `编辑文件 - ${input.name}`,
     width: DEFAULT_WINDOW_BOUNDS.fileEditor.width,
     height: DEFAULT_WINDOW_BOUNDS.fileEditor.height,
