@@ -593,6 +593,22 @@ export function App() {
       return
     }
 
+    if (isConnectionManagerWindow) {
+      desktopApi
+        .getConnectionLibrary()
+        .then((snapshot) => {
+          setWorkspace((current) => ({
+            ...current,
+            profiles: snapshot.profiles,
+            folders: snapshot.folders
+          }))
+          setHasLoadedInitialSnapshot(true)
+        })
+        .catch((err: Error) => reportError(setError, '获取连接列表', err))
+        .finally(() => setHasLoadedInitialSnapshot(true))
+      return
+    }
+
     desktopApi
       .getSnapshot()
       .then((snapshot) => {
@@ -607,7 +623,7 @@ export function App() {
       })
       .catch((err: Error) => reportError(setError, '获取工作区快照', err))
       .finally(() => setHasLoadedInitialSnapshot(true))
-  }, [desktopApi, isFileEditorWindow])
+  }, [desktopApi, isConnectionManagerWindow, isFileEditorWindow])
 
   useEffect(() => {
     if (!desktopApi) {
@@ -2328,7 +2344,7 @@ export function App() {
 
   if (isConnectionManagerWindow) {
     return (
-      <StandaloneWindowFrame isWindows={isWindowsDesktop} title={t.connectionManager}>
+      <StandaloneWindowFrame isWindows={isWindowsDesktop} showPlatformTitlebar={false} title={t.connectionManager}>
         <ConnectionManagerModal
           profiles={workspace.profiles}
           folders={workspace.folders || []}
@@ -2507,7 +2523,7 @@ export function App() {
   return (
     <>
       <div
-        className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''}`}
+        className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''} ${activeLocalTab?.kind === 'home' ? 'is-home-active' : ''}`}
         style={{
           '--sidebar-width': `${resolvedSidebarWidth}px`,
           '--brand-width': `${brandWidth}px`
@@ -2526,52 +2542,54 @@ export function App() {
             </div>
           </div>
         ) : null}
-        <TabBar
-          activeHomeTabId={activeLocalTabId}
-          activeSessionTabId={visibleActiveSessionTabId}
-          locale={locale}
-          onAddHomeTab={handleAddHomeTab}
-          onActivateHome={handleActivateHome}
-          onActivateSession={(tabId) => {
-            void handleActivateTab(tabId)
-          }}
-          onCloseHomeTab={handleCloseHomeTab}
-          onCloseSessionTab={(event, tabId) => {
-            void handleCloseTab(event, tabId)
-          }}
-          onDragEnd={() => setDraggingTabKey(null)}
-          onDragEnter={(targetKey) => {
-            setTabOrder((prev) => reorderTabKeys(prev, draggingTabKey, targetKey))
-          }}
-          onDragStart={setDraggingTabKey}
-          onOpenCommandManager={openCommandManager}
-          onOpenConnectionManager={() => {
-            if (desktopApi) {
-              void desktopApi.openConnectionManagerWindow()
-              return
-            }
-            setShowConnectionManager(true)
-          }}
-          onOpenLogsDirectory={() => {
-            if (!desktopApi) {
-              setError(t.desktopOnlyOpenLogs)
-              return
-            }
-            void desktopApi.openLogsDirectory().catch((err) => {
-              reportError(setError, t.openLogsDirectory, err)
-            })
-          }}
-          onOpenTabContext={(event, target) => {
-            setTabContextMenu({ x: event.clientX, y: event.clientY, target })
-          }}
-          onSetLocale={(nextLocale) => {
-            setLocale(nextLocale)
-            setLocaleState(nextLocale)
-          }}
-          onSetTheme={setThemeMode}
-          orderedTabs={orderedTabs}
-          theme={themeMode}
-        />
+        {activeLocalTab?.kind !== 'home' && (
+          <TabBar
+            activeHomeTabId={activeLocalTabId}
+            activeSessionTabId={visibleActiveSessionTabId}
+            locale={locale}
+            onAddHomeTab={handleAddHomeTab}
+            onActivateHome={handleActivateHome}
+            onActivateSession={(tabId) => {
+              void handleActivateTab(tabId)
+            }}
+            onCloseHomeTab={handleCloseHomeTab}
+            onCloseSessionTab={(event, tabId) => {
+              void handleCloseTab(event, tabId)
+            }}
+            onDragEnd={() => setDraggingTabKey(null)}
+            onDragEnter={(targetKey) => {
+              setTabOrder((prev) => reorderTabKeys(prev, draggingTabKey, targetKey))
+            }}
+            onDragStart={setDraggingTabKey}
+            onOpenCommandManager={openCommandManager}
+            onOpenConnectionManager={() => {
+              if (desktopApi) {
+                void desktopApi.openConnectionManagerWindow()
+                return
+              }
+              setShowConnectionManager(true)
+            }}
+            onOpenLogsDirectory={() => {
+              if (!desktopApi) {
+                setError(t.desktopOnlyOpenLogs)
+                return
+              }
+              void desktopApi.openLogsDirectory().catch((err) => {
+                reportError(setError, t.openLogsDirectory, err)
+              })
+            }}
+            onOpenTabContext={(event, target) => {
+              setTabContextMenu({ x: event.clientX, y: event.clientY, target })
+            }}
+            onSetLocale={(nextLocale) => {
+              setLocale(nextLocale)
+              setLocaleState(nextLocale)
+            }}
+            onSetTheme={setThemeMode}
+            orderedTabs={orderedTabs}
+            theme={themeMode}
+          />
+        )}
 
         {showSidebar ? (
           <aside className={`fs-sidebar ${isSystemSidebarCollapsed ? 'is-collapsed' : ''}`} style={{ position: 'relative' }}>
@@ -2666,13 +2684,15 @@ export function App() {
           </div>
         </main>
 
-        <TransferBar
-          activeCount={activeTransferCount}
-          fullWidth={!showSidebar}
-          isPending={isBusy}
-          onOpen={() => setShowTransfers((prev) => !prev)}
-          transfers={workspace.transfers}
-        />
+        {activeLocalTab?.kind !== 'home' ? (
+          <TransferBar
+            activeCount={activeTransferCount}
+            fullWidth={!showSidebar}
+            isPending={isBusy}
+            onOpen={() => setShowTransfers((prev) => !prev)}
+            transfers={workspace.transfers}
+          />
+        ) : null}
 
         {showTransfers ? (
             <TransferPopover
@@ -2995,15 +3015,18 @@ export function App() {
 function StandaloneWindowFrame({
   children,
   isWindows,
+  showPlatformTitlebar = true,
   title
 }: {
   children: ReactNode
   isWindows: boolean
+  showPlatformTitlebar?: boolean
   title: string
 }) {
+  const shouldShowPlatformTitlebar = isWindows && showPlatformTitlebar
   return (
-    <div className={`standalone-window-frame ${isWindows ? 'has-standalone-titlebar' : ''}`}>
-      <StandaloneWindowTitlebar isWindows={isWindows} title={title} />
+    <div className={`standalone-window-frame ${shouldShowPlatformTitlebar ? 'has-standalone-titlebar' : ''}`}>
+      <StandaloneWindowTitlebar isWindows={shouldShowPlatformTitlebar} title={title} />
       {children}
     </div>
   )

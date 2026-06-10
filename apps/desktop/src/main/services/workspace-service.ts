@@ -7,6 +7,7 @@ import {
   type CommandTemplateInput,
   type CommandFolder,
   type ConnectionFolder,
+  type ConnectionLibrarySnapshot,
   type ConnectionProfile,
   type CommandExecutionResult,
   type CreateProfileInput,
@@ -70,6 +71,13 @@ export class WorkspaceService {
       activeTabId: this.tabs.getActiveTabId(),
       transfers: this.transfers.list(),
       sessions: this.sessionRuntime.list()
+    }
+  }
+
+  async getConnectionLibrary(): Promise<ConnectionLibrarySnapshot> {
+    return {
+      profiles: await this.profileRepository.list(),
+      folders: await this.profileRepository.listFolders()
     }
   }
 

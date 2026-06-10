@@ -18,6 +18,10 @@ export function registerWorkspaceHandlers(services: IpcServices, options: IpcWin
     return workspaceService.getSnapshot()
   })
 
+  ipcMain.handle('workspace:getConnectionLibrary', () => {
+    return workspaceService.getConnectionLibrary()
+  })
+
   ipcMain.handle('workspace:createProfile', async (_, input: CreateProfileInput) => {
     const snapshot = await workspaceService.createProfile(input)
     broadcastSnapshot(snapshot)

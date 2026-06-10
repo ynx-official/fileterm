@@ -496,8 +496,10 @@ function createNativeChildWindow(parent: BrowserWindow, options: {
   useVibrancy?: boolean
   visualEffectState?: 'followWindow' | 'active' | 'inactive'
   titleBarStyle?: 'default' | 'hidden' | 'hiddenInset' | 'customButtonsOnHover'
+  frame?: boolean
 }) {
   const enableVibrancy = isMac && options.useVibrancy === true
+  const frame = options.frame ?? (isWindows ? false : isMac ? undefined : true)
   const win = new BrowserWindow({
     width: options.width,
     height: options.height,
@@ -510,9 +512,9 @@ function createNativeChildWindow(parent: BrowserWindow, options: {
     title: options.title,
     backgroundColor: options.backgroundColor ?? getWindowBackgroundColor(uiPreferences.theme),
     autoHideMenuBar: true,
-    frame: isWindows ? false : isMac ? undefined : true,
-    titleBarStyle: isMac ? options.titleBarStyle ?? 'hiddenInset' : 'default',
-    trafficLightPosition: isMac ? { x: 16, y: 14 } : undefined,
+    frame,
+    titleBarStyle: isMac && frame !== false ? options.titleBarStyle ?? 'hiddenInset' : 'default',
+    trafficLightPosition: isMac && frame !== false ? { x: 16, y: 14 } : undefined,
     minimizable: isWindows,
     vibrancy: enableVibrancy ? 'sidebar' : undefined,
     visualEffectState: enableVibrancy ? options.visualEffectState ?? 'active' : undefined,
@@ -542,6 +544,10 @@ function centerChildWindowToParent(parent: BrowserWindow | null, child: BrowserW
 
 function openConnectionManagerWindow(parent: BrowserWindow) {
   if (connectionManagerWindow && !connectionManagerWindow.isDestroyed()) {
+    centerChildWindowToParent(parent, connectionManagerWindow)
+    if (!connectionManagerWindow.isVisible()) {
+      connectionManagerWindow.show()
+    }
     connectionManagerWindow.focus()
     return
   }
@@ -551,7 +557,8 @@ function openConnectionManagerWindow(parent: BrowserWindow) {
     width: DEFAULT_WINDOW_BOUNDS.connectionManager.width,
     height: DEFAULT_WINDOW_BOUNDS.connectionManager.height,
     minWidth: DEFAULT_WINDOW_BOUNDS.connectionManager.minWidth,
-    minHeight: DEFAULT_WINDOW_BOUNDS.connectionManager.minHeight
+    minHeight: DEFAULT_WINDOW_BOUNDS.connectionManager.minHeight,
+    frame: false
   })
 
   connectionManagerWindow = win
@@ -559,6 +566,13 @@ function openConnectionManagerWindow(parent: BrowserWindow) {
   win.once('ready-to-show', () => {
     centerChildWindowToParent(parent, win)
     win.show()
+  })
+  win.on('close', (event) => {
+    if (isQuitting) {
+      return
+    }
+    event.preventDefault()
+    win.hide()
   })
   win.on('closed', () => {
     if (connectionManagerWindow === win) {

@@ -6,6 +6,7 @@ import type {
   CommandFolder,
   ConnectionFormMode,
   ConnectionFolder,
+  ConnectionLibrarySnapshot,
   CommandExecutionResult,
   CreateProfileInput,
   DirectorySnapshot,
@@ -53,6 +54,8 @@ const api: TermdockDesktopApi = {
   requestQuitApp: (): Promise<void> =>
     ipcRenderer.invoke('app:requestQuitApp'),
   getSnapshot: (): Promise<WorkspaceSnapshot> => ipcRenderer.invoke('workspace:getSnapshot'),
+  getConnectionLibrary: (): Promise<ConnectionLibrarySnapshot> =>
+    ipcRenderer.invoke('workspace:getConnectionLibrary'),
   createProfile: (input: CreateProfileInput): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('workspace:createProfile', input),
   updateProfile: (profileId: string, input: CreateProfileInput): Promise<WorkspaceSnapshot> =>

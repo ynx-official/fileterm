@@ -265,6 +265,11 @@ export interface WorkspaceSnapshot {
   sessions: Record<string, SessionSnapshot>
 }
 
+export interface ConnectionLibrarySnapshot {
+  profiles: ConnectionProfile[]
+  folders: ConnectionFolder[]
+}
+
 export interface CreateProfileInput {
   type: SessionType
   name: string
@@ -391,6 +396,7 @@ export interface TermdockDesktopApi {
   closeCurrentWindow(): Promise<void>
   requestQuitApp(): Promise<void>
   getSnapshot(): Promise<WorkspaceSnapshot>
+  getConnectionLibrary(): Promise<ConnectionLibrarySnapshot>
   createFolder(name: string, parentId?: string): Promise<WorkspaceSnapshot>
   updateFolder(folderId: string, updates: Partial<ConnectionFolder>): Promise<WorkspaceSnapshot>
   deleteFolder(folderId: string): Promise<WorkspaceSnapshot>

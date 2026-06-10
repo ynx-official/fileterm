@@ -84,7 +84,7 @@ textarea:focus-visible,
 }
 
 .titlebar-tabarea {
-  grid-template-columns: 48px minmax(0, 1fr) 48px;
+  grid-template-columns: 48px minmax(0, 1fr) 52px;
 }
 
 .tabbar-folder-button {
@@ -983,7 +983,8 @@ textarea:focus-visible,
 }
 
 .has-standalone-titlebar > .standalone-shell,
-.has-standalone-titlebar > .connection-form-window {
+.has-standalone-titlebar > .connection-form-window,
+.has-standalone-titlebar > .manager-window {
   grid-row: 2;
   height: 100%;
   min-height: 0;
@@ -1010,6 +1011,14 @@ textarea:focus-visible,
 .has-standalone-titlebar .command-editor-page.standalone,
 .has-standalone-titlebar .command-manager-modal.standalone {
   padding-top: 20px !important;
+}
+
+.has-standalone-titlebar .modal-card.manager-modal.connection-manager-modal.standalone {
+  padding-top: 0 !important;
+}
+
+.has-standalone-titlebar .connection-manager-modal.standalone .connection-manager-header {
+  padding-left: 22px;
 }
 
 .has-standalone-titlebar .modal-card.ssh-modal.standalone,
