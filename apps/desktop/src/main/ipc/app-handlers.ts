@@ -104,7 +104,7 @@ function getWindowMenu(
     return Menu.buildFromTemplate([
       {
         label: 'Version 1.2.0-stable',
-        enabled: false
+        click: () => {}
       }
     ])
   } else if (menuType === 'file') {
