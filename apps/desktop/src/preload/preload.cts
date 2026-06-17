@@ -54,7 +54,7 @@ const api: TermdockDesktopApi = {
     ipcRenderer.invoke('app:toggleMaximizeCurrentWindow'),
   closeCurrentWindow: (): Promise<void> =>
     ipcRenderer.invoke('app:closeCurrentWindow'),
-  showWindowMenu: (menuType: 'file' | 'view' | 'window', x: number, y: number): Promise<void> =>
+  showWindowMenu: (menuType: 'app' | 'file' | 'view' | 'window', x: number, y: number): Promise<void> =>
     ipcRenderer.invoke('app:showWindowMenu', menuType, x, y),
   onWindowMaximizedChange: (listener: (isMaximized: boolean) => void) => {
     const wrapped = (_event: unknown, isMaximized: boolean) => listener(isMaximized)

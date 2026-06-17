@@ -400,7 +400,7 @@ export interface TermdockDesktopApi {
   isCurrentWindowMaximized(): Promise<boolean>
   toggleMaximizeCurrentWindow(): Promise<void>
   closeCurrentWindow(): Promise<void>
-  showWindowMenu(menuType: 'file' | 'view' | 'window', x: number, y: number): Promise<void>
+  showWindowMenu(menuType: 'app' | 'file' | 'view' | 'window', x: number, y: number): Promise<void>
   onWindowMaximizedChange(listener: (isMaximized: boolean) => void): () => void
   requestQuitApp(): Promise<void>
   getSnapshot(): Promise<WorkspaceSnapshot>

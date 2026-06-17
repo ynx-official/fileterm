@@ -75,7 +75,7 @@ export function registerAppHandlers(options: IpcWindowOptions) {
     BrowserWindow.fromWebContents(event.sender)?.close()
   })
 
-  ipcMain.handle('app:showWindowMenu', (event, menuType: 'file' | 'view' | 'window', x: number, y: number) => {
+  ipcMain.handle('app:showWindowMenu', (event, menuType: 'app' | 'file' | 'view' | 'window', x: number, y: number) => {
     const senderWindow = BrowserWindow.fromWebContents(event.sender)
     if (!senderWindow) {
       return
@@ -95,12 +95,19 @@ export function registerAppHandlers(options: IpcWindowOptions) {
 
 function getWindowMenu(
   senderWindow: BrowserWindow,
-  menuType: 'file' | 'view' | 'window',
+  menuType: 'app' | 'file' | 'view' | 'window',
   options: IpcWindowOptions
 ): Menu {
   const isEn = options.getUiPreferences().locale === 'enUS'
 
-  if (menuType === 'file') {
+  if (menuType === 'app') {
+    return Menu.buildFromTemplate([
+      {
+        label: 'Version 1.2.0-stable',
+        enabled: false
+      }
+    ])
+  } else if (menuType === 'file') {
     return Menu.buildFromTemplate([
       {
         label: isEn ? 'New Connection' : '新建连接',

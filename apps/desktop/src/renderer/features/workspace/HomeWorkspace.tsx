@@ -19,6 +19,7 @@ export function HomeWorkspace({
   const [activeTab, setActiveTab] = useState<'overview' | 'quick-links' | 'ssh-manager' | 'settings'>('overview')
 
   const desktopApi = window.termdock
+  const isWindows = desktopApi?.platform === 'win32'
 
   const handleOpenNewConnection = () => {
     if (desktopApi) {
@@ -63,10 +64,12 @@ export function HomeWorkspace({
         </div>
 
         {/* Brand Header */}
-        <div className="sidebar-brand">
-          <h2 className="brand-title">TermDock</h2>
-          <span className="brand-version">v1.2.0-stable</span>
-        </div>
+        {!isWindows && (
+          <div className="sidebar-brand">
+            <h2 className="brand-title">TermDock</h2>
+            <span className="brand-version">v1.2.0-stable</span>
+          </div>
+        )}
 
         {/* Navigation Section */}
         <nav className="sidebar-nav">
