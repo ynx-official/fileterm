@@ -7,6 +7,8 @@
 }
 
 /* Hero Section */
+
+/* Hero Section */
 .overview-hero {
   background: linear-gradient(135deg, var(--bg-card) 0%, rgba(255, 255, 255, 0.02) 100%);
   border: 1px solid var(--border-light);
@@ -58,8 +60,12 @@
 
 .hero-btn-primary {
   background: var(--text-main);
-  color: var(--bg-main);
+  color: var(--bg-main) !important;
   border-color: var(--text-main);
+}
+
+.hero-btn-primary * {
+  color: inherit;
 }
 
 .hero-btn-primary:hover {

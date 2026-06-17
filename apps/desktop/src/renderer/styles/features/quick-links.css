@@ -55,10 +55,14 @@
 
 .btn-new-connection:hover {
   background: var(--text-main);
-  color: var(--bg-main);
+  color: var(--bg-main) !important;
   border-color: var(--text-main);
   box-shadow: 0 4px 20px rgba(255, 255, 255, 0.2);
   transform: translateY(-1.5px);
+}
+
+.btn-new-connection:hover * {
+  color: inherit;
 }
 
 .btn-new-connection:active {
