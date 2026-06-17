@@ -1485,11 +1485,12 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
           void handlePrivilegeError(stderr)
         })
 
-        readStream.on('data', (chunk: Buffer) => {
-          transferredBytes += chunk.byteLength
+        readStream.on('data', (chunk: any) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+          transferredBytes += buffer.byteLength
           onProgress?.(transferredBytes)
           try {
-            if (!stream.write(chunk)) {
+            if (!stream.write(buffer)) {
               readStream.pause()
             }
           } catch (writeError) {

@@ -446,6 +446,7 @@ function createMainWindow() {
 
   mainWindow = win
   attachWindowDiagnostics(win, 'main')
+  registerWindowStateListeners(win)
   if (isWindows) {
     win.setMenuBarVisibility(false)
   }
@@ -506,6 +507,15 @@ function createMainWindow() {
   return win
 }
 
+function registerWindowStateListeners(win: BrowserWindow) {
+  win.on('maximize', () => {
+    win.webContents.send('app:window-maximized-change', true)
+  })
+  win.on('unmaximize', () => {
+    win.webContents.send('app:window-maximized-change', false)
+  })
+}
+
 function createNativeChildWindow(parent: BrowserWindow, options: {
   title: string
   width: number
@@ -546,6 +556,7 @@ function createNativeChildWindow(parent: BrowserWindow, options: {
       sandbox: true
     }
   })
+  registerWindowStateListeners(win)
   return win
 }
 

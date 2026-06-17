@@ -410,6 +410,7 @@ export function App() {
   const [showCommandManager, setShowCommandManager] = useState(false)
   const [form, setForm] = useState<CreateProfileInput>(defaultForm)
   const [editingProfileId, setEditingProfileId] = useState<string | null>(null)
+  const [isMaximized, setIsMaximized] = useState(false)
   const [localPath, setLocalPath] = useState(previewLocalPath)
   const [localItems, setLocalItems] = useState<LocalFileItem[]>(localPreviewFiles)
   const storedMainTabUiStateRef = useRef<StoredMainTabUiState | null>(null)
@@ -494,6 +495,15 @@ export function App() {
   const hasSanitizedStoredPlaceholderRef = useRef(false)
   const desktopApi = window.termdock
   const isWindowsDesktop = desktopApi?.platform === 'win32'
+
+  useEffect(() => {
+    if (!desktopApi) {
+      return
+    }
+    desktopApi.isCurrentWindowMaximized().then(setIsMaximized).catch(console.error)
+    const unsubscribe = desktopApi.onWindowMaximizedChange(setIsMaximized)
+    return unsubscribe
+  }, [desktopApi])
 
   useEffect(() => {
     if (!desktopApi || !isMainWorkspaceWindow) {
@@ -2727,14 +2737,34 @@ export function App() {
       >
         {isWindowsDesktop ? (
           <div className="window-menubar">
-            <div className="window-brandmark" aria-label={t.appTitle}>
-              <AppIcon name="brand" size={18} />
-              <strong>{t.appTitle}</strong>
+            <div className="window-menu-items">
+              <button type="button" onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect()
+                void desktopApi?.showWindowMenu('file', Math.round(rect.left), Math.round(rect.bottom))
+              }}>File</button>
+              <button type="button" onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect()
+                void desktopApi?.showWindowMenu('view', Math.round(rect.left), Math.round(rect.bottom))
+              }}>View</button>
+              <button type="button" onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect()
+                void desktopApi?.showWindowMenu('window', Math.round(rect.left), Math.round(rect.bottom))
+              }}>Window</button>
             </div>
             <div className="window-control-buttons">
-              <button aria-label="Minimize" type="button" onClick={() => { void desktopApi?.minimizeCurrentWindow() }}>−</button>
-              <button aria-label="Maximize" type="button" onClick={() => { void desktopApi?.toggleMaximizeCurrentWindow() }}>□</button>
-              <button aria-label="Close" className="window-close-button" type="button" onClick={() => { void desktopApi?.closeCurrentWindow() }}>×</button>
+              <button aria-label="Minimize" type="button" onClick={() => { void desktopApi?.minimizeCurrentWindow() }}>
+                <svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" strokeWidth="1" /></svg>
+              </button>
+              <button aria-label="Maximize" type="button" onClick={() => { void desktopApi?.toggleMaximizeCurrentWindow() }}>
+                {isMaximized ? (
+                  <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.5,3.5 L6.5,3.5 L6.5,8.5 L1.5,8.5 Z M3.5,3.5 L3.5,1.5 L8.5,1.5 L8.5,6.5 L6.5,6.5" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                ) : (
+                  <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+                )}
+              </button>
+              <button aria-label="Close" className="window-close-button" type="button" onClick={() => { void desktopApi?.closeCurrentWindow() }}>
+                <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.5,1.5 L8.5,8.5 M8.5,1.5 L1.5,8.5" stroke="currentColor" strokeWidth="1" /></svg>
+              </button>
             </div>
           </div>
         ) : null}
@@ -3186,6 +3216,17 @@ function StandaloneWindowFrame({
 
 function StandaloneWindowTitlebar({ isWindows, title }: { isWindows: boolean; title: string }) {
   const desktopApi = window.termdock
+  const [isMaximized, setIsMaximized] = useState(false)
+
+  useEffect(() => {
+    if (!isWindows || !desktopApi) {
+      return
+    }
+    desktopApi.isCurrentWindowMaximized().then(setIsMaximized).catch(console.error)
+    const unsubscribe = desktopApi.onWindowMaximizedChange(setIsMaximized)
+    return unsubscribe
+  }, [isWindows, desktopApi])
+
   if (!isWindows) {
     return null
   }
@@ -3198,9 +3239,19 @@ function StandaloneWindowTitlebar({ isWindows, title }: { isWindows: boolean; ti
         <span>{title}</span>
       </div>
       <div className="window-control-buttons">
-        <button aria-label="Minimize" type="button" onClick={() => { void desktopApi?.minimizeCurrentWindow() }}>−</button>
-        <button aria-label="Maximize" type="button" onClick={() => { void desktopApi?.toggleMaximizeCurrentWindow() }}>□</button>
-        <button aria-label="Close" className="window-close-button" type="button" onClick={() => { void desktopApi?.closeCurrentWindow() }}>×</button>
+        <button aria-label="Minimize" type="button" onClick={() => { void desktopApi?.minimizeCurrentWindow() }}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" strokeWidth="1" /></svg>
+        </button>
+        <button aria-label="Maximize" type="button" onClick={() => { void desktopApi?.toggleMaximizeCurrentWindow() }}>
+          {isMaximized ? (
+            <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.5,3.5 L6.5,3.5 L6.5,8.5 L1.5,8.5 Z M3.5,3.5 L3.5,1.5 L8.5,1.5 L8.5,6.5 L6.5,6.5" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+          ) : (
+            <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
+          )}
+        </button>
+        <button aria-label="Close" className="window-close-button" type="button" onClick={() => { void desktopApi?.closeCurrentWindow() }}>
+          <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.5,1.5 L8.5,8.5 M8.5,1.5 L1.5,8.5" stroke="currentColor" strokeWidth="1" /></svg>
+        </button>
       </div>
     </div>
   )

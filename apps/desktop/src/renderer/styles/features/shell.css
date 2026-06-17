@@ -30,6 +30,10 @@
   -webkit-app-region: no-drag;
 }
 
+.window-control-buttons {
+  margin-left: auto;
+}
+
 .window-brandmark {
   display: inline-flex;
   align-items: center;

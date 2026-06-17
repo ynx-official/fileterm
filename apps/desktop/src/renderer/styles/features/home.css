@@ -496,6 +496,10 @@
   grid-template-rows: 32px 0px minmax(0, 1fr) 0px !important;
 }
 
+.fs-shell.has-window-menubar.is-home-active .home-sidebar {
+  padding-top: 8px !important;
+}
+
 /* Adjust macOS sidebar top padding to leave space for native traffic lights when titlebar is hidden */
 :root[data-platform='darwin'] .is-home-active .home-sidebar {
   padding-top: 48px;

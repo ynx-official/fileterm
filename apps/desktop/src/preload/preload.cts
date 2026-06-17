@@ -48,10 +48,19 @@ const api: TermdockDesktopApi = {
     ipcRenderer.invoke('app:openLogsDirectory'),
   minimizeCurrentWindow: (): Promise<void> =>
     ipcRenderer.invoke('app:minimizeCurrentWindow'),
+  isCurrentWindowMaximized: (): Promise<boolean> =>
+    ipcRenderer.invoke('app:isCurrentWindowMaximized'),
   toggleMaximizeCurrentWindow: (): Promise<void> =>
     ipcRenderer.invoke('app:toggleMaximizeCurrentWindow'),
   closeCurrentWindow: (): Promise<void> =>
     ipcRenderer.invoke('app:closeCurrentWindow'),
+  showWindowMenu: (menuType: 'file' | 'view' | 'window', x: number, y: number): Promise<void> =>
+    ipcRenderer.invoke('app:showWindowMenu', menuType, x, y),
+  onWindowMaximizedChange: (listener: (isMaximized: boolean) => void) => {
+    const wrapped = (_event: unknown, isMaximized: boolean) => listener(isMaximized)
+    ipcRenderer.on('app:window-maximized-change', wrapped)
+    return () => ipcRenderer.off('app:window-maximized-change', wrapped)
+  },
   requestQuitApp: (): Promise<void> =>
     ipcRenderer.invoke('app:requestQuitApp'),
   getSnapshot: (): Promise<WorkspaceSnapshot> => ipcRenderer.invoke('workspace:getSnapshot'),
