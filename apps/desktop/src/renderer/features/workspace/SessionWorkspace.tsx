@@ -10,6 +10,7 @@ import type {
 } from '@termdock/core'
 import { TerminalView } from '../../components/TerminalView'
 import { FileManager } from '../files/FileManager'
+import { TerminalDock } from '../terminal/TerminalDock'
 
 export function SessionWorkspace({
   activeTab,
@@ -96,6 +97,7 @@ export function SessionWorkspace({
   const layoutFrameRef = useRef<number | null>(null)
 
   const clampFilePanelHeight = (workspaceHeight: number, nextHeight: number) => {
+    if (nextHeight === 0) return 0
     const minHeight = 25 // Allow it to shrink to just the tabs row height
     const maxHeight = Math.max(minHeight, workspaceHeight - 160)
     return Math.min(maxHeight, Math.max(minHeight, nextHeight))
@@ -247,12 +249,20 @@ export function SessionWorkspace({
       style={{ '--file-panel-height': `${filePanelHeight}px` } as CSSProperties}
     >
       {!isFileOnly ? (
-        <div className="terminal-area">
+        <div className="terminal-area has-terminal-dock">
           <TerminalView
             key={activeTab.id}
             tabId={activeTab.id}
             bootText={activeSession.terminalTranscript ?? ''}
             connected={activeSession.connected === true}
+          />
+          <TerminalDock
+            key={activeTab.id}
+            activeTab={activeTab}
+            connected={activeSession.connected === true}
+            remotePath={activeSession.remotePath}
+            filePanelHeight={filePanelHeight}
+            setFilePanelHeight={setFilePanelHeight}
           />
         </div>
       ) : null}
