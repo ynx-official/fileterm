@@ -10,8 +10,9 @@ import { AppUiStateStore } from './services/app-ui-state-store.js'
 // 被用作 macOS 钥匙串服务名（"@termdock/desktop Safe Storage"），导致每次启动弹出授权弹窗。
 app.setName('TermDock')
 app.setPath('sessionData', path.join(app.getPath('temp'), 'TermDock-session-data'))
-if (!app.isPackaged && process.platform === 'darwin') {
-  // Avoid macOS Keychain prompts from Chromium/Electron internals during local development.
+if (process.platform === 'darwin') {
+  // Keep Chromium/Electron away from macOS Keychain so both dev and packaged builds
+  // avoid triggering Safe Storage authorization prompts.
   app.commandLine.appendSwitch('use-mock-keychain')
 }
 
