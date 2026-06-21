@@ -14,11 +14,13 @@ if (!nextVersion) {
 const packageJsonPaths = [
   'apps/desktop/package.json',
   'packages/core/package.json',
+  'packages/shared/package.json',
   'packages/storage/package.json'
 ]
 
 const internalPackages = new Set([
   '@termdock/core',
+  '@termdock/shared',
   '@termdock/storage'
 ])
 
@@ -70,6 +72,7 @@ await updateJsonFile('package-lock.json', (lockfile) => {
       if (
         packagePath === 'apps/desktop'
         || packagePath === 'packages/core'
+        || packagePath === 'packages/shared'
         || packagePath === 'packages/storage'
       ) {
         pkg.version = nextVersion
