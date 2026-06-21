@@ -66,6 +66,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private suppressEcho = false
   private echoBuf = ''
   private fileAccessMode: 'user' | 'root' = 'user'
+  private shellUser?: string
   private sudoUser = 'root'
   private sudoPassword?: string
   private awaitingSudoPasswordInput = false
@@ -80,6 +81,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     private readonly rememberTrustedHostFingerprint: (fingerprint: string) => Promise<void>,
     private readonly onData: (chunk: string) => void,
     private readonly onShellCwdChange: (cwd: string) => void,
+    private readonly onShellUserChange: (user: string) => void,
     private readonly onStateChange: (summary: string, transcript: string, connected: boolean) => void,
     initialTranscript?: string
   ) {
@@ -187,9 +189,13 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                       this.shellCwd = echoEnd.cwd
                       this.onShellCwdChange(echoEnd.cwd)
                     }
+                    if (echoEnd.user && echoEnd.user !== this.shellUser) {
+                      this.sshDebug.log('main', `Initial shell user detected via injection: ${echoEnd.user}`)
+                      this.handleShellUserChange(echoEnd.user)
+                    }
                     
                     const beforeCmd = this.echoBuf.slice(0, echoEnd.lineStart)
-                    const afterOsc7 = this.echoBuf.slice(echoEnd.osc7End)
+                    const afterOsc7 = this.echoBuf.slice(echoEnd.payloadEnd)
                     text = beforeCmd + afterOsc7
                     
                     this.echoBuf = ''
@@ -203,13 +209,36 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                 }
 
                 this.transcript = trimTranscript(`${this.transcript}${text}`, LiveSshSessionController.TRANSCRIPT_LIMIT)
-                this.trackSudoPromptFromTerminal(text)
-                for (const cwd of this.shellCwdTracker.feed(text)) {
-                  if (cwd !== this.shellCwd) {
-                    this.shellCwd = cwd
-                    this.onShellCwdChange(cwd)
+
+                // 1. Feed updates (CWD and User) first
+                for (const update of this.shellCwdTracker.feed(text)) {
+                  if (update.cwd && update.cwd !== this.shellCwd) {
+                    this.shellCwd = update.cwd
+                    this.onShellCwdChange(update.cwd)
+                  }
+                  if (update.user && update.user !== this.shellUser) {
+                    this.handleShellUserChange(update.user)
                   }
                 }
+
+                // 2. Track sudo prompt
+                this.trackSudoPromptFromTerminal(text)
+                
+                // 3. Heuristic detection: if the prompt ends with '# ', it might be a root shell.
+                // We inject the setup script silently to query the actual user.
+                const strippedText = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').trimEnd()
+                const now = Date.now()
+                const lastInjectTime = (this as any)._lastInjectTime || 0
+                if (strippedText.endsWith('#') && !this.suppressEcho) {
+                  // Only inject if we think we aren't root AND it's been a while since the last injection 
+                  // to prevent infinite loops (because the injected script itself triggers a new prompt)
+                  if (this.shellUser !== 'root' && (now - lastInjectTime > 2000)) {
+                    ;(this as any)._lastInjectTime = now
+                    this.suppressEcho = true
+                    stream.write(` ${SHELL_CWD_SETUP}\r`)
+                  }
+                }
+
                 this.onData(text)
               })
               stream.on('close', () => {
@@ -306,6 +335,12 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     }
 
     return profile
+  }
+
+  private handleShellUserChange(user: string) {
+    if (this.shellUser === user) return
+    this.shellUser = user
+    this.onShellUserChange(user)
   }
 
   private async verifyHostFingerprint(profile: SshProfile, key: Buffer | string): Promise<boolean> {
@@ -405,6 +440,30 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     }
     if (this.transferSftp && mode === 'root') {
       this.closeTransferSftpSession()
+    }
+
+    // Bi-directional sync: if the UI switches to root, but the terminal is not root, inject sudo -s
+    if (this.shellStream) {
+      if (mode === 'root' && this.shellUser !== 'root') {
+        this.shellStream.write('sudo -s\r')
+        if (this.sudoPassword) {
+          // Give it a tiny bit of time to prompt, though terminal might buffer it
+          setTimeout(() => {
+            this.shellStream?.write(`${this.sudoPassword}\r`)
+            // Silently inject setup script
+            this.suppressEcho = true
+            this.shellStream?.write(` ${SHELL_CWD_SETUP}\r`)
+          }, 50)
+        } else {
+          setTimeout(() => {
+            this.suppressEcho = true
+            this.shellStream?.write(` ${SHELL_CWD_SETUP}\r`)
+          }, 50)
+        }
+      } else if (mode === 'user' && this.shellUser === 'root') {
+        // If UI switches to user, but terminal is root, try to exit
+        this.shellStream.write('exit\r')
+      }
     }
   }
 
@@ -1666,17 +1725,61 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
   }
 
   private trackSudoPromptFromTerminal(text: string) {
-    const normalized = text.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
-    if (/\[sudo\][^\r\n]*password for .*:|sudo[^\r\n]*密码[:：]?/i.test(normalized)) {
+    const window = (this as any)._sudoWindow || ''
+    const newWindow = (window + text).slice(-200)
+    ;(this as any)._sudoWindow = newWindow
+    const normalized = newWindow.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    
+    // Only test the newly appended part + a little overlap, OR just check if the pattern appears 
+    // at the very end of the string to avoid triggering continuously.
+    // For password prompt, we want it to match when it appears at the end of the current buffer.
+    if (!this.awaitingSudoPasswordInput && /(\[sudo\]|password|密码|passphrase)[^\r\n]*[:：]\s*$/i.test(normalized)) {
       this.awaitingSudoPasswordInput = true
       this.pendingSudoPasswordInput = ''
+      
+      // Attempt to recover blind-typed password from recent keystrokes
+      const recentKeys = (this as any)._recentKeystrokes || ''
+      // recentKeys might look like "sudo -i\rmypassword\r" or "sudo -i\rmypassword"
+      // If it contains a \r after the command, the text between the last \r and the second to last \r might be the password.
+      const parts = recentKeys.split(/[\r\n]/)
+      if (parts.length >= 2) {
+        // If the user already hit Enter for the password, it's the second to last part.
+        // If they haven't hit Enter yet, it's the last part.
+        // Let's just prepopulate pendingSudoPasswordInput with the last part.
+        const lastPart = parts[parts.length - 1]
+        const secondToLast = parts[parts.length - 2]
+        
+        if (lastPart === '') {
+          // They already hit Enter! The password is the second to last part.
+          if (secondToLast && !secondToLast.includes('sudo ')) {
+            this.sudoPassword = secondToLast
+            this.awaitingSudoPasswordInput = false
+            this.onStateChange(this.getSummary(), this.transcript, this.connected)
+          }
+        } else {
+          // They are currently typing the password (or finished but haven't hit enter)
+          if (!lastPart.includes('sudo ')) {
+            this.pendingSudoPasswordInput = lastPart
+          }
+        }
+      }
     }
-    if (/incorrect password|authentication failure|sorry, try again|密码错误|认证失败|对不起，请重试/i.test(normalized)) {
+    
+    // For failure messages, check if it's freshly added by ensuring it appears at the very end.
+    if (/(incorrect password|authentication failure|sorry, try again|密码错误|认证失败|对不起，请重试)\s*$/i.test(normalized)) {
       this.sudoPassword = undefined
     }
   }
 
   private captureSudoPasswordInput(data: string) {
+    // Keep a buffer of recent keystrokes to support blind typing recovery
+    let recentKeys = (this as any)._recentKeystrokes || ''
+    recentKeys += data
+    if (recentKeys.length > 200) {
+      recentKeys = recentKeys.slice(-200)
+    }
+    ;(this as any)._recentKeystrokes = recentKeys
+
     if (!this.awaitingSudoPasswordInput) {
       return
     }

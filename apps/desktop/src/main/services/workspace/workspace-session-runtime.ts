@@ -205,6 +205,9 @@ export class WorkspaceSessionRuntime {
           (cwd) => {
             void this.handleShellCwdChanged(tabId, cwd).catch(() => undefined)
           },
+          (user) => {
+            void this.handleShellUserChanged(tabId, user).catch(() => undefined)
+          },
           (summary, transcript, connected) => {
             const current = this.sessions.get(tabId)
             if (!current) {
@@ -484,6 +487,40 @@ export class WorkspaceSessionRuntime {
     }
 
     await this.emitSnapshotForTab(tabId)
+  }
+
+  private async handleShellUserChanged(tabId: string, user: string) {
+    const current = this.sessions.get(tabId)
+    const controller = this.liveControllers.get(tabId)
+    if (!current || !controller || controller.type !== 'ssh') {
+      return
+    }
+
+    const expectedMode = user === 'root' ? 'root' : 'user'
+    if (controller.getFileAccessMode() === expectedMode) {
+      return
+    }
+
+    try {
+      await controller.setFileAccessMode(expectedMode, {
+        sudoUser: 'root'
+      })
+      
+      const remoteFiles = await controller.listRemoteFiles()
+      const latest = this.sessions.get(tabId)
+      if (latest) {
+        this.sessions.set(tabId, {
+          ...latest,
+          fileAccessMode: controller.getFileAccessMode(),
+          hasReusableSudoAuth: controller.hasReusableSudoAuth(),
+          remoteFiles
+        })
+        await this.emitSnapshotForTab(tabId)
+      }
+    } catch (error) {
+      console.error(`[WorkspaceSessionRuntime] handleShellUserChanged failed for tab ${tabId}:`, error)
+      // Ignored: If elevation fails silently, the UI stays as is.
+    }
   }
 
   private async followShellCwd(tabId: string, cwd: string) {
