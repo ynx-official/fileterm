@@ -15,6 +15,7 @@ import type {
   SshHostVerificationRequest,
   SshInteractionRequest,
   SshInteractionResponse,
+  TransferTask,
   WorkspaceSnapshot,
   WorkspaceTab
 } from '@termdock/core'
@@ -754,6 +755,9 @@ export function App() {
     const offSnapshot = desktopApi.onWorkspaceSnapshot((snapshot) => {
       applySnapshot(snapshot)
     })
+    const offTransferUpdate = desktopApi.onTransferUpdate?.((transfer) => {
+      applyTransferUpdate(transfer)
+    }) ?? (() => undefined)
     const offSessionMetrics = desktopApi.onSessionMetrics((payload) => {
       applySessionMetrics(payload)
     })
@@ -770,6 +774,7 @@ export function App() {
 
     return () => {
       offSnapshot()
+      offTransferUpdate()
       offSessionMetrics()
     }
   }, [desktopApi, isCommandFormWindow, isCommandManagerWindow, isConnectionFormWindow, isConnectionManagerWindow, isFileEditorWindow])
@@ -1082,6 +1087,27 @@ export function App() {
     setWorkspace(snapshot)
     setClosingSessionTabIds((prev) => prev.filter((tabId) => snapshot.tabs.some((tab) => tab.id === tabId)))
     setFormError(null)
+  }
+
+  const applyTransferUpdate = (transfer: TransferTask) => {
+    startTransition(() => {
+      setWorkspace((current) => {
+        const index = current.transfers.findIndex((item) => item.id === transfer.id)
+        if (index === -1) {
+          return {
+            ...current,
+            transfers: [transfer, ...current.transfers]
+          }
+        }
+
+        const transfers = [...current.transfers]
+        transfers[index] = transfer
+        return {
+          ...current,
+          transfers
+        }
+      })
+    })
   }
 
   const applySessionMetrics = ({ tabId, systemMetrics }: SessionMetricsUpdate) => {

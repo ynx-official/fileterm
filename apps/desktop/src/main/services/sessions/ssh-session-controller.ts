@@ -1333,6 +1333,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     cause: unknown
   ): Promise<void> {
     this.ensureShellFileFallback(cause)
+    const total = Math.max((await stat(localPath)).size, 1)
     const tempRemotePath = await this.createTemporaryRemoteUploadPath(path.posix.basename(remotePath))
     appLog(`[TermDock][SFTP] Root upload staging ${localPath} -> ${tempRemotePath} -> ${remotePath}`)
 
@@ -1347,8 +1348,8 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
       })
       onProgress({
         percent: 99,
-        transferredBytes: undefined,
-        totalBytes: undefined,
+        transferredBytes: total,
+        totalBytes: total,
         message: '正在应用 root 写入...'
       })
       await this.ensureRemoteDirectory(path.posix.dirname(remotePath))
@@ -1357,13 +1358,12 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
         { allowNonZeroWithStdout: true },
         true
       )
-      const fileInfo = await stat(localPath)
-      await this.verifyShellRemoteUploadSize(remotePath, Math.max(fileInfo.size, 1), true)
-      appLog(`[TermDock][SFTP] Root upload verified ${remotePath} (${formatShellBytes(Math.max(fileInfo.size, 1))})`)
+      await this.verifyShellRemoteUploadSize(remotePath, total, true)
+      appLog(`[TermDock][SFTP] Root upload verified ${remotePath} (${formatShellBytes(total)})`)
       onProgress({
         percent: 100,
-        transferredBytes: undefined,
-        totalBytes: undefined,
+        transferredBytes: total,
+        totalBytes: total,
         message: undefined
       })
     } catch (error) {

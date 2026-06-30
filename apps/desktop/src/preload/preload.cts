@@ -19,6 +19,7 @@ import type {
   SessionMetricsUpdate,
   SshInteractionRequest,
   SshInteractionResponse,
+  TransferTask,
   TransferTargetOptions,
   TermdockDesktopApi,
   TerminalDataPayload,
@@ -206,6 +207,11 @@ const api: TermdockDesktopApi = {
     const wrapped = (_event: unknown, payload: TerminalStatePayload) => listener(payload)
     ipcRenderer.on('terminal:state', wrapped)
     return () => ipcRenderer.off('terminal:state', wrapped)
+  },
+  onTransferUpdate: (listener: (transfer: TransferTask) => void) => {
+    const wrapped = (_event: unknown, transfer: TransferTask) => listener(transfer)
+    ipcRenderer.on('transfer:update', wrapped)
+    return () => ipcRenderer.off('transfer:update', wrapped)
   },
   onWorkspaceSnapshot: (listener: (snapshot: WorkspaceSnapshot) => void) => {
     const wrapped = (_event: unknown, snapshot: WorkspaceSnapshot) => listener(snapshot)
