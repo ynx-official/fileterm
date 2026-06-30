@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
@@ -108,7 +108,7 @@ function looksLikeShellPrompt(line: string) {
   ].some((pattern) => pattern.test(line))
 }
 
-export function TerminalView({
+export const TerminalView = memo(function TerminalView({
   tabId,
   bootText,
   connected = false,
@@ -1100,4 +1100,4 @@ export function TerminalView({
       ) : null}
     </div>
   )
-}
+})

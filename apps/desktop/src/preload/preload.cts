@@ -19,6 +19,7 @@ import type {
   SessionMetricsUpdate,
   SshInteractionRequest,
   SshInteractionResponse,
+  TransferTask,
   TransferTargetOptions,
   TermdockDesktopApi,
   TerminalDataPayload,
@@ -168,10 +169,12 @@ const api: TermdockDesktopApi = {
     ipcRenderer.invoke('transfer:downloadRemotePath', tabId, remotePath, targetType, localDirectory, options),
   setRemoteFileAccessMode: (tabId: string, mode: 'user' | 'root', options?: RemoteFileAccessOptions): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('remoteFiles:setFileAccessMode', tabId, mode, options),
-  writeTerminal: (tabId: string, data: string): Promise<void> =>
-    ipcRenderer.invoke('terminal:write', tabId, data),
-  resizeTerminal: (tabId: string, cols: number, rows: number, width: number, height: number): Promise<void> =>
-    ipcRenderer.invoke('terminal:resize', tabId, cols, rows, width, height),
+  writeTerminal: async (tabId: string, data: string): Promise<void> => {
+    ipcRenderer.send('terminal:write', tabId, data)
+  },
+  resizeTerminal: async (tabId: string, cols: number, rows: number, width: number, height: number): Promise<void> => {
+    ipcRenderer.send('terminal:resize', tabId, cols, rows, width, height)
+  },
   openRemotePath: (tabId: string, targetPath: string): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('remoteFiles:openPath', tabId, targetPath),
   setFollowShellCwd: (tabId: string, enabled: boolean): Promise<WorkspaceSnapshot> =>
@@ -205,6 +208,11 @@ const api: TermdockDesktopApi = {
     const wrapped = (_event: unknown, payload: TerminalStatePayload) => listener(payload)
     ipcRenderer.on('terminal:state', wrapped)
     return () => ipcRenderer.off('terminal:state', wrapped)
+  },
+  onTransferUpdate: (listener: (transfer: TransferTask) => void) => {
+    const wrapped = (_event: unknown, transfer: TransferTask) => listener(transfer)
+    ipcRenderer.on('transfer:update', wrapped)
+    return () => ipcRenderer.off('transfer:update', wrapped)
   },
   onWorkspaceSnapshot: (listener: (snapshot: WorkspaceSnapshot) => void) => {
     const wrapped = (_event: unknown, snapshot: WorkspaceSnapshot) => listener(snapshot)

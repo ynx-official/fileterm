@@ -58,13 +58,14 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     end(): void
   }
   private pendingResize?: { cols: number; rows: number; width: number; height: number }
-  private transcript = ''
+  private readonly transcript: BoundedTextBuffer
   private currentRemotePath: string
   private shellCwd?: string
   private readonly shellCwdTracker = new ShellCwdTracker()
   private cwdSetupInjected = false
   private suppressEcho = false
   private echoBuf = ''
+  private shellSetupReleaseTimer?: ReturnType<typeof setTimeout>
   private fileAccessMode: 'user' | 'root' = 'user'
   private shellUser?: string
   private sudoUser = 'root'
@@ -87,7 +88,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   ) {
     super(id, 'ssh', profile)
     this.currentRemotePath = profile.remotePath || '.'
-    this.transcript = initialTranscript ?? ''
+    this.transcript = new BoundedTextBuffer(LiveSshSessionController.TRANSCRIPT_LIMIT, initialTranscript)
     this.appendSystemMessage('连接主机...\r\n')
   }
 
@@ -144,7 +145,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
           this.connected = true
           this.appendSystemMessage('连接主机成功\r\n')
           this.sshDebug.log('main', '认证完成，准备打开终端')
-          this.onStateChange(this.getSummary(), this.transcript, true)
+          this.onStateChange(this.getSummary(), this.transcript.toString(), true)
           this.ssh.shell(
             {
               term: 'xterm-256color',
@@ -155,7 +156,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
               if (error) {
                 connectionFailed = true
                 this.appendSystemMessage(`终端启动失败: ${error.message}\r\n`)
-                this.onStateChange(`Connection error: ${error.message}`, this.transcript, false)
+                this.onStateChange(`Connection error: ${error.message}`, this.transcript.toString(), false)
                 if (!settled) {
                   settled = true
                   reject(error)
@@ -175,15 +176,13 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
 
                 if (!this.cwdSetupInjected && text.trim().length > 0) {
                   this.cwdSetupInjected = true
-                  this.suppressEcho = true
-                  stream.write(` ${SHELL_CWD_SETUP}\r`)
+                  this.injectShellSetup(stream)
                 }
 
                 if (this.suppressEcho) {
                   this.echoBuf += text
                   const echoEnd = findSetupEchoEnd(this.echoBuf)
                   if (echoEnd) {
-                    this.suppressEcho = false
                     if (echoEnd.cwd && echoEnd.cwd !== this.shellCwd) {
                       this.sshDebug.log('main', `Initial shell cwd detected via injection: ${echoEnd.cwd}`)
                       this.shellCwd = echoEnd.cwd
@@ -197,18 +196,16 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                     const beforeCmd = this.echoBuf.slice(0, echoEnd.lineStart)
                     const afterOsc7 = this.echoBuf.slice(echoEnd.payloadEnd)
                     text = beforeCmd + afterOsc7
-                    
-                    this.echoBuf = ''
+                    this.clearShellSetupSuppression()
                   } else if (this.echoBuf.length >= 16384) {
-                    this.suppressEcho = false
                     text = this.echoBuf
-                    this.echoBuf = ''
+                    this.clearShellSetupSuppression()
                   } else {
                     return
                   }
                 }
 
-                this.transcript = trimTranscript(`${this.transcript}${text}`, LiveSshSessionController.TRANSCRIPT_LIMIT)
+                this.transcript.append(text)
 
                 // 1. Feed updates (CWD and User) first
                 for (const update of this.shellCwdTracker.feed(text)) {
@@ -234,8 +231,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                   // to prevent infinite loops (because the injected script itself triggers a new prompt)
                   if (this.shellUser !== 'root' && (now - lastInjectTime > 2000)) {
                     ;(this as any)._lastInjectTime = now
-                    this.suppressEcho = true
-                    stream.write(` ${SHELL_CWD_SETUP}\r`)
+                    this.injectShellSetup(stream)
                   }
                 }
 
@@ -243,7 +239,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
               })
               stream.on('close', () => {
                 this.handlePrimaryDisconnect()
-                this.onStateChange('Shell closed', this.transcript, false)
+                this.onStateChange('Shell closed', this.transcript.toString(), false)
               })
 
               if (!settled) {
@@ -266,7 +262,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
             settled = true
             reject(error)
           }
-          this.onStateChange(`Connection error: ${error.message}`, this.transcript, false)
+          this.onStateChange(`Connection error: ${error.message}`, this.transcript.toString(), false)
         })
         .on('close', () => {
           this.handlePrimaryDisconnect()
@@ -276,7 +272,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
           }
           this.appendSystemMessage('连接已断开\r\n')
           this.sshDebug.log('main', '连接已关闭')
-          this.onStateChange('Disconnected', this.transcript, false)
+          this.onStateChange('Disconnected', this.transcript.toString(), false)
         })
         .connect(sshConfig)
     })
@@ -343,6 +339,45 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     this.onShellUserChange(user)
   }
 
+  private injectShellSetup(stream: { write(data: string): void }) {
+    this.clearShellSetupSuppression()
+    this.suppressEcho = true
+    stream.write(` ${SHELL_CWD_SETUP}\r`)
+    this.shellSetupReleaseTimer = setTimeout(() => {
+      if (!this.suppressEcho) {
+        return
+      }
+
+      const bufferedText = this.echoBuf
+      this.clearShellSetupSuppression()
+      if (!bufferedText) {
+        return
+      }
+
+      this.transcript.append(bufferedText)
+      for (const update of this.shellCwdTracker.feed(bufferedText)) {
+        if (update.cwd && update.cwd !== this.shellCwd) {
+          this.shellCwd = update.cwd
+          this.onShellCwdChange(update.cwd)
+        }
+        if (update.user && update.user !== this.shellUser) {
+          this.handleShellUserChange(update.user)
+        }
+      }
+      this.trackSudoPromptFromTerminal(bufferedText)
+      this.onData(bufferedText)
+    }, 1500)
+  }
+
+  private clearShellSetupSuppression() {
+    if (this.shellSetupReleaseTimer) {
+      clearTimeout(this.shellSetupReleaseTimer)
+      this.shellSetupReleaseTimer = undefined
+    }
+    this.suppressEcho = false
+    this.echoBuf = ''
+  }
+
   private async verifyHostFingerprint(profile: SshProfile, key: Buffer | string): Promise<boolean> {
     const fingerprint = computeHostFingerprint(key)
     if (this.acceptedHostFingerprints.has(fingerprint)) {
@@ -383,6 +418,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   override async disconnect(): Promise<void> {
+    this.clearShellSetupSuppression()
     this.shellStream?.end()
     this.closeExecSession()
     this.closeSftpSession()
@@ -395,7 +431,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   getTerminalTranscript(): string {
-    return this.transcript
+    return this.transcript.toString()
   }
 
   getShellCwd(): string | undefined {
@@ -437,33 +473,6 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     this.fileAccessMode = mode
     if (this.sftp && mode === 'root') {
       this.closeSftpSession()
-    }
-    if (this.transferSftp && mode === 'root') {
-      this.closeTransferSftpSession()
-    }
-
-    // Bi-directional sync: if the UI switches to root, but the terminal is not root, inject sudo -s
-    if (this.shellStream) {
-      if (mode === 'root' && this.shellUser !== 'root') {
-        this.shellStream.write('sudo -s\r')
-        if (this.sudoPassword) {
-          // Give it a tiny bit of time to prompt, though terminal might buffer it
-          setTimeout(() => {
-            this.shellStream?.write(`${this.sudoPassword}\r`)
-            // Silently inject setup script
-            this.suppressEcho = true
-            this.shellStream?.write(` ${SHELL_CWD_SETUP}\r`)
-          }, 50)
-        } else {
-          setTimeout(() => {
-            this.suppressEcho = true
-            this.shellStream?.write(` ${SHELL_CWD_SETUP}\r`)
-          }, 50)
-        }
-      } else if (mode === 'user' && this.shellUser === 'root') {
-        // If UI switches to user, but terminal is root, try to exit
-        this.shellStream.write('exit\r')
-      }
     }
   }
 
@@ -867,7 +876,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
 
   pushClientNotice(message: string) {
     this.appendSystemMessage(`[TermDock] ${message}\r\n`)
-    this.onStateChange(this.getSummary(), this.transcript, this.connected)
+    this.onStateChange(this.getSummary(), this.transcript.toString(), this.connected)
   }
 
   private async ensureSftp(): Promise<SFTPWrapper> {
@@ -1031,6 +1040,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   private handlePrimaryDisconnect() {
+    this.clearShellSetupSuppression()
     this.resetPrivilegedFileAccess()
     this.connected = false
     this.closeExecSession()
@@ -1333,6 +1343,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     cause: unknown
   ): Promise<void> {
     this.ensureShellFileFallback(cause)
+    const total = Math.max((await stat(localPath)).size, 1)
     const tempRemotePath = await this.createTemporaryRemoteUploadPath(path.posix.basename(remotePath))
     appLog(`[TermDock][SFTP] Root upload staging ${localPath} -> ${tempRemotePath} -> ${remotePath}`)
 
@@ -1347,8 +1358,8 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
       })
       onProgress({
         percent: 99,
-        transferredBytes: undefined,
-        totalBytes: undefined,
+        transferredBytes: total,
+        totalBytes: total,
         message: '正在应用 root 写入...'
       })
       await this.ensureRemoteDirectory(path.posix.dirname(remotePath))
@@ -1357,13 +1368,12 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
         { allowNonZeroWithStdout: true },
         true
       )
-      const fileInfo = await stat(localPath)
-      await this.verifyShellRemoteUploadSize(remotePath, Math.max(fileInfo.size, 1), true)
-      appLog(`[TermDock][SFTP] Root upload verified ${remotePath} (${formatShellBytes(Math.max(fileInfo.size, 1))})`)
+      await this.verifyShellRemoteUploadSize(remotePath, total, true)
+      appLog(`[TermDock][SFTP] Root upload verified ${remotePath} (${formatShellBytes(total)})`)
       onProgress({
         percent: 100,
-        transferredBytes: undefined,
-        totalBytes: undefined,
+        transferredBytes: total,
+        totalBytes: total,
         message: undefined
       })
     } catch (error) {
@@ -1754,7 +1764,7 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
           if (secondToLast && !secondToLast.includes('sudo ')) {
             this.sudoPassword = secondToLast
             this.awaitingSudoPasswordInput = false
-            this.onStateChange(this.getSummary(), this.transcript, this.connected)
+            this.onStateChange(this.getSummary(), this.transcript.toString(), this.connected)
           }
         } else {
           // They are currently typing the password (or finished but haven't hit enter)
@@ -1795,7 +1805,7 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
       if (char === '\r' || char === '\n') {
         if (this.pendingSudoPasswordInput) {
           this.sudoPassword = this.pendingSudoPasswordInput
-          this.onStateChange(this.getSummary(), this.transcript, this.connected)
+          this.onStateChange(this.getSummary(), this.transcript.toString(), this.connected)
         }
         this.awaitingSudoPasswordInput = false
         this.pendingSudoPasswordInput = ''
@@ -1940,9 +1950,9 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
   }
 
   private appendSystemMessage(message: string) {
-    this.transcript = trimTranscript(`${this.transcript}${message}`, LiveSshSessionController.TRANSCRIPT_LIMIT)
+    this.transcript.append(message)
     this.onData(message)
-    this.onStateChange(this.getSummary(), this.transcript, this.connected)
+    this.onStateChange(this.getSummary(), this.transcript.toString(), this.connected)
   }
 
   private resetPrivilegedFileAccess() {
@@ -1954,12 +1964,68 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
 
 }
 
-function trimTranscript(transcript: string, limit: number) {
-  if (transcript.length <= limit) {
-    return transcript
+class BoundedTextBuffer {
+  private static readonly CHUNK_SIZE = 4096
+  private chunks: string[] = []
+  private head = 0
+  private length = 0
+
+  constructor(
+    private readonly limit: number,
+    initialValue = ''
+  ) {
+    this.append(initialValue)
   }
 
-  return transcript.slice(transcript.length - limit)
+  append(value: string) {
+    if (!value) {
+      return
+    }
+
+    if (value.length >= this.limit) {
+      this.chunks = []
+      this.head = 0
+      this.length = 0
+      value = value.slice(value.length - this.limit)
+    }
+
+    for (let index = 0; index < value.length; index += BoundedTextBuffer.CHUNK_SIZE) {
+      const chunk = value.slice(index, index + BoundedTextBuffer.CHUNK_SIZE)
+      this.chunks.push(chunk)
+      this.length += chunk.length
+    }
+
+    this.trimStart()
+  }
+
+  toString() {
+    if (!this.length) {
+      return ''
+    }
+    return this.chunks.slice(this.head).join('')
+  }
+
+  private trimStart() {
+    let excess = this.length - this.limit
+    while (excess > 0 && this.head < this.chunks.length) {
+      const first = this.chunks[this.head]!
+      if (first.length <= excess) {
+        excess -= first.length
+        this.length -= first.length
+        this.head += 1
+        continue
+      }
+
+      this.chunks[this.head] = first.slice(excess)
+      this.length -= excess
+      excess = 0
+    }
+
+    if (this.head > 256 && this.head * 2 > this.chunks.length) {
+      this.chunks = this.chunks.slice(this.head)
+      this.head = 0
+    }
+  }
 }
 
 const DEFAULT_SSH_KEY_FILES = ['id_ed25519', 'id_ecdsa', 'id_rsa', 'id_dsa']

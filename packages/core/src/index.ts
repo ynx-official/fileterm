@@ -243,6 +243,30 @@ export interface SystemMetrics {
   topProcesses: SidebarProcessItem[]
 }
 
+export function mergeSystemMetricsHistory(
+  previousMetrics: SystemMetrics | undefined,
+  nextMetrics: SystemMetrics,
+  historyLimit = 600
+): SystemMetrics {
+  const nextPoint = nextMetrics.networkSamples.at(-1) ?? { rx: 0, tx: 0 }
+  const previousSamples = previousMetrics?.networkSamples ?? []
+  const previousByInterface = previousMetrics?.networkSamplesByInterface ?? {}
+  const nextByInterface = nextMetrics.networkSamplesByInterface ?? {}
+  const mergedByInterface = Object.fromEntries(
+    Object.entries(nextByInterface).map(([name, samples]) => {
+      const nextInterfacePoint = samples.at(-1) ?? { rx: 0, tx: 0 }
+      const previousInterfaceSamples = previousByInterface[name] ?? []
+      return [name, [...previousInterfaceSamples, nextInterfacePoint].slice(-historyLimit)]
+    })
+  )
+
+  return {
+    ...nextMetrics,
+    networkSamples: [...previousSamples, nextPoint].slice(-historyLimit),
+    networkSamplesByInterface: mergedByInterface
+  }
+}
+
 export interface SessionSnapshot {
   profileId: string
   accessHost?: string
@@ -274,6 +298,7 @@ export interface WorkspaceSnapshot {
 export interface SessionMetricsUpdate {
   tabId: string
   systemMetrics?: SystemMetrics
+  mode?: 'replace' | 'append'
 }
 
 export interface ConnectionLibrarySnapshot {
@@ -489,6 +514,7 @@ export interface TermdockDesktopApi {
   changeRemotePermissions(tabId: string, targetPath: string, options: PermissionChangeOptions): Promise<WorkspaceSnapshot>
   onTerminalData(listener: (payload: TerminalDataPayload) => void): () => void
   onTerminalState(listener: (payload: TerminalStatePayload) => void): () => void
+  onTransferUpdate(listener: (transfer: TransferTask) => void): () => void
   onWorkspaceSnapshot(listener: (snapshot: WorkspaceSnapshot) => void): () => void
   onSessionMetrics(listener: (payload: SessionMetricsUpdate) => void): () => void
   onSshInteraction(listener: (request: SshInteractionRequest) => void): () => void

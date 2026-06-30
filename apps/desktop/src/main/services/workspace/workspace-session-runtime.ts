@@ -1,16 +1,17 @@
 import { randomUUID } from 'node:crypto'
 import type { WebContents } from 'electron'
-import type {
-  ConnectionProfile,
-  RemoteFileAccessOptions,
-  SessionSnapshot,
-  SystemMetrics,
-  SessionMetricsUpdate,
-  SshInteractionDraft,
-  SshInteractionRequest,
-  SshInteractionResponse,
-  WorkspaceSnapshot,
-  WorkspaceTab
+import {
+  mergeSystemMetricsHistory,
+  type ConnectionProfile,
+  type RemoteFileAccessOptions,
+  type SessionSnapshot,
+  type SystemMetrics,
+  type SessionMetricsUpdate,
+  type SshInteractionDraft,
+  type SshInteractionRequest,
+  type SshInteractionResponse,
+  type WorkspaceSnapshot,
+  type WorkspaceTab
 } from '@termdock/core'
 import { LiveFtpSessionController, LiveSshSessionController } from '../session-controllers.js'
 
@@ -19,8 +20,7 @@ export type LiveSessionController = LiveSshSessionController | LiveFtpSessionCon
 export const REMOTE_SESSION_DISCONNECTED_MESSAGE = '会话已断开，请先重连。'
 
 export class WorkspaceSessionRuntime {
-  private static readonly NETWORK_HISTORY_LIMIT = 600
-  private static readonly TERMINAL_TRANSCRIPT_LIMIT = 200_000
+  private static readonly TERMINAL_OUTPUT_FLUSH_INTERVAL_MS = 16
   private readonly sessions = new Map<string, SessionSnapshot>()
   private readonly liveControllers = new Map<string, LiveSessionController>()
   private readonly metricsPollers = new Map<string, ReturnType<typeof setInterval>>()
@@ -28,7 +28,13 @@ export class WorkspaceSessionRuntime {
   private readonly tabSenders = new Map<string, WebContents>()
   private readonly invalidSenders = new WeakSet<WebContents>()
   private readonly senderLifecycleListeners = new WeakSet<WebContents>()
+  private readonly snapshotEmitStates = new WeakMap<WebContents, {
+    inFlight?: Promise<void>
+    pending: boolean
+  }>()
   private readonly remoteFileOperations = new Map<string, Promise<void>>()
+  private readonly terminalOutputBuffers = new Map<string, string[]>()
+  private readonly terminalOutputTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly metricsPausedRemoteFileOperations = new Set<string>()
   private readonly pendingSshInteractions = new Map<string, {
     tabId: string
@@ -47,11 +53,17 @@ export class WorkspaceSessionRuntime {
   ) {}
 
   list() {
-    return Object.fromEntries(this.sessions.entries())
+    return Object.fromEntries(
+      [...this.sessions.entries()].map(([tabId, snapshot]) => [
+        tabId,
+        this.withLiveTerminalTranscript(tabId, snapshot)
+      ])
+    )
   }
 
   get(tabId: string) {
-    return this.sessions.get(tabId)
+    const snapshot = this.sessions.get(tabId)
+    return snapshot ? this.withLiveTerminalTranscript(tabId, snapshot) : undefined
   }
 
   set(tabId: string, snapshot: SessionSnapshot) {
@@ -81,7 +93,9 @@ export class WorkspaceSessionRuntime {
 
   async teardown(tabId: string) {
     this.stopMetricsPolling(tabId)
+    this.flushTerminalOutput(tabId)
     await this.liveControllers.get(tabId)?.disconnect()
+    this.flushTerminalOutput(tabId)
     this.liveControllers.delete(tabId)
     this.remoteFileOperations.delete(tabId)
     this.tabSenders.delete(tabId)
@@ -90,7 +104,17 @@ export class WorkspaceSessionRuntime {
 
   async disconnect(tabId: string) {
     this.stopMetricsPolling(tabId)
-    await this.liveControllers.get(tabId)?.disconnect()
+    this.flushTerminalOutput(tabId)
+    const controller = this.liveControllers.get(tabId)
+    await controller?.disconnect()
+    this.flushTerminalOutput(tabId)
+    const current = this.sessions.get(tabId)
+    if (current && controller?.type === 'ssh') {
+      this.sessions.set(tabId, {
+        ...current,
+        terminalTranscript: controller.getTerminalTranscript()
+      })
+    }
     this.liveControllers.delete(tabId)
   }
 
@@ -102,6 +126,10 @@ export class WorkspaceSessionRuntime {
     for (const [requestId, pending] of this.pendingSshInteractions.entries()) {
       this.pendingSshInteractions.delete(requestId)
       pending.reject(new Error('Workspace runtime is shutting down'))
+    }
+
+    for (const tabId of this.terminalOutputBuffers.keys()) {
+      this.flushTerminalOutput(tabId)
     }
 
     const controllerEntries = [...this.liveControllers.entries()]
@@ -116,6 +144,12 @@ export class WorkspaceSessionRuntime {
         }
       })
     )
+
+    for (const timer of this.terminalOutputTimers.values()) {
+      clearTimeout(timer)
+    }
+    this.terminalOutputTimers.clear()
+    this.terminalOutputBuffers.clear()
   }
 
   requireController(tabId: string) {
@@ -185,6 +219,10 @@ export class WorkspaceSessionRuntime {
   }
 
   createController(tabId: string, profile: ConnectionProfile, initialTranscript?: string): LiveSessionController {
+    if (this.liveControllers.has(tabId)) {
+      throw new Error(`Live session controller already exists: ${tabId}`)
+    }
+
     if (profile.type === 'ssh') {
       let sshController: LiveSshSessionController | null = null
       sshController = new LiveSshSessionController(
@@ -193,14 +231,7 @@ export class WorkspaceSessionRuntime {
           (request) => this.requestSshInteraction(tabId, profile, request),
           (fingerprint) => this.options.rememberTrustedHostFingerprint(profile.id, fingerprint),
           (chunk) => {
-            const current = this.sessions.get(tabId)
-            if (current) {
-              this.sessions.set(tabId, {
-                ...current,
-                terminalTranscript: this.appendToTranscript(current.terminalTranscript, chunk)
-              })
-            }
-            this.sendToTab(tabId, 'terminal:data', { tabId, chunk })
+            this.queueTerminalOutput(tabId, chunk)
           },
           (cwd) => {
             void this.handleShellCwdChanged(tabId, cwd).catch(() => undefined)
@@ -209,6 +240,7 @@ export class WorkspaceSessionRuntime {
             void this.handleShellUserChanged(tabId, user).catch(() => undefined)
           },
           (summary, transcript, connected) => {
+            this.flushTerminalOutput(tabId)
             const current = this.sessions.get(tabId)
             if (!current) {
               return
@@ -333,7 +365,7 @@ export class WorkspaceSessionRuntime {
         if (latest && systemMetrics) {
           this.sessions.set(tabId, {
             ...latest,
-            systemMetrics: this.mergeNetworkHistory(undefined, systemMetrics)
+            systemMetrics: mergeSystemMetricsHistory(undefined, systemMetrics)
           })
           await this.emitSnapshotForTab(tabId)
         }
@@ -348,6 +380,7 @@ export class WorkspaceSessionRuntime {
         }
       }
     } catch (error) {
+      this.flushTerminalOutput(tabId)
       if (this.liveControllers.get(tabId) === controller) {
         this.liveControllers.delete(tabId)
       }
@@ -567,6 +600,32 @@ export class WorkspaceSessionRuntime {
   }
 
   async emitSnapshot(sender: WebContents) {
+    let state = this.snapshotEmitStates.get(sender)
+    if (!state) {
+      state = { pending: false }
+      this.snapshotEmitStates.set(sender, state)
+    }
+
+    if (state.inFlight) {
+      state.pending = true
+      await state.inFlight
+      return
+    }
+
+    const emitAllPending = async () => {
+      do {
+        state!.pending = false
+        await this.emitSnapshotNow(sender)
+      } while (state!.pending)
+    }
+
+    state.inFlight = emitAllPending().finally(() => {
+      state!.inFlight = undefined
+    })
+    await state.inFlight
+  }
+
+  private async emitSnapshotNow(sender: WebContents) {
     if (!this.canSendToSender(sender)) {
       this.handleSenderDestroyed(sender)
       return
@@ -593,6 +652,21 @@ export class WorkspaceSessionRuntime {
       return
     }
     await this.emitSnapshot(sender)
+  }
+
+  emitToSender(sender: WebContents, channel: string, payload: unknown) {
+    if (!this.canSendToSender(sender)) {
+      this.handleSenderDestroyed(sender)
+      return
+    }
+
+    if (!this.trySend(sender, channel, payload)) {
+      this.handleSenderDestroyed(sender)
+    }
+  }
+
+  emitToTab(tabId: string, channel: string, payload: unknown) {
+    this.sendToTab(tabId, channel, payload)
   }
 
   async restoreTabData(tabId: string) {
@@ -631,7 +705,7 @@ export class WorkspaceSessionRuntime {
         if (systemMetrics) {
           nextSnapshot = {
             ...nextSnapshot,
-            systemMetrics: this.mergeNetworkHistory(undefined, systemMetrics)
+            systemMetrics: mergeSystemMetricsHistory(undefined, systemMetrics)
           }
           changed = true
         }
@@ -702,7 +776,7 @@ export class WorkspaceSessionRuntime {
 
       this.sessions.set(tabId, {
         ...latest,
-        systemMetrics: this.mergeNetworkHistory(latest.systemMetrics, systemMetrics)
+        systemMetrics: mergeSystemMetricsHistory(latest.systemMetrics, systemMetrics)
       })
 
       if (!this.canSendToSender(sender)) {
@@ -710,7 +784,7 @@ export class WorkspaceSessionRuntime {
         return
       }
 
-      this.emitMetrics(sender, tabId, this.sessions.get(tabId)?.systemMetrics)
+      this.emitMetrics(sender, tabId, systemMetrics, 'append')
     } finally {
       this.metricsRefreshInFlight.delete(tabId)
     }
@@ -736,13 +810,19 @@ export class WorkspaceSessionRuntime {
       return
     }
 
-    this.emitMetrics(sender, tabId, this.sessions.get(tabId)?.systemMetrics)
+    this.emitMetrics(sender, tabId, this.sessions.get(tabId)?.systemMetrics, 'replace')
   }
 
-  private emitMetrics(sender: WebContents, tabId: string, systemMetrics: SystemMetrics | undefined) {
+  private emitMetrics(
+    sender: WebContents,
+    tabId: string,
+    systemMetrics: SystemMetrics | undefined,
+    mode: SessionMetricsUpdate['mode']
+  ) {
     const payload: SessionMetricsUpdate = {
       tabId,
-      systemMetrics
+      systemMetrics,
+      mode
     }
     const didSend = this.trySend(sender, 'workspace:sessionMetrics', payload)
     if (!didSend) {
@@ -882,40 +962,54 @@ export class WorkspaceSessionRuntime {
     }
   }
 
-  private mergeNetworkHistory(
-    previousMetrics: SessionSnapshot['systemMetrics'] | undefined,
-    nextMetrics: NonNullable<SessionSnapshot['systemMetrics']>
-  ) {
-    const nextPoint = nextMetrics.networkSamples.at(-1) ?? { rx: 0, tx: 0 }
-    const previousSamples = previousMetrics?.networkSamples ?? []
-    const previousByInterface = previousMetrics?.networkSamplesByInterface ?? {}
-    const nextByInterface = nextMetrics.networkSamplesByInterface ?? {}
-    const mergedByInterface = Object.fromEntries(
-      Object.entries(nextByInterface).map(([name, samples]) => {
-        const nextInterfacePoint = samples.at(-1) ?? { rx: 0, tx: 0 }
-        const previousInterfaceSamples = previousByInterface[name] ?? []
-        return [
-          name,
-          [...previousInterfaceSamples, nextInterfacePoint].slice(-WorkspaceSessionRuntime.NETWORK_HISTORY_LIMIT)
-        ]
-      })
-    )
-
-    return {
-      ...nextMetrics,
-      networkSamples: [...previousSamples, nextPoint].slice(-WorkspaceSessionRuntime.NETWORK_HISTORY_LIMIT),
-      networkSamplesByInterface: mergedByInterface
-    }
-  }
-
-  private appendToTranscript(current: string | undefined, chunk: string) {
-    const next = `${current ?? ''}${chunk}`
-    if (next.length <= WorkspaceSessionRuntime.TERMINAL_TRANSCRIPT_LIMIT) {
-      return next
+  private queueTerminalOutput(tabId: string, chunk: string) {
+    const chunks = this.terminalOutputBuffers.get(tabId)
+    if (chunks) {
+      chunks.push(chunk)
+    } else {
+      this.terminalOutputBuffers.set(tabId, [chunk])
     }
 
-    return next.slice(next.length - WorkspaceSessionRuntime.TERMINAL_TRANSCRIPT_LIMIT)
+    if (this.terminalOutputTimers.has(tabId)) {
+      return
+    }
+
+    const timer = setTimeout(() => {
+      this.terminalOutputTimers.delete(tabId)
+      this.flushTerminalOutput(tabId)
+    }, WorkspaceSessionRuntime.TERMINAL_OUTPUT_FLUSH_INTERVAL_MS)
+    this.terminalOutputTimers.set(tabId, timer)
   }
+
+  private flushTerminalOutput(tabId: string) {
+    const timer = this.terminalOutputTimers.get(tabId)
+    if (timer) {
+      clearTimeout(timer)
+      this.terminalOutputTimers.delete(tabId)
+    }
+
+    const chunks = this.terminalOutputBuffers.get(tabId)
+    if (!chunks?.length) {
+      return
+    }
+    this.terminalOutputBuffers.delete(tabId)
+
+    const chunk = chunks.length === 1 ? chunks[0]! : chunks.join('')
+    this.sendToTab(tabId, 'terminal:data', { tabId, chunk })
+  }
+
+  private withLiveTerminalTranscript(tabId: string, snapshot: SessionSnapshot) {
+    const controller = this.liveControllers.get(tabId)
+    if (controller?.type !== 'ssh') {
+      return snapshot
+    }
+
+    const terminalTranscript = controller.getTerminalTranscript()
+    return terminalTranscript === snapshot.terminalTranscript
+      ? snapshot
+      : { ...snapshot, terminalTranscript }
+  }
+
 }
 
 function shouldFallbackRootFileAccess(error: unknown) {

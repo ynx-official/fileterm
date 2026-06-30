@@ -1,26 +1,27 @@
-import { startTransition, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type FormEvent, type MouseEvent, type ReactNode } from 'react'
-import type {
-  CommandExecutionOptions,
-  CommandTemplateInput,
-  ConnectionFolder,
-  ConnectionFormMode,
-  ConnectionProfile,
-  CreateProfileInput,
-  FileContentSnapshot,
-  LocalFileItem,
-  PermissionChangeOptions,
-  RemoteFileItem,
-  SessionMetricsUpdate,
-  SshCredentialsPromptRequest,
-  SshHostVerificationRequest,
-  SshInteractionRequest,
-  SshInteractionResponse,
-  WorkspaceSnapshot,
-  WorkspaceTab
+import { lazy, startTransition, Suspense, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type FormEvent, type MouseEvent, type ReactNode } from 'react'
+import {
+  mergeSystemMetricsHistory,
+  type CommandExecutionOptions,
+  type CommandTemplateInput,
+  type ConnectionFolder,
+  type ConnectionFormMode,
+  type ConnectionProfile,
+  type CreateProfileInput,
+  type FileContentSnapshot,
+  type LocalFileItem,
+  type PermissionChangeOptions,
+  type RemoteFileItem,
+  type SessionMetricsUpdate,
+  type SshCredentialsPromptRequest,
+  type SshHostVerificationRequest,
+  type SshInteractionRequest,
+  type SshInteractionResponse,
+  type WorkspaceSnapshot,
+  type WorkspaceTab
 } from '@termdock/core'
 import { normalizeConnectionHost, validateConnectionHost } from '@termdock/shared'
 import { defaultForm, emptyState, localPreviewFiles, previewLocalPath, previewState, profileToForm } from './app/app-data'
-import { homeTabKey, insertTabKeyAfter, isActiveTransfer, reorderTabKeys, sessionTabKey, withParentRow } from './app/app-utils'
+import { homeTabKey, insertTabKeyAfter, reorderTabKeys, sessionTabKey, withParentRow } from './app/app-utils'
 import { CommandEditorModal, emptyCommandForm, toCommandTemplateInput } from './features/commands/CommandEditorModal'
 import { CommandManagerModal } from './features/commands/CommandManagerModal'
 import { ConnectionManagerModal } from './features/connections/ConnectionManagerModal'
@@ -29,7 +30,6 @@ import { ConnectionModal } from './features/connections/ConnectionModal'
 import { SshCredentialsModal } from './features/connections/SshCredentialsModal'
 import { SshHostVerificationModal } from './features/connections/SshHostVerificationModal'
 import { FileActionModal } from './features/files/FileActionModal'
-import { FileEditorModal } from './features/files/FileEditorModal'
 import { FilePermissionModal } from './features/files/FilePermissionModal'
 import { RootAccessModal } from './features/files/RootAccessModal'
 import { AppIcon } from './features/common/AppIcon'
@@ -39,8 +39,7 @@ import { resolveSelectedTabIds } from './features/common/session-send-targets'
 import { TabBar, type OrderedTabEntry, type TabContextTarget } from './features/layout/TabBar'
 import { TabContextMenu } from './features/layout/TabContextMenu'
 import { SystemSidebar } from './features/system/SystemSidebar'
-import { TransferBar } from './features/transfers/TransferBar'
-import { TransferPopover } from './features/transfers/TransferPopover'
+import { TransferCenter } from './features/transfers/TransferCenter'
 import { WorkspaceStage } from './features/workspace/WorkspaceStage'
 import { useThemeMode, type ThemeMode } from './hooks/useThemeMode'
 import { defaultLocale, setLocale, t, type AppLocale } from './i18n'
@@ -48,6 +47,9 @@ import { defaultLocale, setLocale, t, type AppLocale } from './i18n'
 const STATUS_MESSAGE_TIMEOUT_MS = 15_000
 const REMOTE_METHOD_ERROR_PREFIX = /Error invoking remote method '[^']+':\s*/i
 const MAIN_TAB_UI_STATE_KEY = 'main.tab-ui'
+const FileEditorModal = lazy(() => import('./features/files/FileEditorModal').then((module) => ({
+  default: module.FileEditorModal
+})))
 
 type ErrorDetails = {
   item?: RemoteFileItem
@@ -323,7 +325,7 @@ function parseStoredMainTabUiState(raw: string | null | undefined): StoredMainTa
 
   try {
     const parsed = JSON.parse(raw) as Partial<StoredMainTabUiState>
-    const localTabs = Array.isArray(parsed.localTabs)
+    const localTabs = uniqueItemsById(Array.isArray(parsed.localTabs)
       ? parsed.localTabs.filter((tab): tab is LocalTab => {
           if (!tab || typeof tab !== 'object' || typeof tab.id !== 'string' || typeof tab.title !== 'string') {
             return false
@@ -335,9 +337,9 @@ function parseStoredMainTabUiState(raw: string | null | undefined): StoredMainTa
             && typeof (tab as Extract<LocalTab, { kind: 'system' }>).sessionTabId === 'string'
             && typeof (tab as Extract<LocalTab, { kind: 'system' }>).sourceTabTitle === 'string'
         })
-      : []
+      : [])
     const tabOrder = Array.isArray(parsed.tabOrder)
-      ? parsed.tabOrder.filter((entry): entry is string => typeof entry === 'string')
+      ? uniqueStrings(parsed.tabOrder.filter((entry): entry is string => typeof entry === 'string'))
       : []
 
     return {
@@ -442,6 +444,36 @@ function areStringArraysEqual(left: string[], right: string[]) {
   return true
 }
 
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)]
+}
+
+function uniqueItemsById<T extends { id: string }>(items: T[]) {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    if (seen.has(item.id)) {
+      return false
+    }
+    seen.add(item.id)
+    return true
+  })
+}
+
+function resolveFallbackHomeTabId(localTabs: LocalTab[], tabOrder: string[]) {
+  for (let index = tabOrder.length - 1; index >= 0; index -= 1) {
+    const key = tabOrder[index]
+    if (!key?.startsWith('home:')) {
+      continue
+    }
+    const id = key.slice('home:'.length)
+    if (localTabs.some((tab) => tab.kind === 'home' && tab.id === id)) {
+      return id
+    }
+  }
+
+  return [...localTabs].reverse().find((tab) => tab.kind === 'home')?.id ?? null
+}
+
 function isDefaultPlaceholderHomeTab(tab: LocalTab) {
   return tab.kind === 'home' && tab.id === 'home-1' && tab.title === t.untitledTab
 }
@@ -476,6 +508,7 @@ export function App() {
   const [remoteDirectoryLoadingTabId, setRemoteDirectoryLoadingTabId] = useState<string | null>(null)
   const [isSaving, setIsSaving] = useState(false)
   const [hasLoadedInitialSnapshot, setHasLoadedInitialSnapshot] = useState(false)
+  const [hasHydratedMainTabUiState, setHasHydratedMainTabUiState] = useState(!isMainWorkspaceWindow)
   const [showForm, setShowForm] = useState(false)
   const [showConnectionManager, setShowConnectionManager] = useState(false)
   const [showCommandManager, setShowCommandManager] = useState(false)
@@ -539,7 +572,6 @@ export function App() {
   const [isRootAccessSubmitting, setIsRootAccessSubmitting] = useState(false)
   const [sshInteraction, setSshInteraction] = useState<SshInteractionRequest | null>(null)
   const [sshInteractionError, setSshInteractionError] = useState<string | null>(null)
-  const [showTransfers, setShowTransfers] = useState(false)
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readInitialTheme(searchParams))
   const [locale, setLocaleState] = useState<AppLocale>(() => readInitialLocale(searchParams))
   const [closeConfirmDialog, setCloseConfirmDialog] = useState<{ isQuit: boolean; hasActiveConnections: boolean } | null>(null)
@@ -558,7 +590,6 @@ export function App() {
   }, [workspace])
 
   const localTabsRef = useRef(localTabs)
-  const previousActiveTransferCountRef = useRef(0)
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
   const hasSanitizedStoredPlaceholderRef = useRef(false)
   const desktopApi = window.termdock
@@ -623,6 +654,7 @@ export function App() {
 
   useEffect(() => {
     if (!desktopApi?.getUiStateItem || !isMainWorkspaceWindow) {
+      setHasHydratedMainTabUiState(true)
       return
     }
 
@@ -630,17 +662,25 @@ export function App() {
     let canceled = false
 
     async function hydrateMainTabUiState() {
-      const raw = await uiStateApi.getUiStateItem(MAIN_TAB_UI_STATE_KEY)
-      const storedState = parseStoredMainTabUiState(raw)
-      if (!storedState || canceled) {
-        return
-      }
+      try {
+        const raw = await uiStateApi.getUiStateItem(MAIN_TAB_UI_STATE_KEY)
+        const storedState = parseStoredMainTabUiState(raw)
+        if (!storedState || canceled) {
+          return
+        }
 
-      setLocalTabs(storedState.localTabs)
-      setActiveLocalTabId(storedState.activeLocalTabId)
-      setNextHomeTabNumber(storedState.nextHomeTabNumber)
-      setTabOrder(storedState.tabOrder)
-      setIsSystemSidebarCollapsed(storedState.isSystemSidebarCollapsed)
+        setLocalTabs(storedState.localTabs)
+        setActiveLocalTabId(storedState.activeLocalTabId)
+        setNextHomeTabNumber(storedState.nextHomeTabNumber)
+        setTabOrder(storedState.tabOrder)
+        setIsSystemSidebarCollapsed(storedState.isSystemSidebarCollapsed)
+      } catch {
+        // Fall back to the initial local tab state when persisted UI state cannot be read.
+      } finally {
+        if (!canceled) {
+          setHasHydratedMainTabUiState(true)
+        }
+      }
     }
 
     void hydrateMainTabUiState()
@@ -652,7 +692,7 @@ export function App() {
 
   const closingSessionTabIdSet = useMemo(() => new Set(closingSessionTabIds), [closingSessionTabIds])
   const visibleWorkspaceTabs = useMemo(
-    () => workspace.tabs.filter((tab) => !closingSessionTabIdSet.has(tab.id)),
+    () => uniqueItemsById(workspace.tabs.filter((tab) => !closingSessionTabIdSet.has(tab.id))),
     [closingSessionTabIdSet, workspace.tabs]
   )
 
@@ -839,22 +879,20 @@ export function App() {
   }, [formWindowMode, formWindowProfileId, isConnectionFormWindow, workspace.profiles])
 
   useEffect(() => {
-    const activeTransferCount = workspace.transfers.filter(isActiveTransfer).length
-    if (activeTransferCount > previousActiveTransferCountRef.current) {
-      setShowTransfers(true)
+    if (!isMainWorkspaceWindow || !hasLoadedInitialSnapshot || !hasHydratedMainTabUiState) {
+      return
     }
-    previousActiveTransferCountRef.current = activeTransferCount
-  }, [workspace.transfers])
 
-  useEffect(() => {
-    const allKeys = [
+    const allKeys = uniqueStrings([
       ...localTabs.map((tab) => homeTabKey(tab.id)),
       ...visibleWorkspaceTabs.map((tab) => sessionTabKey(tab.id))
-    ]
+    ])
+    const allKeySet = new Set(allKeys)
 
     setTabOrder((prev) => {
-      const kept = prev.filter((key) => allKeys.includes(key))
-      const missing = allKeys.filter((key) => !kept.includes(key))
+      const kept = uniqueStrings(prev.filter((key) => allKeySet.has(key)))
+      const keptSet = new Set(kept)
+      const missing = allKeys.filter((key) => !keptSet.has(key))
       const replacementKey = pendingHomeReplacementKeyRef.current
 
       if (replacementKey && missing.length) {
@@ -871,10 +909,10 @@ export function App() {
       const nextOrder = [...kept, ...missing]
       return areStringArraysEqual(prev, nextOrder) ? prev : nextOrder
     })
-  }, [localTabs, visibleWorkspaceTabs])
+  }, [hasHydratedMainTabUiState, hasLoadedInitialSnapshot, isMainWorkspaceWindow, localTabs, visibleWorkspaceTabs])
 
   useEffect(() => {
-    if (!hasLoadedInitialSnapshot || localTabs.length > 0 || visibleWorkspaceTabs.length > 0) {
+    if (!isMainWorkspaceWindow || !hasLoadedInitialSnapshot || !hasHydratedMainTabUiState || localTabs.length > 0 || visibleWorkspaceTabs.length > 0) {
       return
     }
 
@@ -882,10 +920,10 @@ export function App() {
     setActiveLocalTabId((current) => current ?? 'home-1')
     setTabOrder((prev) => prev.includes('home:home-1') ? prev : ['home:home-1', ...prev])
     setNextHomeTabNumber((prev) => Math.max(prev, 2))
-  }, [hasLoadedInitialSnapshot, localTabs.length, visibleWorkspaceTabs.length])
+  }, [hasHydratedMainTabUiState, hasLoadedInitialSnapshot, isMainWorkspaceWindow, localTabs.length, visibleWorkspaceTabs.length])
 
   useEffect(() => {
-    if (!hasLoadedInitialSnapshot) {
+    if (!isMainWorkspaceWindow || !hasLoadedInitialSnapshot || !hasHydratedMainTabUiState) {
       return
     }
 
@@ -909,17 +947,18 @@ export function App() {
       setLocalTabs(nextLocalTabs)
     }
     setActiveLocalTabId((prev) => {
-      if (!prev) {
+      if (prev && nextLocalTabs.some((tab) => tab.id === prev)) {
         return prev
       }
-      return nextLocalTabs.some((tab) => tab.id === prev)
-        ? prev
-        : null
+      if (visibleWorkspaceTabs.length > 0) {
+        return null
+      }
+      return resolveFallbackHomeTabId(nextLocalTabs, tabOrder)
     })
-  }, [activeLocalTabId, hasLoadedInitialSnapshot, localTabs, visibleWorkspaceTabs])
+  }, [activeLocalTabId, hasHydratedMainTabUiState, hasLoadedInitialSnapshot, isMainWorkspaceWindow, localTabs, tabOrder, visibleWorkspaceTabs])
 
   useEffect(() => {
-    if (!hasLoadedInitialSnapshot) {
+    if (!hasLoadedInitialSnapshot || !hasHydratedMainTabUiState) {
       return
     }
 
@@ -935,7 +974,7 @@ export function App() {
       tabOrder,
       isSystemSidebarCollapsed
     } satisfies StoredMainTabUiState))
-  }, [activeLocalTabId, desktopApi, hasLoadedInitialSnapshot, isMainWorkspaceWindow, isSystemSidebarCollapsed, localTabs, nextHomeTabNumber, tabOrder])
+  }, [activeLocalTabId, desktopApi, hasHydratedMainTabUiState, hasLoadedInitialSnapshot, isMainWorkspaceWindow, isSystemSidebarCollapsed, localTabs, nextHomeTabNumber, tabOrder])
 
   useEffect(() => {
     if (!isResizingSidebar) {
@@ -994,7 +1033,7 @@ export function App() {
   }, [fileClipboard])
 
   const activeLocalTab = activeLocalTabId ? localTabs.find((tab) => tab.id === activeLocalTabId) ?? null : null
-  const visibleSessionTabOrder = tabOrder
+  const visibleSessionTabOrder = uniqueStrings(tabOrder)
     .filter((key) => key.startsWith('session:'))
     .map((key) => key.slice('session:'.length))
     .filter((id) => visibleWorkspaceTabs.some((tab) => tab.id === id))
@@ -1008,11 +1047,18 @@ export function App() {
     : visibleActiveSessionTabId
   const activeTab = displayedSessionTabId ? visibleWorkspaceTabs.find((tab) => tab.id === displayedSessionTabId) ?? null : null
   const activeSession = activeTab ? workspace.sessions[activeTab.id] : null
+  const workspaceStageKind = activeLocalTab?.kind === 'system'
+    ? 'system'
+    : activeTab && activeSession && !activeLocalTab
+      ? 'session'
+      : 'home'
+  const isHomeWorkspaceVisible = workspaceStageKind === 'home'
+  const effectiveActiveLocalTabId = activeLocalTab?.id
+    ?? (isHomeWorkspaceVisible ? resolveFallbackHomeTabId(localTabs, tabOrder) : null)
   const activeProfile = activeTab
     ? workspace.profiles.find((profile) => profile.id === activeTab.profileId) ?? null
     : null
   const isActiveRemoteSessionConnected = Boolean(activeTab && activeSession?.connected)
-  const activeTransferCount = workspace.transfers.filter(isActiveTransfer).length
   const showSidebar = activeTab !== null && activeSession !== null && activeLocalTab?.kind !== 'home'
   const resolvedSidebarWidth = isSystemSidebarCollapsed ? 44 : sidebarWidth
   const brandWidth = showSidebar && !isSystemSidebarCollapsed ? sidebarWidth : 214
@@ -1084,7 +1130,7 @@ export function App() {
     setFormError(null)
   }
 
-  const applySessionMetrics = ({ tabId, systemMetrics }: SessionMetricsUpdate) => {
+  const applySessionMetrics = ({ tabId, systemMetrics, mode }: SessionMetricsUpdate) => {
     startTransition(() => {
       setWorkspace((current) => {
         const currentSession = current.sessions[tabId]
@@ -1092,7 +1138,11 @@ export function App() {
           return current
         }
 
-        if (currentSession.systemMetrics === systemMetrics) {
+        const nextSystemMetrics = systemMetrics && mode === 'append'
+          ? mergeSystemMetricsHistory(currentSession.systemMetrics, systemMetrics)
+          : systemMetrics
+
+        if (currentSession.systemMetrics === nextSystemMetrics) {
           return current
         }
 
@@ -1102,7 +1152,7 @@ export function App() {
             ...current.sessions,
             [tabId]: {
               ...currentSession,
-              systemMetrics
+              systemMetrics: nextSystemMetrics
             }
           }
         }
@@ -1478,7 +1528,7 @@ export function App() {
       return
     }
 
-    const activeHomeId = activeLocalTabId
+    const activeHomeId = isHomeWorkspaceVisible ? effectiveActiveLocalTabId : null
     const replacementKey = activeHomeId ? homeTabKey(activeHomeId) : null
     pendingHomeReplacementKeyRef.current = replacementKey
 
@@ -1490,7 +1540,7 @@ export function App() {
       setFormError(null)
       if (activeHomeId && snapshot.activeTabId && replacementKey) {
         const nextSessionKey = sessionTabKey(snapshot.activeTabId)
-        setTabOrder((prev) => prev.map((key) => key === replacementKey ? nextSessionKey : key))
+        setTabOrder((prev) => uniqueStrings(prev.map((key) => key === replacementKey ? nextSessionKey : key)))
         setLocalTabs((prev) => prev.filter((tab) => tab.id !== activeHomeId))
         pendingHomeReplacementKeyRef.current = null
       }
@@ -2496,7 +2546,7 @@ export function App() {
     }
   }
 
-  const orderedTabs: OrderedTabEntry[] = tabOrder
+  const orderedTabs: OrderedTabEntry[] = uniqueStrings(tabOrder)
     .map((key) => {
       if (key.startsWith('home:')) {
         const id = key.slice(5)
@@ -2986,19 +3036,21 @@ export function App() {
   if (isFileEditorWindow && fileEditor) {
     return (
       <StandaloneWindowFrame isWindows={isWindowsDesktop} showPlatformTitlebar={false} title={fileEditor.name}>
-        <FileEditorModal
-          errorMessage={fileEditorError}
-          file={fileEditor}
-          isBusy={isBusy}
-          isSaving={isSaving}
-          onClose={closeCurrentWindow}
-          onReloadWithEncoding={(encoding) => {
-            void handleReloadFileEditorWithEncoding(encoding)
-          }}
-          onSave={handleSaveFileEditor}
-          standalone
-          themeMode={themeMode}
-        />
+        <Suspense fallback={<div className="standalone-shell file-editor-window">{t.updating}</div>}>
+          <FileEditorModal
+            errorMessage={fileEditorError}
+            file={fileEditor}
+            isBusy={isBusy}
+            isSaving={isSaving}
+            onClose={closeCurrentWindow}
+            onReloadWithEncoding={(encoding) => {
+              void handleReloadFileEditorWithEncoding(encoding)
+            }}
+            onSave={handleSaveFileEditor}
+            standalone
+            themeMode={themeMode}
+          />
+        </Suspense>
       </StandaloneWindowFrame>
     )
   }
@@ -3025,7 +3077,7 @@ export function App() {
   }
 
   const tabBarProps = {
-    activeHomeTabId: activeLocalTabId,
+    activeHomeTabId: effectiveActiveLocalTabId,
     activeSessionTabId: visibleActiveSessionTabId,
     locale,
     onAddHomeTab: handleAddHomeTab,
@@ -3061,7 +3113,7 @@ export function App() {
   return (
     <>
       <div
-        className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''} ${activeLocalTab?.kind === 'home' ? 'is-home-active' : ''}`}
+        className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''} ${isHomeWorkspaceVisible ? 'is-home-active' : ''}`}
         style={{
           '--sidebar-width': `${resolvedSidebarWidth}px`,
           '--brand-width': `${brandWidth}px`
@@ -3104,7 +3156,7 @@ export function App() {
             </div>
           </div>
         ) : null}
-        {activeLocalTab?.kind !== 'home' && (
+        {!isHomeWorkspaceVisible && (
           <TabBar {...tabBarProps} />
         )}
 
@@ -3153,7 +3205,7 @@ export function App() {
           <div className="workspace-stage">
             <WorkspaceStage
               activeLocalTab={activeLocalTab}
-              activeHomeTabId={activeLocalTabId}
+              activeHomeTabId={effectiveActiveLocalTabId}
               activeProfile={activeProfile}
               activeSession={activeSession}
               activeTab={activeTab}
@@ -3250,38 +3302,14 @@ export function App() {
           </div>
         </main>
 
-        {activeLocalTab?.kind !== 'home' ? (
-          <TransferBar
-            activeCount={activeTransferCount}
-            fullWidth={!showSidebar}
-            isPending={isBusy}
-            onOpen={() => setShowTransfers((prev) => !prev)}
-            transfers={workspace.transfers}
-          />
-        ) : null}
-
-        {showTransfers ? (
-            <TransferPopover
-              transfers={workspace.transfers}
-              onCancelTransfer={(transferId) => {
-                if (!desktopApi) return
-                void desktopApi.cancelTransfer(transferId).then((snapshot) => {
-                  applySnapshot(snapshot)
-                }).catch((err: Error) => {
-                  reportError(setError, '取消传输', err)
-                })
-              }}
-              onClearTransfers={(transferIds) => {
-                if (!desktopApi || !transferIds.length) return
-                void desktopApi.clearTransfers(transferIds).then((snapshot) => {
-                  applySnapshot(snapshot)
-                }).catch((err: Error) => {
-                  reportError(setError, '清理传输记录', err)
-                })
-              }}
-              onClose={() => setShowTransfers(false)}
-            />
-        ) : null}
+        <TransferCenter
+          desktopApi={desktopApi}
+          fullWidth={!showSidebar}
+          initialTransfers={workspace.transfers}
+          isPending={isBusy}
+          onError={(scope, err) => reportError(setError, scope, err)}
+          visible={!isHomeWorkspaceVisible}
+        />
 
         {rootAccessDialog ? (
           <RootAccessModal
