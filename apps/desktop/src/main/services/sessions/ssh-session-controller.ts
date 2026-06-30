@@ -65,6 +65,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private cwdSetupInjected = false
   private suppressEcho = false
   private echoBuf = ''
+  private shellSetupReleaseTimer?: ReturnType<typeof setTimeout>
   private fileAccessMode: 'user' | 'root' = 'user'
   private shellUser?: string
   private sudoUser = 'root'
@@ -175,15 +176,13 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
 
                 if (!this.cwdSetupInjected && text.trim().length > 0) {
                   this.cwdSetupInjected = true
-                  this.suppressEcho = true
-                  stream.write(` ${SHELL_CWD_SETUP}\r`)
+                  this.injectShellSetup(stream)
                 }
 
                 if (this.suppressEcho) {
                   this.echoBuf += text
                   const echoEnd = findSetupEchoEnd(this.echoBuf)
                   if (echoEnd) {
-                    this.suppressEcho = false
                     if (echoEnd.cwd && echoEnd.cwd !== this.shellCwd) {
                       this.sshDebug.log('main', `Initial shell cwd detected via injection: ${echoEnd.cwd}`)
                       this.shellCwd = echoEnd.cwd
@@ -197,12 +196,10 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                     const beforeCmd = this.echoBuf.slice(0, echoEnd.lineStart)
                     const afterOsc7 = this.echoBuf.slice(echoEnd.payloadEnd)
                     text = beforeCmd + afterOsc7
-                    
-                    this.echoBuf = ''
+                    this.clearShellSetupSuppression()
                   } else if (this.echoBuf.length >= 16384) {
-                    this.suppressEcho = false
                     text = this.echoBuf
-                    this.echoBuf = ''
+                    this.clearShellSetupSuppression()
                   } else {
                     return
                   }
@@ -234,8 +231,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                   // to prevent infinite loops (because the injected script itself triggers a new prompt)
                   if (this.shellUser !== 'root' && (now - lastInjectTime > 2000)) {
                     ;(this as any)._lastInjectTime = now
-                    this.suppressEcho = true
-                    stream.write(` ${SHELL_CWD_SETUP}\r`)
+                    this.injectShellSetup(stream)
                   }
                 }
 
@@ -343,6 +339,45 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     this.onShellUserChange(user)
   }
 
+  private injectShellSetup(stream: { write(data: string): void }) {
+    this.clearShellSetupSuppression()
+    this.suppressEcho = true
+    stream.write(` ${SHELL_CWD_SETUP}\r`)
+    this.shellSetupReleaseTimer = setTimeout(() => {
+      if (!this.suppressEcho) {
+        return
+      }
+
+      const bufferedText = this.echoBuf
+      this.clearShellSetupSuppression()
+      if (!bufferedText) {
+        return
+      }
+
+      this.transcript.append(bufferedText)
+      for (const update of this.shellCwdTracker.feed(bufferedText)) {
+        if (update.cwd && update.cwd !== this.shellCwd) {
+          this.shellCwd = update.cwd
+          this.onShellCwdChange(update.cwd)
+        }
+        if (update.user && update.user !== this.shellUser) {
+          this.handleShellUserChange(update.user)
+        }
+      }
+      this.trackSudoPromptFromTerminal(bufferedText)
+      this.onData(bufferedText)
+    }, 1500)
+  }
+
+  private clearShellSetupSuppression() {
+    if (this.shellSetupReleaseTimer) {
+      clearTimeout(this.shellSetupReleaseTimer)
+      this.shellSetupReleaseTimer = undefined
+    }
+    this.suppressEcho = false
+    this.echoBuf = ''
+  }
+
   private async verifyHostFingerprint(profile: SshProfile, key: Buffer | string): Promise<boolean> {
     const fingerprint = computeHostFingerprint(key)
     if (this.acceptedHostFingerprints.has(fingerprint)) {
@@ -383,6 +418,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   override async disconnect(): Promise<void> {
+    this.clearShellSetupSuppression()
     this.shellStream?.end()
     this.closeExecSession()
     this.closeSftpSession()
@@ -437,33 +473,6 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     this.fileAccessMode = mode
     if (this.sftp && mode === 'root') {
       this.closeSftpSession()
-    }
-    if (this.transferSftp && mode === 'root') {
-      this.closeTransferSftpSession()
-    }
-
-    // Bi-directional sync: if the UI switches to root, but the terminal is not root, inject sudo -s
-    if (this.shellStream) {
-      if (mode === 'root' && this.shellUser !== 'root') {
-        this.shellStream.write('sudo -s\r')
-        if (this.sudoPassword) {
-          // Give it a tiny bit of time to prompt, though terminal might buffer it
-          setTimeout(() => {
-            this.shellStream?.write(`${this.sudoPassword}\r`)
-            // Silently inject setup script
-            this.suppressEcho = true
-            this.shellStream?.write(` ${SHELL_CWD_SETUP}\r`)
-          }, 50)
-        } else {
-          setTimeout(() => {
-            this.suppressEcho = true
-            this.shellStream?.write(` ${SHELL_CWD_SETUP}\r`)
-          }, 50)
-        }
-      } else if (mode === 'user' && this.shellUser === 'root') {
-        // If UI switches to user, but terminal is root, try to exit
-        this.shellStream.write('exit\r')
-      }
     }
   }
 
@@ -1031,6 +1040,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   private handlePrimaryDisconnect() {
+    this.clearShellSetupSuppression()
     this.resetPrivilegedFileAccess()
     this.connected = false
     this.closeExecSession()

@@ -219,6 +219,10 @@ export class WorkspaceSessionRuntime {
   }
 
   createController(tabId: string, profile: ConnectionProfile, initialTranscript?: string): LiveSessionController {
+    if (this.liveControllers.has(tabId)) {
+      throw new Error(`Live session controller already exists: ${tabId}`)
+    }
+
     if (profile.type === 'ssh') {
       let sshController: LiveSshSessionController | null = null
       sshController = new LiveSshSessionController(

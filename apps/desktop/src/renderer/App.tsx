@@ -325,7 +325,7 @@ function parseStoredMainTabUiState(raw: string | null | undefined): StoredMainTa
 
   try {
     const parsed = JSON.parse(raw) as Partial<StoredMainTabUiState>
-    const localTabs = Array.isArray(parsed.localTabs)
+    const localTabs = uniqueItemsById(Array.isArray(parsed.localTabs)
       ? parsed.localTabs.filter((tab): tab is LocalTab => {
           if (!tab || typeof tab !== 'object' || typeof tab.id !== 'string' || typeof tab.title !== 'string') {
             return false
@@ -337,9 +337,9 @@ function parseStoredMainTabUiState(raw: string | null | undefined): StoredMainTa
             && typeof (tab as Extract<LocalTab, { kind: 'system' }>).sessionTabId === 'string'
             && typeof (tab as Extract<LocalTab, { kind: 'system' }>).sourceTabTitle === 'string'
         })
-      : []
+      : [])
     const tabOrder = Array.isArray(parsed.tabOrder)
-      ? parsed.tabOrder.filter((entry): entry is string => typeof entry === 'string')
+      ? uniqueStrings(parsed.tabOrder.filter((entry): entry is string => typeof entry === 'string'))
       : []
 
     return {
@@ -442,6 +442,21 @@ function areStringArraysEqual(left: string[], right: string[]) {
   }
 
   return true
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)]
+}
+
+function uniqueItemsById<T extends { id: string }>(items: T[]) {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    if (seen.has(item.id)) {
+      return false
+    }
+    seen.add(item.id)
+    return true
+  })
 }
 
 function isDefaultPlaceholderHomeTab(tab: LocalTab) {
@@ -652,7 +667,7 @@ export function App() {
 
   const closingSessionTabIdSet = useMemo(() => new Set(closingSessionTabIds), [closingSessionTabIds])
   const visibleWorkspaceTabs = useMemo(
-    () => workspace.tabs.filter((tab) => !closingSessionTabIdSet.has(tab.id)),
+    () => uniqueItemsById(workspace.tabs.filter((tab) => !closingSessionTabIdSet.has(tab.id))),
     [closingSessionTabIdSet, workspace.tabs]
   )
 
@@ -839,14 +854,16 @@ export function App() {
   }, [formWindowMode, formWindowProfileId, isConnectionFormWindow, workspace.profiles])
 
   useEffect(() => {
-    const allKeys = [
+    const allKeys = uniqueStrings([
       ...localTabs.map((tab) => homeTabKey(tab.id)),
       ...visibleWorkspaceTabs.map((tab) => sessionTabKey(tab.id))
-    ]
+    ])
+    const allKeySet = new Set(allKeys)
 
     setTabOrder((prev) => {
-      const kept = prev.filter((key) => allKeys.includes(key))
-      const missing = allKeys.filter((key) => !kept.includes(key))
+      const kept = uniqueStrings(prev.filter((key) => allKeySet.has(key)))
+      const keptSet = new Set(kept)
+      const missing = allKeys.filter((key) => !keptSet.has(key))
       const replacementKey = pendingHomeReplacementKeyRef.current
 
       if (replacementKey && missing.length) {
@@ -986,7 +1003,7 @@ export function App() {
   }, [fileClipboard])
 
   const activeLocalTab = activeLocalTabId ? localTabs.find((tab) => tab.id === activeLocalTabId) ?? null : null
-  const visibleSessionTabOrder = tabOrder
+  const visibleSessionTabOrder = uniqueStrings(tabOrder)
     .filter((key) => key.startsWith('session:'))
     .map((key) => key.slice('session:'.length))
     .filter((id) => visibleWorkspaceTabs.some((tab) => tab.id === id))
@@ -1485,7 +1502,7 @@ export function App() {
       setFormError(null)
       if (activeHomeId && snapshot.activeTabId && replacementKey) {
         const nextSessionKey = sessionTabKey(snapshot.activeTabId)
-        setTabOrder((prev) => prev.map((key) => key === replacementKey ? nextSessionKey : key))
+        setTabOrder((prev) => uniqueStrings(prev.map((key) => key === replacementKey ? nextSessionKey : key)))
         setLocalTabs((prev) => prev.filter((tab) => tab.id !== activeHomeId))
         pendingHomeReplacementKeyRef.current = null
       }
@@ -2491,7 +2508,7 @@ export function App() {
     }
   }
 
-  const orderedTabs: OrderedTabEntry[] = tabOrder
+  const orderedTabs: OrderedTabEntry[] = uniqueStrings(tabOrder)
     .map((key) => {
       if (key.startsWith('home:')) {
         const id = key.slice(5)
