@@ -123,7 +123,6 @@ export function FileTable({
         }
       }}>
         {rows.length ? rows.map((row) => {
-          const typeLabel = getDisplayFileTypeLabel(row)
           const iconName = getDisplayFileIconName(row)
 
           return (
@@ -141,19 +140,15 @@ export function FileTable({
             onMouseEnter={() => onSelectionDragEnter?.(row)}
           >
             <td>
-              <span
-                className={`file-icon ${row.type === 'file' ? 'is-draggable' : ''}`}
+              <FileNameCell
+                iconName={iconName}
+                item={row}
                 draggable={row.type === 'file'}
                 onDragStart={(event) => onDragItem?.(event, row)}
-                onMouseDown={(event) => event.stopPropagation()}
-                title={row.type === 'file' ? t.dragTransfer : undefined}
-              >
-                <AppIcon name={iconName} />
-              </span>
-              {row.name}
+              />
             </td>
             {!compact ? <td>{row.size}</td> : null}
-            {!compact ? <td>{typeLabel}</td> : null}
+            {!compact ? <td>{getDisplayFileTypeLabel(row)}</td> : null}
             {!compact ? <td>{row.modified}</td> : null}
             {!compact ? <td>{row.permission ?? ''}</td> : null}
             {!compact ? <td>{row.ownerGroup ?? ''}</td> : null}
@@ -227,21 +222,52 @@ export function LocalFileTable({
             onMouseEnter={() => onSelectionDragEnter(row)}
           >
             <td>
-              <span
-                className={`file-icon ${row.name !== '..' ? 'is-draggable' : ''}`}
+              <FileNameCell
+                iconName={iconName}
+                item={row}
+                showMeta={row.name !== '..'}
                 draggable={row.name !== '..'}
                 onDragStart={(event) => onDragItem(event, row)}
-                onMouseDown={(event) => event.stopPropagation()}
-                title={row.name !== '..' ? t.dragTransfer : undefined}
-              >
-                <AppIcon name={iconName} />
-              </span>
-              {row.name}
+              />
             </td>
           </tr>
           )
         })}
       </tbody>
     </table>
+  )
+}
+
+function FileNameCell({
+  draggable,
+  iconName,
+  item,
+  showMeta = false,
+  onDragStart
+}: {
+  draggable: boolean
+  iconName: ReturnType<typeof getDisplayFileIconName>
+  item: LocalFileItem | RemoteFileItem
+  showMeta?: boolean
+  onDragStart(event: DragEvent<HTMLElement>): void
+}) {
+  const meta = item.type === 'file' ? item.size : getDisplayFileTypeLabel(item)
+
+  return (
+    <span className={`file-name-cell ${showMeta ? 'has-meta' : ''}`} title={`${item.name}${showMeta ? ` · ${meta}` : ''}`}>
+      <span
+        className={`file-icon ${draggable ? 'is-draggable' : ''}`}
+        draggable={draggable}
+        onDragStart={onDragStart}
+        onMouseDown={(event) => event.stopPropagation()}
+        title={draggable ? t.dragTransfer : undefined}
+      >
+        <AppIcon name={iconName} />
+      </span>
+      <span className="file-row-text">
+        <span className="file-row-main">{item.name}</span>
+        {showMeta ? <span className="file-row-meta">{meta}</span> : null}
+      </span>
+    </span>
   )
 }

@@ -87,6 +87,8 @@ export function WorkspaceStage({
   onSetTheme,
   onSetLocale,
   onOpenLogsDirectory,
+  isSidebarCollapsed,
+  isWorkspaceFocusMode,
   tabBarProps
 }: {
   activeLocalTab: ActiveLocalTab
@@ -155,6 +157,8 @@ export function WorkspaceStage({
   onSetTheme(value: 'default-dark' | 'default-light'): void
   onSetLocale(value: 'zhCN' | 'enUS'): void
   onOpenLogsDirectory(): void
+  isSidebarCollapsed: boolean
+  isWorkspaceFocusMode: boolean
   tabBarProps: any
 }) {
   if (activeLocalTab?.kind === 'system') {
@@ -205,6 +209,7 @@ export function WorkspaceStage({
         remoteFileAccessMode={remoteFileAccessMode}
         onRefresh={onRefresh}
         onUploadFiles={onUploadFiles}
+        isWorkspaceFocusMode={isWorkspaceFocusMode}
       />
     )
   }
@@ -235,6 +240,7 @@ export function WorkspaceStage({
       onSetTheme={onSetTheme}
       onSetLocale={onSetLocale}
       onOpenLogsDirectory={onOpenLogsDirectory}
+      isSidebarCollapsed={isSidebarCollapsed}
       profiles={profiles}
       tabBarProps={tabBarProps}
     />

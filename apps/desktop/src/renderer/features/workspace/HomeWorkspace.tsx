@@ -33,6 +33,7 @@ export function HomeWorkspace({
   onSetTheme,
   onSetLocale,
   onOpenLogsDirectory,
+  isSidebarCollapsed,
   tabBarProps
 }: {
   profiles: ConnectionProfile[]
@@ -59,6 +60,7 @@ export function HomeWorkspace({
   onSetTheme(value: 'default-dark' | 'default-light'): void
   onSetLocale(value: 'zhCN' | 'enUS'): void
   onOpenLogsDirectory(): void
+  isSidebarCollapsed: boolean
   tabBarProps: any
 }) {
   const [activeTab, setActiveTab] = useState<'overview' | 'quick-links' | 'command-manager' | 'connection-manager' | 'settings'>('overview')
@@ -96,9 +98,9 @@ export function HomeWorkspace({
   }
 
   return (
-    <section className="home-workspace">
+    <section className={`home-workspace ${isSidebarCollapsed ? 'is-sidebar-collapsed' : ''}`}>
       {/* SideNavBar Component */}
-      <aside className="home-sidebar">
+      <aside className={`home-sidebar ${isSidebarCollapsed ? 'is-collapsed' : ''}`}>
         <div className="sidebar-drag-handle" />
         {/* macOS style Window Controls */}
         <div className="window-controls-decorator">
@@ -120,6 +122,8 @@ export function HomeWorkspace({
           <button
             className={`sidebar-nav-link ${activeTab === 'overview' ? 'active' : ''}`}
             onClick={() => selectTab('overview')}
+            aria-label="概览"
+            title="概览"
             type="button"
           >
             <span className="material-symbols-outlined">dashboard</span>
@@ -128,6 +132,8 @@ export function HomeWorkspace({
           <button
             className={`sidebar-nav-link ${activeTab === 'quick-links' ? 'active' : ''}`}
             onClick={() => selectTab('quick-links')}
+            aria-label={t.quickConnect}
+            title={t.quickConnect}
             type="button"
           >
             <span className="material-symbols-outlined">link</span>
@@ -136,6 +142,8 @@ export function HomeWorkspace({
           <button
             className={`sidebar-nav-link ${activeTab === 'command-manager' ? 'active' : ''}`}
             onClick={() => selectTab('command-manager')}
+            aria-label={t.commandManager}
+            title={t.commandManager}
             type="button"
           >
             <span className="material-symbols-outlined">terminal</span>
@@ -144,6 +152,8 @@ export function HomeWorkspace({
           <button
             className={`sidebar-nav-link ${activeTab === 'connection-manager' ? 'active' : ''}`}
             onClick={() => selectTab('connection-manager')}
+            aria-label={t.connectionManager}
+            title={t.connectionManager}
             type="button"
           >
             <span className="material-symbols-outlined">settings_ethernet</span>
@@ -152,6 +162,8 @@ export function HomeWorkspace({
           <button
             className={`sidebar-nav-link ${activeTab === 'settings' ? 'active' : ''}`}
             onClick={() => selectTab('settings')}
+            aria-label={t.settings}
+            title={t.settings}
             type="button"
           >
             <span className="material-symbols-outlined">settings</span>
@@ -161,11 +173,11 @@ export function HomeWorkspace({
 
         {/* Sidebar Footer */}
         <div className="sidebar-footer">
-          <button className="sidebar-nav-link" onClick={handleOpenDocs} type="button">
+          <button className="sidebar-nav-link" onClick={handleOpenDocs} aria-label="Docs" title="Docs" type="button">
             <span className="material-symbols-outlined">description</span>
             <span>Docs</span>
           </button>
-          <button className="sidebar-nav-link" onClick={handleOpenDocs} type="button">
+          <button className="sidebar-nav-link" onClick={handleOpenDocs} aria-label="GitHub" title="GitHub" type="button">
             <span className="material-symbols-outlined">star</span>
             <span>GitHub</span>
           </button>

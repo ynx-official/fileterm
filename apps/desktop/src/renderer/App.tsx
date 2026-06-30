@@ -544,6 +544,7 @@ export function App() {
   } | null>(null)
   const [sidebarWidth, setSidebarWidth] = useState(214)
   const [isSystemSidebarCollapsed, setIsSystemSidebarCollapsed] = useState(() => initialMainTabUiState.isSystemSidebarCollapsed)
+  const [isWorkspaceFocusMode, setIsWorkspaceFocusMode] = useState(false)
   const [isResizingSidebar, setIsResizingSidebar] = useState(false)
   const [fileEditor, setFileEditor] = useState<FileContentSnapshot | null>(
     isFileEditorWindow && fileEditorWindowSource && fileEditorWindowPath && fileEditorWindowName
@@ -1034,11 +1035,33 @@ export function App() {
   const activeProfile = activeTab
     ? workspace.profiles.find((profile) => profile.id === activeTab.profileId) ?? null
     : null
+  const activeWorkspaceOrderKey = activeLocalTab
+    ? homeTabKey(activeLocalTab.id)
+    : activeTab
+      ? sessionTabKey(activeTab.id)
+      : 'empty'
+  const previousWorkspaceOrderKeyRef = useRef(activeWorkspaceOrderKey)
+  const workspaceNavDirectionRef = useRef<'up' | 'down'>('down')
+  let workspaceNavDirection = workspaceNavDirectionRef.current
+
+  if (previousWorkspaceOrderKeyRef.current !== activeWorkspaceOrderKey) {
+    const previousIndex = tabOrder.indexOf(previousWorkspaceOrderKeyRef.current)
+    const nextIndex = tabOrder.indexOf(activeWorkspaceOrderKey)
+    workspaceNavDirection = previousIndex >= 0 && nextIndex >= 0 && nextIndex < previousIndex ? 'up' : 'down'
+    workspaceNavDirectionRef.current = workspaceNavDirection
+    previousWorkspaceOrderKeyRef.current = activeWorkspaceOrderKey
+  }
+
   const isActiveRemoteSessionConnected = Boolean(activeTab && activeSession?.connected)
   const activeTransferCount = workspace.transfers.filter(isActiveTransfer).length
-  const showSidebar = activeTab !== null && activeSession !== null && activeLocalTab?.kind !== 'home'
+  const isHomeTabActive = activeLocalTab?.kind === 'home'
+  const showSidebar = activeTab !== null && activeSession !== null && !isHomeTabActive
   const resolvedSidebarWidth = isSystemSidebarCollapsed ? 44 : sidebarWidth
-  const brandWidth = showSidebar && !isSystemSidebarCollapsed ? sidebarWidth : 214
+  const brandWidth = isHomeTabActive
+    ? resolvedSidebarWidth
+    : showSidebar && !isSystemSidebarCollapsed
+      ? sidebarWidth
+      : 214
 
   const normalizeErrorMessage = (err: unknown) => {
     const rawMessage = err instanceof Error ? err.message : String(err)
@@ -3027,6 +3050,7 @@ export function App() {
   const tabBarProps = {
     activeHomeTabId: activeLocalTabId,
     activeSessionTabId: visibleActiveSessionTabId,
+    isWorkspaceFocusMode,
     locale,
     onAddHomeTab: handleAddHomeTab,
     onActivateHome: handleActivateHome,
@@ -3049,6 +3073,14 @@ export function App() {
     onOpenTabContext: (event: React.MouseEvent<HTMLDivElement>, target: TabContextTarget) => {
       setTabContextMenu({ x: event.clientX, y: event.clientY, target })
     },
+    onToggleWorkspaceFocus: () => {
+      const nextFocusMode = !isWorkspaceFocusMode
+      setIsWorkspaceFocusMode(nextFocusMode)
+      setIsSystemSidebarCollapsed(nextFocusMode)
+      if (!nextFocusMode) {
+        setSidebarWidth(214)
+      }
+    },
     onSetLocale: (nextLocale: AppLocale) => {
       setLocale(nextLocale)
       setLocaleState(nextLocale)
@@ -3061,7 +3093,7 @@ export function App() {
   return (
     <>
       <div
-        className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''} ${activeLocalTab?.kind === 'home' ? 'is-home-active' : ''}`}
+        className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''} ${isHomeTabActive ? 'is-home-active' : ''} ${isSystemSidebarCollapsed ? 'is-sidebar-collapsed' : ''}`}
         style={{
           '--sidebar-width': `${resolvedSidebarWidth}px`,
           '--brand-width': `${brandWidth}px`
@@ -3151,58 +3183,63 @@ export function App() {
             </div>
           ) : null}
           <div className="workspace-stage">
-            <WorkspaceStage
-              activeLocalTab={activeLocalTab}
-              activeHomeTabId={activeLocalTabId}
-              activeProfile={activeProfile}
-              activeSession={activeSession}
-              activeTab={activeTab}
-              sendTargets={sessionSendTargets}
-              terminalDockSendScope={activeTerminalDockSendState.scope}
-              terminalDockSelectedTabIds={activeTerminalDockSendState.selectedTabIds}
-              commandFolders={workspace.commandFolders || []}
-              commandTemplates={workspace.commandTemplates || []}
-              folders={workspace.folders || []}
-              isBusy={isBusy}
-              localItems={localItems}
-              localPath={localPath}
-              canPasteToLocal={canPasteIntoLocal}
-              canPasteToRemote={canPasteIntoRemote}
-              clipboardStatusText={clipboardStatusText}
-              localCutPaths={localCutPaths}
-              remoteCutPaths={remoteCutPaths}
-              onCopyItems={setClipboardItems.bind(null, 'copy')}
-              onCutItems={setClipboardItems.bind(null, 'cut')}
-              onClearCutState={clearCutState}
-              onExecuteCommand={(commandId, args, options, scope, selectedTabIds) => {
-                void executeCommandTemplate(commandId, args, options, scope, selectedTabIds)
-              }}
-              onSendTerminalCommand={sendTerminalCommand}
-              onTerminalDockSendScopeChange={(scope, rememberSelection) => {
-                updateTerminalDockSendState((prev) => ({
-                  ...prev,
-                  scope,
-                  rememberSelection,
-                  selectedTabIds: scope === 'selected-ssh' ? prev.selectedTabIds : []
-                }))
-              }}
-              onTerminalDockSelectedTabIdsChange={(selectedTabIds, rememberSelection) => {
-                updateTerminalDockSendState((prev) => ({
-                  ...prev,
-                  scope: 'selected-ssh',
-                  selectedTabIds,
-                  rememberSelection
-                }))
-              }}
-              onOpenCommandManager={openCommandManager}
-              profiles={workspace.profiles}
-              onChooseUploadFiles={handleChooseUploadFiles}
-              onDownloadFiles={handleDownloadFiles}
-              onDropUpload={handleDropUpload}
-              onOpenLocalItem={handleOpenLocalItem}
-              onOpenLocalPath={(targetPath) => {
-                void openLocalDirectory(targetPath).catch((err: Error) => reportError(setError, '打开本地路径', err, { targetPath }))
-              }}
+            <div
+              key={activeWorkspaceOrderKey}
+              className="workspace-stage-transition"
+              data-nav-direction={workspaceNavDirection}
+            >
+              <WorkspaceStage
+                activeLocalTab={activeLocalTab}
+                activeHomeTabId={activeLocalTabId}
+                activeProfile={activeProfile}
+                activeSession={activeSession}
+                activeTab={activeTab}
+                sendTargets={sessionSendTargets}
+                terminalDockSendScope={activeTerminalDockSendState.scope}
+                terminalDockSelectedTabIds={activeTerminalDockSendState.selectedTabIds}
+                commandFolders={workspace.commandFolders || []}
+                commandTemplates={workspace.commandTemplates || []}
+                folders={workspace.folders || []}
+                isBusy={isBusy}
+                localItems={localItems}
+                localPath={localPath}
+                canPasteToLocal={canPasteIntoLocal}
+                canPasteToRemote={canPasteIntoRemote}
+                clipboardStatusText={clipboardStatusText}
+                localCutPaths={localCutPaths}
+                remoteCutPaths={remoteCutPaths}
+                onCopyItems={setClipboardItems.bind(null, 'copy')}
+                onCutItems={setClipboardItems.bind(null, 'cut')}
+                onClearCutState={clearCutState}
+                onExecuteCommand={(commandId, args, options, scope, selectedTabIds) => {
+                  void executeCommandTemplate(commandId, args, options, scope, selectedTabIds)
+                }}
+                onSendTerminalCommand={sendTerminalCommand}
+                onTerminalDockSendScopeChange={(scope, rememberSelection) => {
+                  updateTerminalDockSendState((prev) => ({
+                    ...prev,
+                    scope,
+                    rememberSelection,
+                    selectedTabIds: scope === 'selected-ssh' ? prev.selectedTabIds : []
+                  }))
+                }}
+                onTerminalDockSelectedTabIdsChange={(selectedTabIds, rememberSelection) => {
+                  updateTerminalDockSendState((prev) => ({
+                    ...prev,
+                    scope: 'selected-ssh',
+                    selectedTabIds,
+                    rememberSelection
+                  }))
+                }}
+                onOpenCommandManager={openCommandManager}
+                profiles={workspace.profiles}
+                onChooseUploadFiles={handleChooseUploadFiles}
+                onDownloadFiles={handleDownloadFiles}
+                onDropUpload={handleDropUpload}
+                onOpenLocalItem={handleOpenLocalItem}
+                onOpenLocalPath={(targetPath) => {
+                  void openLocalDirectory(targetPath).catch((err: Error) => reportError(setError, '打开本地路径', err, { targetPath }))
+                }}
               onOpenProfile={handleOpenProfile}
               onOpenRemoteItem={handleOpenRemoteItem}
               onOpenRemotePath={handleOpenRemotePath}
@@ -3241,8 +3278,11 @@ export function App() {
                 setLocaleState(nextLocale)
               }}
               onOpenLogsDirectory={openLogsDirectory}
+              isSidebarCollapsed={isSystemSidebarCollapsed}
+              isWorkspaceFocusMode={isWorkspaceFocusMode}
               tabBarProps={tabBarProps}
             />
+            </div>
           </div>
         </main>
 
