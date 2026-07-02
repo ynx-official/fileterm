@@ -120,10 +120,10 @@
   --terminal-cmd-bg: rgba(148, 163, 184, 0.16);
   --terminal-search-match-bg: #4b5563;
   --terminal-search-match-ruler: #9ca3af;
-  --terminal-search-active-bg: #ffffff;
+  --terminal-search-active-bg: #ffd43b;
   --terminal-search-active-text: #111111;
-  --terminal-search-active-border: #ffffff;
-  --terminal-search-active-ruler: #ffffff;
+  --terminal-search-active-border: #8a5a00;
+  --terminal-search-active-ruler: #f0b400;
   --terminal-cmd-text: #f1f5f9;
   --terminal-frame-shadow: inset 0 0 14px rgba(0, 0, 0, 0.3);
   --button-primary-bg: #1687e8;

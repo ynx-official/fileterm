@@ -8,8 +8,8 @@
   --bg-hover: #eceff3;
   --bg-active: #dde2e8;
 
-  --border-light: rgba(15, 23, 42, 0.11);
-  --border-dark: rgba(15, 23, 42, 0.2);
+  --border-light: rgba(15, 23, 42, 0.16);
+  --border-dark: rgba(15, 23, 42, 0.28);
   --border: var(--border-light);
 
   --text-main: #1f2933;
@@ -50,11 +50,11 @@
   --surface-hover: rgba(15, 23, 42, 0.05);
   --surface-chip: rgba(15, 23, 42, 0.08);
   --surface-inset: rgba(15, 23, 42, 0.03);
-  --surface-inset-border: rgba(15, 23, 42, 0.06);
+  --surface-inset-border: rgba(15, 23, 42, 0.1);
   --surface-table-head: rgba(15, 23, 42, 0.04);
   --surface-nested: rgba(15, 23, 42, 0.035);
   --floating-drawer-expanded-bg: rgba(255, 255, 255, 0.9);
-  --floating-drawer-expanded-border: rgba(15, 23, 42, 0.1);
+  --floating-drawer-expanded-border: rgba(15, 23, 42, 0.16);
   --floating-drawer-shadow: 0 10px 26px rgba(15, 23, 42, 0.14), 0 1px 2px rgba(15, 23, 42, 0.1);
   --floating-drawer-trigger-hover-bg: rgba(15, 23, 42, 0.06);
   --modal-backdrop-bg: rgba(15, 23, 42, 0.28);
@@ -66,6 +66,9 @@
   --terminal-dock-header-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
   --system-sidebar-toggle-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
   --system-sidebar-toggle-hover-shadow: 0 10px 22px rgba(15, 23, 42, 0.16);
+  --system-sidebar-frame: rgba(15, 23, 42, 0.32);
+  --system-sidebar-control-border: rgba(15, 23, 42, 0.26);
+  --system-sidebar-divider: rgba(15, 23, 42, 0.18);
   --overview-hero-highlight: rgba(255, 255, 255, 0.02);
   --brand-title-shadow: none;
   --traffic-close: #ff5f57;
@@ -155,17 +158,14 @@
   --terminal-bg: #ffffff;
   --terminal-text: #111827;
   --terminal-cmd-bg: rgba(15, 23, 42, 0.08);
-  --terminal-search-match-bg: #4b5563;
-  --terminal-search-match-ruler: #9ca3af;
-  --terminal-search-active-bg: #ffffff;
+  --terminal-search-match-bg: #f6cf57;
+  --terminal-search-match-ruler: #d39b16;
+  --terminal-search-active-bg: #ffd43b;
   --terminal-search-active-text: #111111;
-  --terminal-search-active-border: #111827;
-  --terminal-search-active-ruler: #111827;
+  --terminal-search-active-border: #8a5a00;
+  --terminal-search-active-ruler: #f0b400;
   --terminal-cmd-text: #111827;
-  --terminal-frame-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.78),
-    inset 0 0 0 1px rgba(15, 23, 42, 0.14),
-    inset 0 0 18px rgba(15, 23, 42, 0.08);
+  --terminal-frame-shadow: none;
   --button-primary-bg: #4f7cff;
   --button-primary-hover: #3d69ea;
   --button-primary-border: rgba(17, 24, 39, 0.08);
@@ -185,21 +185,32 @@
   background: var(--terminal-bg);
 }
 
+:root[data-theme='default-light'] .terminal-area,
+:root[data-theme='default-light'] .terminal-area::after {
+  box-shadow: none !important;
+}
+
 :root[data-theme='default-light'] .terminal-find {
-  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border: 1px solid var(--border-dark);
   background: color-mix(in srgb, var(--bg-card) 96%, transparent);
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.14);
+  box-shadow:
+    0 12px 28px rgba(15, 23, 42, 0.16),
+    0 1px 0 rgba(255, 255, 255, 0.9) inset;
 }
 
 :root[data-theme='default-light'] .terminal-find input {
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-dark);
   background: var(--bg-main);
   color: var(--text-main);
 }
 
 :root[data-theme='default-light'] .terminal-find .terminal-find-actions {
-  --terminal-find-action-divider: color-mix(in srgb, var(--border) 82%, transparent);
+  --terminal-find-action-divider: var(--border-light);
   background: color-mix(in srgb, var(--bg-main) 78%, var(--border));
+}
+
+:root[data-theme='default-light'] .terminal-dock {
+  --terminal-dock-border: var(--border-light);
 }
 
 :root[data-theme='default-light'] .terminal-find .terminal-find-actions>button {
@@ -238,6 +249,83 @@
 
 :root[data-theme='default-light'] .fs-sidebar::before {
   background: var(--border-dark);
+}
+
+:root[data-theme='default-light'] .fs-sidebar,
+:root[data-theme='default-light'] .titlebar-brand {
+  border-right: 1px solid var(--system-sidebar-frame) !important;
+}
+
+:root[data-theme='default-light'] .fs-tabbar {
+  border-bottom: none !important;
+}
+
+:root[data-theme='default-light'] .fs-tabbar::after {
+  background: var(--border-light) !important;
+  z-index: 20 !important;
+  height: 1px !important;
+}
+
+:root[data-theme='default-light'] .fs-tabs {
+  bottom: 0 !important;
+}
+
+:root[data-theme='default-light'] .connection-summary {
+  border-bottom: 1px solid var(--system-sidebar-frame);
+}
+
+:root[data-theme='default-light'] .system-sidebar-layout .sys-card {
+  border-bottom-color: var(--system-sidebar-frame);
+}
+
+:root[data-theme='default-light'] .system-sidebar-layout .system-sidebar-toggle,
+:root[data-theme='default-light'] .system-sidebar-layout .system-title,
+:root[data-theme='default-light'] .system-sidebar-layout .network-select,
+:root[data-theme='default-light'] .system-sidebar-layout .grid-chart {
+  border-color: var(--system-sidebar-control-border);
+}
+
+:root[data-theme='default-light'] .system-title {
+  background: #f5f6f8;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+}
+
+/* Segmented Control style for .mini-tabs to eliminate heavy control borders */
+:root[data-theme='default-light'] .mini-tabs {
+  border: none !important;
+  background: rgba(15, 23, 42, 0.04) !important;
+  padding: 2px !important;
+  border-radius: var(--radius-md) !important;
+}
+
+:root[data-theme='default-light'] .mini-tabs span {
+  background: transparent !important;
+  color: var(--text-soft) !important;
+  border: none !important;
+  border-radius: var(--radius-sm) !important;
+  transition: all 0.2s ease;
+}
+
+:root[data-theme='default-light'] .mini-tabs span:hover:not(.active) {
+  background: rgba(15, 23, 42, 0.03) !important;
+  color: var(--text-main) !important;
+}
+
+:root[data-theme='default-light'] .mini-tabs span.active {
+  background: #ffffff !important;
+  color: var(--text-main) !important;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08) !important;
+}
+
+/* Remove Process Table Outer Border */
+:root[data-theme='default-light'] .system-sidebar-layout .process-table {
+  border: none !important;
+}
+
+:root[data-theme='default-light'] .system-sidebar-layout .process-row,
+:root[data-theme='default-light'] .system-sidebar-layout .disk-head,
+:root[data-theme='default-light'] .system-sidebar-layout .disk-row {
+  border-bottom-color: var(--system-sidebar-divider);
 }
 
 :root[data-theme='default-light'] .window-menu-items button:hover,
@@ -280,12 +368,10 @@
   color: var(--text-main);
 }
 
-:root[data-theme='default-light'] .fs-tab,
 :root[data-theme='default-light'] .file-tabs button,
 :root[data-theme='default-light'] .file-tab-actions button,
 :root[data-theme='default-light'] .flat-button,
 :root[data-theme='default-light'] .transfer-segments button,
-:root[data-theme='default-light'] .mini-tabs span,
 :root[data-theme='default-light'] .network-select,
 :root[data-theme='default-light'] .ssh-grid input,
 :root[data-theme='default-light'] .ssh-grid select,
@@ -295,6 +381,32 @@
   background: #f7f8fa;
   border-color: var(--border-light);
   color: var(--text-main);
+}
+
+/* Inactive Tabs in Light Mode */
+:root[data-theme='default-light'] .fs-tab {
+  background: #f1f3f6 !important;
+  border: none !important;
+  color: var(--text-soft) !important;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+:root[data-theme='default-light'] .fs-tab:hover:not(.active) {
+  background: #e5e8ec !important;
+  color: var(--text-main) !important;
+}
+
+/* Add Tab Button "+" in Light Mode */
+:root[data-theme='default-light'] .add-tab {
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-soft) !important;
+  transition: background-color 0.2s, color 0.2s;
+}
+
+:root[data-theme='default-light'] .add-tab:hover {
+  background: var(--bg-hover) !important;
+  color: var(--text-main) !important;
 }
 
 :root[data-theme='default-light'] .primary-button {
@@ -307,11 +419,9 @@
   background: var(--button-primary-hover);
 }
 
-:root[data-theme='default-light'] .fs-tab.active,
 :root[data-theme='default-light'] .file-tabs button.active,
 :root[data-theme='default-light'] .transfer-segments button.active,
 :root[data-theme='default-light'] .transfer-segments button:hover,
-:root[data-theme='default-light'] .mini-tabs span.active,
 :root[data-theme='default-light'] .quick-row:hover,
 :root[data-theme='default-light'] .manager-row:hover,
 :root[data-theme='default-light'] .fs-file-table tbody tr:hover,
@@ -319,6 +429,13 @@
 :root[data-theme='default-light'] .fs-file-table tbody tr.is-selected:nth-child(even) {
   background: var(--selection-bg);
   color: var(--text-main);
+}
+
+/* Active Tab styling in Light Mode: White background + top indicator strip */
+:root[data-theme='default-light'] .fs-tab.active {
+  background: #ffffff !important;
+  color: var(--text-main) !important;
+  box-shadow: inset 0 3px 0 0 var(--primary) !important;
 }
 
 :root[data-theme='default-light'] .context-menu {

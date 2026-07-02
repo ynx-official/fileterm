@@ -170,7 +170,7 @@ export const TerminalView = memo(function TerminalView({
     blue: readColor('--accent-text', '#c8d0da'),
     brightBlue: readColor('--text-main', '#f1f5f9'),
     selectionBackground: findOpen && findQuery
-      ? readColor('--terminal-search-active-bg', '#ffffff')
+      ? readColor('--terminal-search-active-bg', '#ffd43b')
       : readColor('--terminal-cmd-bg', 'rgba(148, 163, 184, 0.24)'),
     selectionForeground: findOpen && findQuery
       ? readColor('--terminal-search-active-text', '#111111')
@@ -180,9 +180,9 @@ export const TerminalView = memo(function TerminalView({
   const buildSearchDecorations = () => ({
     matchBackground: readColor('--terminal-search-match-bg', '#4b5563'),
     matchOverviewRuler: readColor('--terminal-search-match-ruler', '#9ca3af'),
-    activeMatchBackground: readColor('--terminal-search-active-bg', '#ffffff'),
-    activeMatchBorder: readColor('--terminal-search-active-border', '#ffffff'),
-    activeMatchColorOverviewRuler: readColor('--terminal-search-active-ruler', '#ffffff')
+    activeMatchBackground: readColor('--terminal-search-active-bg', '#ffd43b'),
+    activeMatchBorder: readColor('--terminal-search-active-border', '#8a5a00'),
+    activeMatchColorOverviewRuler: readColor('--terminal-search-active-ruler', '#f0b400')
   })
 
   const applyTerminalTheme = () => {
