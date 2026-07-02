@@ -88,6 +88,12 @@ export function HomeWorkspace({
 
   const desktopApi = window.fileterm
   const isWindows = desktopApi?.platform === 'win32'
+  const homeBrandContent = isWindows ? (
+    <>
+      <strong>{desktopApi?.appName ?? 'FileTerm'}</strong>
+      <span>v{desktopApi?.appVersion ?? '0.0.0'}</span>
+    </>
+  ) : undefined
 
   const handleOpenNewConnection = () => {
     if (desktopApi) {
@@ -104,7 +110,7 @@ export function HomeWorkspace({
   return (
     <section className={`home-workspace ${isSidebarCollapsed ? 'is-sidebar-collapsed' : ''}`}>
       <div className="home-tabs-bar">
-        <TabBar {...tabBarProps} />
+        <TabBar {...tabBarProps} homeBrandContent={homeBrandContent} />
       </div>
 
       {/* SideNavBar Component */}

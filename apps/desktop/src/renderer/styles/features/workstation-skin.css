@@ -98,6 +98,18 @@ textarea:focus-visible,
   grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.titlebar-home-brand {
+  gap: 8px;
+}
+
+.titlebar-home-brand strong {
+  font-size: 14px;
+}
+
+.titlebar-home-brand span {
+  font-size: 11px;
+}
+
 .tabbar-folder-button {
   width: 48px;
 }

@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import type { WorkspaceTab } from '@fileterm/core'
 import { tabStatusClass } from '../../app/app-utils'
 import { t } from '../../i18n'
@@ -16,6 +17,7 @@ export type TabContextTarget =
 export function TabBar({
   activeHomeTabId,
   activeSessionTabId,
+  homeBrandContent,
   isWorkspaceFocusMode,
   onAddHomeTab,
   onActivateHome,
@@ -32,6 +34,7 @@ export function TabBar({
 }: {
   activeHomeTabId: string | null
   activeSessionTabId: string | null
+  homeBrandContent?: ReactNode
   isWorkspaceFocusMode: boolean
   onAddHomeTab(): void
   onActivateHome(id: string): void
@@ -50,13 +53,19 @@ export function TabBar({
 
   return (
       <header className="fs-tabbar">
-        <div className="titlebar-brand">
+        <div className={`titlebar-brand ${homeBrandContent ? 'has-home-brand-content' : ''}`}>
           <div className="window-controls-decorator" aria-hidden="true">
             <span className="dot dot-close" />
             <span className="dot dot-minimize" />
             <span className="dot dot-maximize" />
           </div>
-          <strong>{t.appTitle}</strong>
+          {homeBrandContent ? (
+            <div className="titlebar-home-brand" aria-hidden="true">
+              {homeBrandContent}
+            </div>
+          ) : (
+            <strong>{t.appTitle}</strong>
+          )}
         </div>
         <div className="titlebar-tabarea">
         <div
