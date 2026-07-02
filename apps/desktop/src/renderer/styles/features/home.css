@@ -770,6 +770,10 @@
   grid-template-columns: minmax(0, 1fr) auto !important;
 }
 
-.home-tabs-bar .titlebar-brand strong {
+.home-tabs-bar .titlebar-brand.has-home-brand-content {
+  justify-content: center;
+}
+
+.home-tabs-bar .titlebar-brand:not(.has-home-brand-content) strong {
   display: none;
 }

@@ -3184,10 +3184,6 @@ export function App() {
             <div className="window-menu-items">
               <button type="button" onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect()
-                void desktopApi?.showWindowMenu('app', Math.round(rect.left), Math.round(rect.bottom))
-              }} style={{ fontWeight: 600, color: 'var(--text-main, #ffffff)' }}>FileTerm</button>
-              <button type="button" onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect()
                 void desktopApi?.showWindowMenu('file', Math.round(rect.left), Math.round(rect.bottom))
               }}>File</button>
               <button type="button" onClick={(e) => {
