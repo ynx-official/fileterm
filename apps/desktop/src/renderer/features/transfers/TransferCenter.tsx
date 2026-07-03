@@ -59,15 +59,19 @@ export function TransferCenter({
     previousActiveCountRef.current = activeCount
   }, [activeCount])
 
-  const cancelTransfer = async (transferId: string) => {
+  const runTransferAction = async (
+    scope: string,
+    action: (transferId: string) => Promise<{ transfers: TransferTask[] }>,
+    transferId: string
+  ) => {
     if (!desktopApi) {
       return
     }
     try {
-      const snapshot = await desktopApi.cancelTransfer(transferId)
+      const snapshot = await action(transferId)
       setTransfers(snapshot.transfers)
     } catch (error) {
-      onError('取消传输', error)
+      onError(scope, error)
       throw error
     }
   }
@@ -98,7 +102,15 @@ export function TransferCenter({
       {showTransfers ? (
         <TransferPopover
           transfers={transfers}
-          onCancelTransfer={cancelTransfer}
+          onDiscardTransfer={(transferId) => desktopApi
+            ? runTransferAction('丢弃传输断点', (id) => desktopApi.discardTransfer(id), transferId)
+            : undefined}
+          onPauseTransfer={(transferId) => desktopApi
+            ? runTransferAction('暂停传输', (id) => desktopApi.pauseTransfer(id), transferId)
+            : undefined}
+          onResumeTransfer={(transferId) => desktopApi
+            ? runTransferAction('继续传输', (id) => desktopApi.resumeTransfer(id), transferId)
+            : undefined}
           onClearTransfers={clearTransfers}
           onClose={() => setShowTransfers(false)}
         />

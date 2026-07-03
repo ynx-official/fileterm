@@ -5,22 +5,26 @@ import { formatTransferBytes, isActiveTransfer, isCompletedTransfer, transferSta
 import { t } from '../../i18n'
 
 export function TransferPopover({
-  onCancelTransfer,
   onClearTransfers,
   onClose,
+  onDiscardTransfer,
+  onPauseTransfer,
+  onResumeTransfer,
   transfers
 }: {
-  onCancelTransfer(transferId: string): Promise<void> | void
   onClearTransfers(transferIds: string[]): Promise<void> | void
   onClose(): void
+  onDiscardTransfer(transferId: string): Promise<void> | void
+  onPauseTransfer(transferId: string): Promise<void> | void
+  onResumeTransfer(transferId: string): Promise<void> | void
   transfers: TransferTask[]
 }) {
   const [statusFilter, setStatusFilter] = useState<'running' | 'completed' | 'all'>('running')
   const [directionFilter, setDirectionFilter] = useState<'all' | 'download' | 'upload'>('all')
-  const [pendingCancelIds, setPendingCancelIds] = useState<string[]>([])
+  const [pendingActions, setPendingActions] = useState<Record<string, 'pause' | 'resume' | 'discard'>>({})
   const visibleTransfers: TransferTask[] = []
   for (const transfer of transfers) {
-    if (statusFilter === 'running' && !isActiveTransfer(transfer)) {
+    if (statusFilter === 'running' && isCompletedTransfer(transfer)) {
       continue
     }
     if (statusFilter === 'completed' && !isCompletedTransfer(transfer)) {
@@ -35,12 +39,37 @@ export function TransferPopover({
     }
   }
   const clearableTransferIds = visibleTransfers
-    .filter((transfer) => !isActiveTransfer(transfer))
+    .filter((transfer) => !isActiveTransfer(transfer) && !transfer.resumable && !transfer.cleanupPending)
     .map((transfer) => transfer.id)
 
   useEffect(() => {
-    setPendingCancelIds((prev) => prev.filter((id) => transfers.some((transfer) => transfer.id === id && isActiveTransfer(transfer))))
+    setPendingActions((current) => Object.fromEntries(
+      Object.entries(current).filter(([id, action]) => transfers.some((transfer) => {
+        if (transfer.id !== id) {
+          return false
+        }
+        if (action === 'resume') {
+          return transfer.status === 'paused' || transfer.status === 'interrupted'
+        }
+        return isActiveTransfer(transfer)
+      }))
+    ))
   }, [transfers])
+
+  const runAction = (
+    transferId: string,
+    action: 'pause' | 'resume' | 'discard',
+    handler: (id: string) => Promise<void> | void
+  ) => {
+    setPendingActions((current) => ({ ...current, [transferId]: action }))
+    void Promise.resolve(handler(transferId)).catch(() => {
+      setPendingActions((current) => {
+        const next = { ...current }
+        delete next[transferId]
+        return next
+      })
+    })
+  }
 
   const getTransferSizeText = (transfer: TransferTask) => {
     const transferred = formatTransferBytes(transfer.transferredBytes)
@@ -94,19 +123,51 @@ export function TransferPopover({
             <div className={`transfer-row transfer-${transfer.status}`} key={transfer.id}>
               <div className="transfer-row-head">
                 <strong title={transfer.name}>{transfer.name}</strong>
-                {isActiveTransfer(transfer) ? (
+                {(transfer.status === 'running' || transfer.status === 'queued') && transfer.resumable ? (
                   <button
                     className="transfer-cancel"
-                    disabled={pendingCancelIds.includes(transfer.id)}
-                    onClick={() => {
-                      setPendingCancelIds((prev) => prev.includes(transfer.id) ? prev : [...prev, transfer.id])
-                      void Promise.resolve(onCancelTransfer(transfer.id)).catch(() => {
-                        setPendingCancelIds((prev) => prev.filter((id) => id !== transfer.id))
-                      })
-                    }}
+                    disabled={Boolean(pendingActions[transfer.id])}
+                    onClick={() => runAction(transfer.id, 'pause', onPauseTransfer)}
                     type="button"
                   >
-                    {pendingCancelIds.includes(transfer.id) ? t.stopping : t.stop}
+                    {pendingActions[transfer.id] === 'pause' ? t.pausingTransfer : t.pauseTransfer}
+                  </button>
+                ) : (transfer.status === 'running' || transfer.status === 'queued') ? (
+                  <button
+                    className="transfer-cancel"
+                    disabled={Boolean(pendingActions[transfer.id])}
+                    onClick={() => runAction(transfer.id, 'discard', onDiscardTransfer)}
+                    type="button"
+                  >
+                    {pendingActions[transfer.id] === 'discard' ? t.stopping : t.stop}
+                  </button>
+                ) : transfer.resumable && (transfer.status === 'paused' || transfer.status === 'interrupted' || transfer.status === 'failed') ? (
+                  <span className="transfer-row-actions">
+                    <button
+                      className="transfer-cancel"
+                      disabled={Boolean(pendingActions[transfer.id])}
+                      onClick={() => runAction(transfer.id, 'resume', onResumeTransfer)}
+                      type="button"
+                    >
+                      {pendingActions[transfer.id] === 'resume' ? t.resumingTransfer : t.resumeTransfer}
+                    </button>
+                    <button
+                      className="transfer-cancel"
+                      disabled={Boolean(pendingActions[transfer.id])}
+                      onClick={() => runAction(transfer.id, 'discard', onDiscardTransfer)}
+                      type="button"
+                    >
+                      {pendingActions[transfer.id] === 'discard' ? t.discardingCheckpoint : t.discardCheckpoint}
+                    </button>
+                  </span>
+                ) : transfer.cleanupPending || transfer.status === 'paused' || transfer.status === 'interrupted' || (transfer.status === 'failed' && Boolean(transfer.partialPath)) ? (
+                  <button
+                    className="transfer-cancel"
+                    disabled={Boolean(pendingActions[transfer.id])}
+                    onClick={() => runAction(transfer.id, 'discard', onDiscardTransfer)}
+                    type="button"
+                  >
+                    {pendingActions[transfer.id] === 'discard' ? t.discardingCheckpoint : t.discardCheckpoint}
                   </button>
                 ) : null}
               </div>

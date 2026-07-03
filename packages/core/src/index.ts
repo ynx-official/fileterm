@@ -1,5 +1,7 @@
 export type SessionType = 'ssh' | 'ftp'
 
+export type FtpSecurityMode = 'none' | 'explicit' | 'implicit'
+
 export type TabLayout = 'terminal-file' | 'file-only'
 
 export type TabStatus = 'idle' | 'connecting' | 'connected' | 'error' | 'closed'
@@ -58,6 +60,7 @@ export interface FtpProfile extends BaseProfile {
   note?: string
   password?: string
   secure: boolean
+  securityMode?: FtpSecurityMode
   remotePath: string
 }
 
@@ -86,16 +89,64 @@ export interface LocalFileItem extends RemoteFileItem {
   path: string
 }
 
+export type TransferStatus =
+  | 'queued'
+  | 'running'
+  | 'paused'
+  | 'interrupted'
+  | 'verifying'
+  | 'finalizing'
+  | 'done'
+  | 'failed'
+  | 'canceled'
+
+export interface TransferFileIdentity {
+  size: number
+  modifiedAt?: number
+}
+
+export type TransferManifestEntryStatus = 'pending' | 'running' | 'done'
+
+export interface TransferManifestEntry {
+  relativePath: string
+  sourcePath: string
+  destinationPath: string
+  partialPath: string
+  sourceIdentity: TransferFileIdentity
+  status: TransferManifestEntryStatus
+  transferredBytes: number
+}
+
+export interface TransferManifest {
+  version: 1
+  directories: string[]
+  files: TransferManifestEntry[]
+}
+
 export interface TransferTask {
   id: string
   direction: 'upload' | 'download'
   name: string
   progress: number
-  status: 'queued' | 'running' | 'done' | 'failed' | 'canceled'
+  status: TransferStatus
   message?: string
   speed?: string
   transferredBytes?: number
   totalBytes?: number
+  profileId?: string
+  sessionType?: SessionType
+  fileAccessMode?: 'user' | 'root'
+  targetType?: RemoteFileItem['type']
+  sourcePath?: string
+  destinationPath?: string
+  partialPath?: string
+  sourceIdentity?: TransferFileIdentity
+  manifest?: TransferManifest
+  resumable?: boolean
+  retryAttempt?: number
+  cleanupPending?: boolean
+  createdAt?: number
+  updatedAt?: number
 }
 
 export interface TransferProgress {
@@ -107,6 +158,15 @@ export interface TransferProgress {
 
 export interface TransferTargetOptions {
   targetName?: string
+}
+
+export interface TransferFileOptions {
+  resumeOffset?: number
+}
+
+export interface RemoteFileStat {
+  size: number
+  modifiedAt?: number
 }
 
 export interface PermissionChangeOptions {
@@ -321,6 +381,7 @@ export interface CreateProfileInput {
   authType?: 'password' | 'privateKey' | 'system'
   trustedHostFingerprint?: string
   secure?: boolean
+  securityMode?: FtpSecurityMode
   encoding?: string
   backspaceKey?: string
   deleteKey?: string
@@ -493,6 +554,9 @@ export interface FileTermDesktopApi {
   selectLocalDirectory(defaultPath?: string): Promise<string | null>
   queueUpload(fileNames: string[]): Promise<WorkspaceSnapshot>
   cancelTransfer(transferId: string): Promise<WorkspaceSnapshot>
+  pauseTransfer(transferId: string): Promise<WorkspaceSnapshot>
+  resumeTransfer(transferId: string): Promise<WorkspaceSnapshot>
+  discardTransfer(transferId: string): Promise<WorkspaceSnapshot>
   clearTransfers(transferIds: string[]): Promise<WorkspaceSnapshot>
   uploadFile(tabId: string, localPath: string, remoteDirectory: string, options?: TransferTargetOptions): Promise<WorkspaceSnapshot>
   downloadFile(tabId: string, remotePath: string, localDirectory: string, options?: TransferTargetOptions): Promise<WorkspaceSnapshot>
@@ -555,8 +619,11 @@ export interface FileSessionController extends SessionController {
   changeRemotePermissions(path: string, options: PermissionChangeOptions): Promise<void>
   ensureRemoteDirectory(path: string): Promise<void>
   abortTransfer(): Promise<void>
-  uploadFile(localPath: string, remotePath: string, onProgress: (progress: TransferProgress) => void): Promise<void>
-  downloadFile(remotePath: string, localPath: string, onProgress: (progress: TransferProgress) => void): Promise<void>
+  statRemoteFile(path: string): Promise<RemoteFileStat | null>
+  replaceRemoteFile(partialPath: string, destinationPath: string): Promise<void>
+  removeRemoteFileIfExists(path: string): Promise<void>
+  uploadFile(localPath: string, remotePath: string, onProgress: (progress: TransferProgress) => void, options?: TransferFileOptions): Promise<void>
+  downloadFile(remotePath: string, localPath: string, onProgress: (progress: TransferProgress) => void, options?: TransferFileOptions): Promise<void>
 }
 
 export interface SshSessionController extends ShellSessionController, FileSessionController {

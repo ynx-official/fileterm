@@ -12,6 +12,10 @@ export class WorkspaceTransfersState {
     return [...this.transfers]
   }
 
+  replaceAll(transfers: TransferTask[]) {
+    this.transfers.splice(0, this.transfers.length, ...transfers)
+  }
+
   queueUploads(fileNames: string[]) {
     const queued = fileNames.map((name) => ({
       id: randomUUID(),
@@ -24,7 +28,12 @@ export class WorkspaceTransfersState {
     this.transfers.unshift(...queued)
   }
 
-  add(direction: TransferTask['direction'], name: string) {
+  add(
+    direction: TransferTask['direction'],
+    name: string,
+    details?: Partial<Omit<TransferTask, 'id' | 'direction' | 'name' | 'progress' | 'status'>>
+  ) {
+    const now = Date.now()
     const queuedIndex = this.transfers.findIndex((transfer) => (
       transfer.direction === direction
       && transfer.name === name
@@ -39,7 +48,9 @@ export class WorkspaceTransfersState {
         message: undefined,
         speed: undefined,
         transferredBytes: undefined,
-        totalBytes: undefined
+        totalBytes: undefined,
+        ...details,
+        updatedAt: now
       }
       return queuedTransfer.id
     }
@@ -52,14 +63,17 @@ export class WorkspaceTransfersState {
       progress: 0,
       status: 'running',
       transferredBytes: undefined,
-      totalBytes: undefined
+      totalBytes: undefined,
+      ...details,
+      createdAt: details?.createdAt ?? now,
+      updatedAt: now
     })
     return transferId
   }
 
   update(
     transferId: string,
-    patch: Partial<Pick<TransferTask, 'progress' | 'status' | 'message' | 'speed' | 'transferredBytes' | 'totalBytes'>>
+    patch: Partial<Omit<TransferTask, 'id' | 'direction' | 'name'>>
   ) {
     const index = this.transfers.findIndex((transfer) => transfer.id === transferId)
     if (index === -1) {
@@ -68,30 +82,25 @@ export class WorkspaceTransfersState {
 
     const current = this.transfers[index]
     if (
-      (current.status === 'done' || current.status === 'failed' || current.status === 'canceled')
+      (current.status === 'done' || current.status === 'canceled')
       && patch.status
       && patch.status !== current.status
     ) {
       return false
     }
 
-    const next = {
-      ...current,
-      ...patch
-    }
-
-    if (
-      next.progress === current.progress
-      && next.status === current.status
-      && next.message === current.message
-      && next.speed === current.speed
-      && next.transferredBytes === current.transferredBytes
-      && next.totalBytes === current.totalBytes
-    ) {
+    const hasChanges = Object.entries(patch).some(([key, value]) => (
+      current[key as keyof TransferTask] !== value
+    ))
+    if (!hasChanges) {
       return false
     }
 
-    this.transfers[index] = next
+    this.transfers[index] = {
+      ...current,
+      ...patch,
+      updatedAt: Date.now()
+    }
     return true
   }
 

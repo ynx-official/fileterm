@@ -688,7 +688,8 @@ function toProfile(id: string, input: CreateProfileInput): ConnectionProfile {
         username: input.username,
         note: input.note,
         password: input.password,
-        secure: input.secure ?? false,
+        secure: (input.securityMode ?? (input.secure ? 'explicit' : 'none')) !== 'none',
+        securityMode: input.securityMode ?? (input.secure ? 'explicit' : 'none'),
         group: input.group,
         remotePath: input.remotePath
       }

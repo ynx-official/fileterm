@@ -21,6 +21,8 @@
     "prebuild:main": "node ./scripts/clean-dist-electron.mjs",
     "build:main": "tsc -p tsconfig.node.json",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "test:transfers": "node --test --experimental-strip-types test/transfers/*.test.ts",
+    "test:transfers:protocol": "npm --prefix ../.. run build -w @fileterm/core && npm run build:main && node --test test/protocol/*.test.mjs",
     "clean:release": "node ./scripts/clean-release.mjs",
     "package:mac": "electron-builder --mac --arm64",
     "release:mac": "npm run build && npm run package:mac",

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import type { ConnectionFormMode, CreateProfileInput } from '@fileterm/core'
+import type { ConnectionFormMode, CreateProfileInput, FtpSecurityMode } from '@fileterm/core'
 import { normalizeConnectionHost } from '@fileterm/shared'
 import { t } from '../../i18n'
 import { CloseButton } from '../common/CloseButton'
@@ -117,9 +117,27 @@ export function ConnectionModal({
                   ) : (
                     form.type === 'ftp' ? (
                       <>
-                        <label className="ssh-checkbox span-2">
-                          <input checked={Boolean(form.secure)} type="checkbox" onChange={(event) => setForm((prev) => ({ ...prev, secure: event.target.checked }))} />
-                          <span>{t.useFtps}</span>
+                        <label className="span-2">{t.ftpSecurityMode}:
+                          <select
+                            value={form.securityMode ?? (form.secure ? 'explicit' : 'none')}
+                            onChange={(event) => {
+                              const securityMode = event.target.value as FtpSecurityMode
+                              setForm((prev) => ({
+                                ...prev,
+                                securityMode,
+                                secure: securityMode !== 'none',
+                                port: securityMode === 'implicit' && prev.port === 21
+                                  ? 990
+                                  : securityMode !== 'implicit' && prev.port === 990
+                                    ? 21
+                                    : prev.port
+                              }))
+                            }}
+                          >
+                            <option value="none">{t.ftpSecurityNone}</option>
+                            <option value="explicit">{t.ftpSecurityExplicit}</option>
+                            <option value="implicit">{t.ftpSecurityImplicit}</option>
+                          </select>
                         </label>
                         <div className="span-2 ssh-auth-hint">{t.ftpAuthHint}</div>
                       </>

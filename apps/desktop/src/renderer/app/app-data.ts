@@ -40,7 +40,8 @@ export const defaultForm: CreateProfileInput = {
   backspaceKey: 'ASCII',
   deleteKey: 'VT220',
   enableExecChannel: true,
-  secure: false
+  secure: false,
+  securityMode: 'none'
 }
 
 export function profileToForm(profile: ConnectionProfile): CreateProfileInput {
@@ -64,6 +65,9 @@ export function profileToForm(profile: ConnectionProfile): CreateProfileInput {
     backspaceKey: profile.type === 'ssh' ? profile.backspaceKey ?? 'ASCII' : 'ASCII',
     deleteKey: profile.type === 'ssh' ? profile.deleteKey ?? 'VT220' : 'VT220',
     enableExecChannel: profile.type === 'ssh' ? profile.enableExecChannel ?? true : true,
-    secure: profile.type === 'ftp' ? profile.secure : false
+    secure: profile.type === 'ftp' ? profile.secure : false,
+    securityMode: profile.type === 'ftp'
+      ? profile.securityMode ?? (profile.secure ? 'explicit' : 'none')
+      : 'none'
   }
 }

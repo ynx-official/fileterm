@@ -159,6 +159,12 @@ const api: FileTermDesktopApi = {
     ipcRenderer.invoke('transfer:queueUpload', fileNames),
   cancelTransfer: (transferId: string): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('transfer:cancel', transferId),
+  pauseTransfer: (transferId: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('transfer:pause', transferId),
+  resumeTransfer: (transferId: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('transfer:resume', transferId),
+  discardTransfer: (transferId: string): Promise<WorkspaceSnapshot> =>
+    ipcRenderer.invoke('transfer:discard', transferId),
   clearTransfers: (transferIds: string[]): Promise<WorkspaceSnapshot> =>
     ipcRenderer.invoke('transfer:clear', transferIds),
   uploadFile: (tabId: string, localPath: string, remoteDirectory: string, options?: TransferTargetOptions): Promise<WorkspaceSnapshot> =>

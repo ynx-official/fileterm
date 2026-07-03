@@ -43,7 +43,8 @@ const OWNED_USER_DATA_FILES = [
   'command-history.json',
   'command-send-preferences.json',
   'ui-state.json',
-  'ui-preferences.json'
+  'ui-preferences.json',
+  'transfer-journal.json'
 ] as const
 const DEFAULT_WINDOW_BOUNDS = {
   main: {

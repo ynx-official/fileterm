@@ -13,6 +13,18 @@ export function registerTransferHandlers(services: IpcServices) {
     workspaceService.cancelTransfer(transferId, event.sender)
   )
 
+  ipcMain.handle('transfer:pause', (event, transferId: string) =>
+    workspaceService.pauseTransfer(transferId, event.sender)
+  )
+
+  ipcMain.handle('transfer:resume', (event, transferId: string) =>
+    workspaceService.resumeTransfer(transferId, event.sender)
+  )
+
+  ipcMain.handle('transfer:discard', (event, transferId: string) =>
+    workspaceService.discardTransfer(transferId, event.sender)
+  )
+
   ipcMain.handle('transfer:clear', (_, transferIds: string[]) =>
     workspaceService.clearTransfers(transferIds)
   )

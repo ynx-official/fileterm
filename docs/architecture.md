@@ -422,8 +422,10 @@ interface WorkspaceTab {
   - download
 - `transfer`
   - 查询任务
-  - 取消任务
-  - 重试任务
+  - 暂停任务
+  - 继续任务
+  - 丢弃任务与断点
+  - 清理历史
 
 ### 9.1 高频事件边界
 
@@ -438,6 +440,21 @@ interface WorkspaceTab {
 - 同一 Renderer 的并发完整快照采用单飞和尾随合并，确保最终状态可达，同时避免重复磁盘读取与大对象序列化。
 
 文件编辑器的 Monaco 资源通过动态 import 独立分块，只在文件编辑器窗口需要时加载，主工作区不静态携带编辑器与语言服务代码。
+
+### 9.2 可恢复传输边界
+
+- 单文件和目录 manifest 任务由 main process 持久化到 Electron `userData/transfer-journal.json`；renderer 不直接读写 journal。
+- 上传和下载都先写入 `.fileterm-part` 临时文件，校验大小后再替换正式目标。
+- SFTP 与 FTP/FTPS 分别在 controller 内实现 offset 读写和远端收尾，不把协议命令伪统一到 renderer 或 transfer UI。
+- 传输调度使用 `profileId` 作为跨重启身份，不持久化生命周期短暂的 `tabId`；普通中断任务在对应连接恢复后自动继续，root 任务需要先恢复 root 授权。
+- 高频字节进度仍只走 `transfer:update`，journal 只在任务创建、状态切换和收尾时更新；恢复 offset 以实际临时文件大小为准。
+- 普通断线和暂停保留临时文件；只有显式丢弃才清理断点。
+- 本地最终替换采用可回滚的备份重命名。Windows 文件占用导致替换失败时保留 `.fileterm-part`，避免丢失已传数据。
+- 目录任务持久化逐文件 manifest：已完成文件经过目标大小复核后跳过，当前文件按真实 `.fileterm-part` 长度继续。
+- SFTP root 上传保留 `/tmp` staging，再由 sudo 写入目标同目录断点；普通 SFTP/FTP/FTPS 直接写目标同目录断点。
+- FTP 上传优先使用 `APPE`，服务器不支持时回退 `REST + STOR`；回退结果不安全时删除断点并从零重传，避免拼接出等长但错误的文件。
+- FTP 安全模式明确区分未加密 FTP、显式 FTPS 和隐式 FTPS。
+- SFTP 可恢复路径保持有序流式写入。并行绝对 offset 会让文件长度无法证明前缀连续，因此在没有持久化范围位图前不用于断点判断。
 
 ## 10. UI 结构
 

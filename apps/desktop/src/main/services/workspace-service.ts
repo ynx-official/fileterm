@@ -19,6 +19,8 @@ import {
   type SessionSnapshot,
   type PermissionChangeOptions,
   type TransferProgress,
+  type TransferManifest,
+  type TransferManifestEntry,
   type TransferTargetOptions,
   type TransferTask,
   type WorkspaceSnapshot
@@ -28,13 +30,30 @@ import { seedCommandFolders, seedCommandTemplates, seedProfiles, seedTransfers }
 import { WorkspaceSessionRuntime, type LiveSessionController } from './workspace/workspace-session-runtime.js'
 import { WorkspaceTabsState } from './workspace/workspace-tabs.js'
 import { WorkspaceTransfersState } from './workspace/workspace-transfers.js'
+import { TransferJournal } from './transfers/transfer-journal.js'
+import {
+  localTransferPartialPath,
+  removeLocalFileIfExists,
+  remoteTransferPartialPath,
+  replaceLocalFile,
+  sameTransferIdentity,
+  statLocalFile
+} from './transfers/transfer-file-utils.js'
+import {
+  createTransferManifest,
+  isTransferManifestComplete,
+  transferManifestProgress,
+  updateTransferManifestEntry
+} from './transfers/transfer-manifest.js'
+import { appWarn } from './app-logger.js'
 
 const TRANSFER_UPDATE_INTERVAL_MS = 200
+const TRANSFER_RETRY_DELAYS_MS = [500, 1_000, 2_000] as const
 
 export class WorkspaceService {
   private static readonly DISCONNECTED_TRANSFER_MESSAGES = {
-    zhCN: '连接已断开，传输已终止',
-    enUS: 'Connection closed, transfer terminated'
+    zhCN: '连接已断开，可在重连后继续传输',
+    enUS: 'Connection closed. Reconnect to resume the transfer.'
   } as const
   private readonly profileRepository: ProfileRepository
   private readonly tabs = new WorkspaceTabsState()
@@ -43,6 +62,10 @@ export class WorkspaceService {
   private readonly transferCanceling = new Set<string>()
   private readonly transferTabs = new Map<string, string>()
   private readonly transferUpdateTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly transferStopReasons = new Map<string, 'pause' | 'discard'>()
+  private readonly transferRuns = new Map<string, Promise<WorkspaceSnapshot>>()
+  private readonly transferJournal?: TransferJournal
+  private readonly transferReady: Promise<void>
   private readonly privilegedAccess = new Map<string, RemoteFileAccessOptions>()
   private readonly sessionRuntime = new WorkspaceSessionRuntime({
     getSnapshot: () => this.getSnapshot(),
@@ -61,9 +84,12 @@ export class WorkspaceService {
     profileRepository: ProfileRepository,
     private readonly options?: {
       getLocale?(): 'zhCN' | 'enUS'
+      transferJournal?: TransferJournal
     }
   ) {
     this.profileRepository = profileRepository
+    this.transferJournal = options?.transferJournal
+    this.transferReady = this.restoreTransfers()
   }
 
   async shutdown() {
@@ -72,9 +98,11 @@ export class WorkspaceService {
     }
     this.transferUpdateTimers.clear()
     await this.sessionRuntime.shutdown()
+    await this.transferJournal?.flush()
   }
 
   async getSnapshot(): Promise<WorkspaceSnapshot> {
+    await this.transferReady
     const [profiles, folders, commandFolders, commandTemplates] = await Promise.all([
       this.profileRepository.list(),
       this.profileRepository.listFolders?.() ?? Promise.resolve([]),
@@ -253,7 +281,11 @@ export class WorkspaceService {
     }
 
     this.sessionRuntime.set(tabId, snapshot)
-    void this.sessionRuntime.connect(tabId, controller)
+    void this.sessionRuntime.connect(tabId, controller).then(() => (
+      this.resumeInterruptedTransfersForProfile(profile.id, tabId, sender)
+    )).catch((error) => {
+      appWarn('[FileTerm][Transfer] Automatic resume after connect failed', error)
+    })
     void this.profileRepository.touchProfile(profileId)
 
     return this.getSnapshot()
@@ -272,8 +304,8 @@ export class WorkspaceService {
     }
     this.sessionRuntime.setSender(tabId, reusableSender)
 
-    await this.sessionRuntime.disconnect(tabId)
     await this.finalizeTransfersForTab(tabId, this.getDisconnectedTransferMessage())
+    await this.sessionRuntime.disconnect(tabId)
 
     const profile = await this.profileRepository.getById(tab.profileId)
     if (!profile) {
@@ -318,7 +350,11 @@ export class WorkspaceService {
     this.tabs.updateStatus(tabId, 'connecting')
     this.tabs.activate(tabId)
 
-    void this.sessionRuntime.connect(tabId, controller)
+    void this.sessionRuntime.connect(tabId, controller).then(() => (
+      this.resumeInterruptedTransfersForProfile(profile.id, tabId, reusableSender)
+    )).catch((error) => {
+      appWarn('[FileTerm][Transfer] Automatic resume after reconnect failed', error)
+    })
     await this.sessionRuntime.emitSnapshot(reusableSender)
     return this.getSnapshot()
   }
@@ -332,6 +368,7 @@ export class WorkspaceService {
   }
 
   async closeTab(tabId: string): Promise<WorkspaceSnapshot> {
+    await this.finalizeTransfersForTab(tabId, this.getDisconnectedTransferMessage())
     await this.sessionRuntime.teardown(tabId)
     this.privilegedAccess.delete(tabId)
     this.tabs.remove(tabId)
@@ -345,8 +382,8 @@ export class WorkspaceService {
       throw new Error(`Tab not found: ${tabId}`)
     }
 
-    await this.sessionRuntime.disconnect(tabId)
     await this.finalizeTransfersForTab(tabId, this.getDisconnectedTransferMessage())
+    await this.sessionRuntime.disconnect(tabId)
     this.privilegedAccess.delete(tabId)
     const latest = this.sessionRuntime.get(tabId) ?? current
     const disconnectedTranscript = appendDisconnectedTranscript(latest.terminalTranscript)
@@ -374,11 +411,18 @@ export class WorkspaceService {
   }
 
   async queueUpload(fileNames: string[]): Promise<WorkspaceSnapshot> {
+    await this.transferReady
     this.transfers.queueUploads(fileNames)
+    this.persistTransfers()
     return this.getSnapshot()
   }
 
   async cancelTransfer(transferId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+    return this.discardTransfer(transferId, sender)
+  }
+
+  async pauseTransfer(transferId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+    await this.transferReady
     if (this.transferCanceling.has(transferId)) {
       return this.getSnapshot()
     }
@@ -387,18 +431,24 @@ export class WorkspaceService {
     if (!transfer || (transfer.status !== 'running' && transfer.status !== 'queued')) {
       return this.getSnapshot()
     }
+    if (!transfer.resumable) {
+      return this.discardTransfer(transferId, sender)
+    }
 
     this.transferCanceling.add(transferId)
+    this.transferStopReasons.set(transferId, 'pause')
     const cancel = this.transferCancels.get(transferId)
     this.transferCancels.delete(transferId)
     await this.updateTransfer(transferId, {
-      status: 'canceled',
-      message: '传输已终止',
-      speed: undefined
+      status: 'paused',
+      message: '传输已暂停，可继续',
+      speed: undefined,
+      resumable: Boolean(transfer.resumable)
     }, sender)
 
     try {
       await cancel?.()
+      await this.transferRuns.get(transferId)?.catch(() => undefined)
     } catch {
       // Cancel is best-effort here; the UI state should not bounce back to running.
     } finally {
@@ -408,14 +458,129 @@ export class WorkspaceService {
     return this.getSnapshot()
   }
 
+  async discardTransfer(transferId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+    await this.transferReady
+    const transfer = this.transfers.get(transferId)
+    if (!transfer) {
+      return this.getSnapshot()
+    }
+
+    const isActive = transfer.status === 'running' || transfer.status === 'queued'
+    if (isActive && !this.transferCanceling.has(transferId)) {
+      this.transferCanceling.add(transferId)
+      this.transferStopReasons.set(transferId, 'discard')
+      const cancel = this.transferCancels.get(transferId)
+      this.transferCancels.delete(transferId)
+      await this.updateTransfer(transferId, {
+        status: 'canceled',
+        message: '传输已取消，正在清理断点',
+        speed: undefined,
+        resumable: false
+      }, sender)
+      try {
+        await cancel?.()
+        await this.transferRuns.get(transferId)?.catch(() => undefined)
+      } finally {
+        this.transferCanceling.delete(transferId)
+      }
+    }
+
+    const cleanup = await this.removeTransferPartial(transfer)
+    await this.updateTransfer(transferId, {
+      status: 'canceled',
+      message: cleanup.message,
+      speed: undefined,
+      resumable: false,
+      cleanupPending: cleanup.pending
+    }, sender)
+    this.transferStopReasons.delete(transferId)
+    return this.getSnapshot()
+  }
+
+  async resumeTransfer(transferId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+    await this.transferReady
+    const transfer = this.transfers.get(transferId)
+    if (!transfer?.resumable || !transfer.profileId) {
+      throw new Error('该传输没有可用断点')
+    }
+    if (transfer.status === 'running' || transfer.status === 'queued') {
+      return this.getSnapshot()
+    }
+
+    const tab = this.tabs.list().find((candidate) => (
+      candidate.profileId === transfer.profileId
+      && Boolean(this.sessionRuntime.getController(candidate.id))
+      && this.sessionRuntime.get(candidate.id)?.connected
+    ))
+    if (!tab) {
+      throw new Error('请先打开并连接原传输使用的连接，再继续任务')
+    }
+    const controller = this.sessionRuntime.requireController(tab.id)
+    if (transfer.fileAccessMode === 'root' && controller.getFileAccessMode() !== 'root') {
+      throw new Error('该任务使用 root 文件模式创建，请先切换到 root 文件视角并完成授权')
+    }
+
+    this.transferTabs.set(transferId, tab.id)
+    await this.updateTransfer(transferId, {
+      status: 'running',
+      message: '正在检查断点...',
+      speed: undefined
+    }, sender)
+    return transfer.targetType === 'folder'
+      ? this.startResumableDirectoryTransfer(transferId, tab.id, sender, true)
+      : this.startResumableFileTransfer(transferId, tab.id, sender, true)
+  }
+
+  private async resumeInterruptedTransfersForProfile(
+    profileId: string,
+    tabId: string,
+    sender: WebContents
+  ) {
+    const session = this.sessionRuntime.get(tabId)
+    const controller = this.sessionRuntime.getController(tabId)
+    if (!session?.connected || !controller || sender.isDestroyed()) {
+      return
+    }
+
+    const candidates = this.transfers.list().filter((transfer) => (
+      transfer.profileId === profileId
+      && transfer.status === 'interrupted'
+      && transfer.resumable
+      && (transfer.fileAccessMode !== 'root' || controller.getFileAccessMode() === 'root')
+    ))
+    for (const transfer of candidates) {
+      this.transferTabs.set(transfer.id, tabId)
+      await this.updateTransfer(transfer.id, {
+        status: 'running',
+        message: '连接已恢复，正在自动检查断点...',
+        speed: undefined
+      }, sender)
+      try {
+        if (transfer.targetType === 'folder') {
+          await this.startResumableDirectoryTransfer(transfer.id, tabId, sender, true)
+        } else {
+          await this.startResumableFileTransfer(transfer.id, tabId, sender, true)
+        }
+      } catch (error) {
+        appWarn(`[FileTerm][Transfer] Automatic resume failed for ${transfer.id}`, error)
+      }
+    }
+  }
+
   async clearTransfers(transferIds: string[]): Promise<WorkspaceSnapshot> {
+    await this.transferReady
     if (!transferIds.length) {
       return this.getSnapshot()
     }
 
     const removableIds = transferIds.filter((transferId) => {
       const transfer = this.transfers.get(transferId)
-      return Boolean(transfer && transfer.status !== 'running' && transfer.status !== 'queued')
+      return Boolean(
+        transfer
+        && (transfer.status === 'done' || transfer.status === 'failed' || transfer.status === 'canceled')
+        && !transfer.resumable
+        && !transfer.cleanupPending
+      )
     })
 
     if (!removableIds.length) {
@@ -428,7 +593,9 @@ export class WorkspaceService {
       this.transferTabs.delete(transferId)
       this.transferCancels.delete(transferId)
       this.transferCanceling.delete(transferId)
+      this.transferStopReasons.delete(transferId)
     })
+    this.persistTransfers()
 
     return this.getSnapshot()
   }
@@ -440,65 +607,74 @@ export class WorkspaceService {
     sender: WebContents,
     options?: TransferTargetOptions
   ): Promise<WorkspaceSnapshot> {
+    await this.transferReady
     const controllerForCancel = this.sessionRuntime.requireController(tabId)
-    const transferId = this.addTransfer('upload', path.basename(localPath), tabId, sender)
     const targetRemotePath = path.posix.join(remoteDirectory, options?.targetName ?? path.basename(localPath))
-    const transferState = { canceled: false }
-    const transferTracker = createTransferSpeedTracker()
-    this.setTransferCancel(transferId, async () => {
-      transferState.canceled = true
-      await controllerForCancel.abortTransfer()
-    })
-
-    try {
-      await this.uploadLocalEntry(controllerForCancel, localPath, remoteDirectory, transferState, (progress) => {
-        if (transferState.canceled) {
-          return
-        }
-        void this.updateTransfer(transferId, {
-          progress: progress.percent,
-          status: 'running',
-          speed: transferTracker(progress),
-          message: progress.message ?? targetRemotePath,
-          transferredBytes: progress.transferredBytes,
-          totalBytes: progress.totalBytes
-        }, sender, 'throttled')
-      }, options?.targetName)
-      if (transferState.canceled) {
-        return this.getSnapshot()
+    const localInfo = await stat(localPath)
+    if (localInfo.isFile()) {
+      const tab = this.tabs.getById(tabId)
+      if (!tab) {
+        throw new Error(`Tab not found: ${tabId}`)
       }
-      await this.updateTransfer(transferId, {
-        progress: 100,
-        status: 'done',
-        speed: undefined,
-        message: undefined
-      }, sender)
-      await this.sessionRuntime.runRemoteFileOperation(tabId, async (controller, current) => {
-        const remoteFiles = await controller.listRemoteFiles()
-        const latest = this.sessionRuntime.get(tabId) ?? current
-        this.sessionRuntime.set(tabId, {
-          ...latest,
-          remotePath: controller.getRemotePath(),
-          fileAccessMode: controller.getFileAccessMode(),
-          hasReusableSudoAuth: controller.type === 'ssh' ? controller.hasReusableSudoAuth() : false,
-          remoteFiles
-        })
+      this.assertNoConflictingTransfer(tab.profileId, 'upload', targetRemotePath)
+      const transferId = this.addTransfer('upload', path.basename(localPath), tabId, sender, {
+        profileId: tab.profileId,
+        sessionType: controllerForCancel.type,
+        fileAccessMode: controllerForCancel.getFileAccessMode(),
+        targetType: 'file',
+        sourcePath: localPath,
+        destinationPath: targetRemotePath,
+        partialPath: remoteTransferPartialPath(targetRemotePath),
+        sourceIdentity: {
+          size: localInfo.size,
+          modifiedAt: localInfo.mtimeMs
+        },
+        totalBytes: localInfo.size,
+        resumable: true
       })
-    } catch (error) {
-      if (transferState.canceled) {
-        return this.getSnapshot()
-      }
-      await this.updateTransfer(transferId, {
-        status: 'failed',
-        message: error instanceof Error ? error.message : '上传失败',
-        speed: undefined
-      }, sender)
-      throw error
-    } finally {
-      this.transferCancels.delete(transferId)
+      return this.startResumableFileTransfer(transferId, tabId, sender, false)
     }
 
-    return this.getSnapshot()
+    const tab = this.tabs.getById(tabId)
+    if (!tab) {
+      throw new Error(`Tab not found: ${tabId}`)
+    }
+    const entries = await this.collectLocalUploadEntries(localPath)
+    const remoteRoot = targetRemotePath
+    const manifest = createTransferManifest(
+      [remoteRoot, ...entries.directories.map((directory) => (
+        path.posix.join(remoteRoot, ...directory.split(path.sep))
+      ))],
+      entries.files.map((file) => {
+        const relativePath = file.relativePath.split(path.sep).join('/')
+        const destinationPath = path.posix.join(remoteRoot, ...relativePath.split('/'))
+        return {
+          relativePath,
+          sourcePath: file.fullPath,
+          destinationPath,
+          partialPath: remoteTransferPartialPath(destinationPath),
+          sourceIdentity: {
+            size: file.size,
+            modifiedAt: file.modifiedAt
+          }
+        }
+      })
+    )
+    const totals = transferManifestProgress(manifest)
+    this.assertNoConflictingTransfer(tab.profileId, 'upload', remoteRoot)
+    const transferId = this.addTransfer('upload', path.basename(localPath), tabId, sender, {
+      profileId: tab.profileId,
+      sessionType: controllerForCancel.type,
+      fileAccessMode: controllerForCancel.getFileAccessMode(),
+      targetType: 'folder',
+      sourcePath: localPath,
+      destinationPath: remoteRoot,
+      manifest,
+      transferredBytes: totals.transferredBytes,
+      totalBytes: totals.totalBytes,
+      resumable: true
+    })
+    return this.startResumableDirectoryTransfer(transferId, tabId, sender, false)
   }
 
   async downloadFile(
@@ -508,55 +684,31 @@ export class WorkspaceService {
     sender: WebContents,
     options?: TransferTargetOptions
   ): Promise<WorkspaceSnapshot> {
-    const controllerForCancel = this.sessionRuntime.requireController(tabId)
-    const localPath = path.join(localDirectory, options?.targetName ?? path.posix.basename(remotePath))
-    const transferId = this.addTransfer('download', path.posix.basename(remotePath), tabId, sender)
-    const transferState = { canceled: false }
-    const transferTracker = createTransferSpeedTracker()
-    this.setTransferCancel(transferId, async () => {
-      transferState.canceled = true
-      await controllerForCancel.abortTransfer()
-    })
-
-    try {
-      this.ensureTransferActive(transferState)
-      await controllerForCancel.downloadFile(remotePath, localPath, (progress) => {
-        if (transferState.canceled) {
-          return
-        }
-        void this.updateTransfer(transferId, {
-          progress: progress.percent,
-          status: 'running',
-          speed: transferTracker(progress),
-          message: progress.message ?? localPath,
-          transferredBytes: progress.transferredBytes,
-          totalBytes: progress.totalBytes
-        }, sender, 'throttled')
-      })
-      if (transferState.canceled) {
-        return this.getSnapshot()
-      }
-      await this.updateTransfer(transferId, {
-        progress: 100,
-        status: 'done',
-        speed: undefined,
-        message: undefined
-      }, sender)
-    } catch (error) {
-      if (transferState.canceled) {
-        return this.getSnapshot()
-      }
-      await this.updateTransfer(transferId, {
-        status: 'failed',
-        message: error instanceof Error ? error.message : '下载失败',
-        speed: undefined
-      }, sender)
-      throw error
-    } finally {
-      this.transferCancels.delete(transferId)
+    await this.transferReady
+    const controller = this.sessionRuntime.requireController(tabId)
+    const tab = this.tabs.getById(tabId)
+    if (!tab) {
+      throw new Error(`Tab not found: ${tabId}`)
     }
-
-    return this.getSnapshot()
+    const localPath = path.join(localDirectory, options?.targetName ?? path.posix.basename(remotePath))
+    const remoteInfo = await controller.statRemoteFile(remotePath)
+    if (!remoteInfo) {
+      throw new Error(`远端文件不存在或无法读取：${remotePath}`)
+    }
+    this.assertNoConflictingTransfer(tab.profileId, 'download', localPath)
+    const transferId = this.addTransfer('download', path.posix.basename(remotePath), tabId, sender, {
+      profileId: tab.profileId,
+      sessionType: controller.type,
+      fileAccessMode: controller.getFileAccessMode(),
+      targetType: 'file',
+      sourcePath: remotePath,
+      destinationPath: localPath,
+      partialPath: localTransferPartialPath(localPath),
+      sourceIdentity: remoteInfo,
+      totalBytes: remoteInfo.size,
+      resumable: true
+    })
+    return this.startResumableFileTransfer(transferId, tabId, sender, false)
   }
 
   async downloadRemotePath(
@@ -567,103 +719,56 @@ export class WorkspaceService {
     sender: WebContents,
     options?: TransferTargetOptions
   ): Promise<WorkspaceSnapshot> {
+    await this.transferReady
     if (targetType === 'file') {
       return this.downloadFile(tabId, remotePath, localDirectory, sender, options)
     }
 
     const controllerForCancel = this.sessionRuntime.requireController(tabId)
+    const tab = this.tabs.getById(tabId)
+    if (!tab) {
+      throw new Error(`Tab not found: ${tabId}`)
+    }
     const transferName = options?.targetName ?? (path.posix.basename(remotePath) || 'folder')
     const localRootPath = path.join(localDirectory, transferName)
-    const transferId = this.addTransfer('download', transferName, tabId, sender)
     const transferState = { canceled: false }
-    this.setTransferCancel(transferId, async () => {
-      transferState.canceled = true
-      await controllerForCancel.abortTransfer()
-    })
-
-    try {
-      await this.sessionRuntime.runRemoteFileOperation(tabId, async (controller) => {
-        const { directories, files } = await this.collectRemoteDownloadEntries(controller, remotePath, transferState)
-        await mkdir(localRootPath, { recursive: true })
-
-        for (const directory of directories) {
-          this.ensureTransferActive(transferState)
-          await mkdir(path.join(localRootPath, ...directory.split('/')), { recursive: true })
+    const previousRemotePath = controllerForCancel.getRemotePath()
+    const entries = await this.collectRemoteDownloadEntries(controllerForCancel, remotePath, transferState)
+      .finally(async () => {
+        if (controllerForCancel.getRemotePath() !== previousRemotePath) {
+          await controllerForCancel.openRemotePath(previousRemotePath).catch(() => undefined)
         }
-
-        if (!files.length) {
-          await this.updateTransfer(transferId, {
-            progress: 100,
-            status: 'done',
-            speed: undefined,
-            message: undefined
-          }, sender)
-          return
-        }
-
-        let completedFiles = 0
-        const totalFiles = files.length
-
-        for (const file of files) {
-          this.ensureTransferActive(transferState)
-          const localFilePath = path.join(localRootPath, ...file.relativePath.split('/'))
-          await mkdir(path.dirname(localFilePath), { recursive: true })
-          await controller.downloadFile(file.remotePath, localFilePath, (progress) => {
-            if (transferState.canceled) {
-              return
-            }
-
-            const currentFraction = Math.max(0, Math.min(1, progress.percent / 100))
-            const overallPercent = Math.max(
-              1,
-              Math.min(99, Math.round(((completedFiles + currentFraction) / totalFiles) * 100))
-            )
-
-            void this.updateTransfer(transferId, {
-              progress: overallPercent,
-              status: 'running',
-              speed: undefined,
-              message: localFilePath,
-              transferredBytes: progress.transferredBytes,
-              totalBytes: progress.totalBytes
-            }, sender, 'throttled')
-          })
-
-          completedFiles += 1
-          await this.updateTransfer(transferId, {
-            progress: Math.max(1, Math.min(99, Math.round((completedFiles / totalFiles) * 100))),
-            status: 'running',
-            speed: undefined,
-            message: localFilePath
-          }, sender, 'throttled')
-        }
-
-        if (transferState.canceled) {
-          return
-        }
-
-        await this.updateTransfer(transferId, {
-          progress: 100,
-          status: 'done',
-          speed: undefined,
-          message: undefined
-        }, sender)
       })
-    } catch (error) {
-      if (transferState.canceled) {
-        return this.getSnapshot()
-      }
-      await this.updateTransfer(transferId, {
-        status: 'failed',
-        message: error instanceof Error ? error.message : '下载失败',
-        speed: undefined
-      }, sender)
-      throw error
-    } finally {
-      this.transferCancels.delete(transferId)
-    }
-
-    return this.getSnapshot()
+    const manifest = createTransferManifest(
+      [localRootPath, ...entries.directories.map((directory) => (
+        path.join(localRootPath, ...directory.split('/'))
+      ))],
+      entries.files.map((file) => {
+        const destinationPath = path.join(localRootPath, ...file.relativePath.split('/'))
+        return {
+          relativePath: file.relativePath,
+          sourcePath: file.remotePath,
+          destinationPath,
+          partialPath: localTransferPartialPath(destinationPath),
+          sourceIdentity: file.sourceIdentity
+        }
+      })
+    )
+    const totals = transferManifestProgress(manifest)
+    this.assertNoConflictingTransfer(tab.profileId, 'download', localRootPath)
+    const transferId = this.addTransfer('download', transferName, tabId, sender, {
+      profileId: tab.profileId,
+      sessionType: controllerForCancel.type,
+      fileAccessMode: controllerForCancel.getFileAccessMode(),
+      targetType: 'folder',
+      sourcePath: remotePath,
+      destinationPath: localRootPath,
+      manifest,
+      transferredBytes: totals.transferredBytes,
+      totalBytes: totals.totalBytes,
+      resumable: true
+    })
+    return this.startResumableDirectoryTransfer(transferId, tabId, sender, false)
   }
 
   async readRemoteFile(tabId: string, targetPath: string, encoding?: string): Promise<string> {
@@ -786,71 +891,13 @@ export class WorkspaceService {
     }
   }
 
-  private async uploadLocalEntry(
-    controller: ReturnType<WorkspaceService['createController']>,
-    localPath: string,
-    remoteDirectory: string,
-    transferState: { canceled: boolean },
-    onProgress: (progress: TransferProgress) => void,
-    targetName?: string
-  ) {
-    this.ensureTransferActive(transferState)
-    const info = await stat(localPath)
-    if (!info.isDirectory()) {
-      const remotePath = path.posix.join(remoteDirectory, targetName ?? path.basename(localPath))
-      await controller.uploadFile(localPath, remotePath, onProgress)
-      return
-    }
-
-    const { directories, files } = await this.collectLocalUploadEntries(localPath)
-    const remoteRoot = path.posix.join(remoteDirectory, targetName ?? path.basename(localPath))
-    const totalBytes = Math.max(files.reduce((sum, file) => sum + Math.max(file.size, 1), 0), 1)
-    onProgress({ percent: 1, transferredBytes: 0, totalBytes })
-    this.ensureTransferActive(transferState)
-    await controller.ensureRemoteDirectory(remoteRoot)
-
-    if (directories.length) {
-      onProgress({ percent: 3, transferredBytes: 0, totalBytes })
-    }
-    for (const directory of directories) {
-      this.ensureTransferActive(transferState)
-      await controller.ensureRemoteDirectory(path.posix.join(remoteRoot, ...directory.split(path.sep)))
-    }
-
-    if (!files.length) {
-      onProgress({ percent: 100, transferredBytes: totalBytes, totalBytes })
-      return
-    }
-
-    let uploadedBytes = 0
-
-    for (const file of files) {
-      this.ensureTransferActive(transferState)
-      const remotePath = path.posix.join(remoteRoot, ...file.relativePath.split(path.sep))
-      await controller.uploadFile(file.fullPath, remotePath, (fileProgress) => {
-        const fileBytes = Math.max(file.size, 1)
-        const completedBytes = uploadedBytes + Math.min(fileBytes, fileProgress.transferredBytes ?? Math.round((fileProgress.percent / 100) * fileBytes))
-        onProgress({
-          percent: Math.max(5, Math.min(99, Math.round((completedBytes / totalBytes) * 100))),
-          transferredBytes: completedBytes,
-          totalBytes
-        })
-      })
-      uploadedBytes += Math.max(file.size, 1)
-      onProgress({
-        percent: Math.max(5, Math.min(99, Math.round((uploadedBytes / totalBytes) * 100))),
-        transferredBytes: uploadedBytes,
-        totalBytes
-      })
-    }
-  }
-
   private async collectLocalUploadEntries(rootPath: string, currentPath = rootPath): Promise<{
     directories: string[]
     files: Array<{
       fullPath: string
       relativePath: string
       size: number
+      modifiedAt: number
     }>
   }> {
     let entries
@@ -863,7 +910,7 @@ export class WorkspaceService {
       throw error
     }
     const directories: string[] = []
-    const files: Array<{ fullPath: string; relativePath: string; size: number }> = []
+    const files: Array<{ fullPath: string; relativePath: string; size: number; modifiedAt: number }> = []
 
     for (const entry of entries) {
       const fullPath = path.join(currentPath, entry.name)
@@ -892,11 +939,591 @@ export class WorkspaceService {
       files.push({
         fullPath,
         relativePath: path.relative(rootPath, fullPath),
-        size: info.size
+        size: info.size,
+        modifiedAt: info.mtimeMs
       })
     }
 
     return { directories, files }
+  }
+
+  private startResumableFileTransfer(
+    transferId: string,
+    tabId: string,
+    sender: WebContents,
+    resume: boolean
+  ) {
+    const existing = this.transferRuns.get(transferId)
+    if (existing) {
+      return existing
+    }
+    const run = this.executeResumableFileTransfer(transferId, tabId, sender, resume)
+    this.transferRuns.set(transferId, run)
+    run.then(
+      () => {
+        if (this.transferRuns.get(transferId) === run) {
+          this.transferRuns.delete(transferId)
+        }
+      },
+      () => {
+        if (this.transferRuns.get(transferId) === run) {
+          this.transferRuns.delete(transferId)
+        }
+      }
+    )
+    return run
+  }
+
+  private startResumableDirectoryTransfer(
+    transferId: string,
+    tabId: string,
+    sender: WebContents,
+    resume: boolean
+  ) {
+    const existing = this.transferRuns.get(transferId)
+    if (existing) {
+      return existing
+    }
+    const run = this.executeResumableDirectoryTransfer(transferId, tabId, sender, resume)
+    this.transferRuns.set(transferId, run)
+    run.then(
+      () => {
+        if (this.transferRuns.get(transferId) === run) {
+          this.transferRuns.delete(transferId)
+        }
+      },
+      () => {
+        if (this.transferRuns.get(transferId) === run) {
+          this.transferRuns.delete(transferId)
+        }
+      }
+    )
+    return run
+  }
+
+  private async executeResumableDirectoryTransfer(
+    transferId: string,
+    tabId: string,
+    sender: WebContents,
+    resume: boolean
+  ): Promise<WorkspaceSnapshot> {
+    const task = this.transfers.get(transferId)
+    const controller = this.sessionRuntime.requireController(tabId)
+    if (
+      !task
+      || task.targetType !== 'folder'
+      || !task.sourcePath
+      || !task.destinationPath
+      || !task.manifest
+    ) {
+      throw new Error('目录传输任务缺少恢复所需的 manifest')
+    }
+
+    const transferState = { canceled: false }
+    const transferTracker = createTransferSpeedTracker()
+    let manifest = task.manifest
+    this.setTransferCancel(transferId, async () => {
+      transferState.canceled = true
+      await controller.abortTransfer()
+    })
+
+    try {
+      for (const directory of manifest.directories) {
+        this.ensureTransferActive(transferState)
+        if (task.direction === 'upload') {
+          await controller.ensureRemoteDirectory(directory)
+        } else {
+          await mkdir(directory, { recursive: true })
+        }
+      }
+
+      if (!resume) {
+        for (const entry of manifest.files) {
+          this.ensureTransferActive(transferState)
+          if (task.direction === 'upload') {
+            await controller.removeRemoteFileIfExists(entry.partialPath)
+          } else {
+            await removeLocalFileIfExists(entry.partialPath)
+          }
+        }
+      }
+
+      for (const originalEntry of manifest.files) {
+        this.ensureTransferActive(transferState)
+        const currentEntry = manifest.files.find((entry) => entry.relativePath === originalEntry.relativePath)
+        if (!currentEntry) {
+          throw new Error(`目录传输 manifest 损坏：${originalEntry.relativePath}`)
+        }
+
+        const sourceIdentity = task.direction === 'upload'
+          ? await statLocalFile(currentEntry.sourcePath)
+          : await controller.statRemoteFile(currentEntry.sourcePath)
+        if (!sourceIdentity || !sameTransferIdentity(sourceIdentity, currentEntry.sourceIdentity)) {
+          throw new Error(`源文件已发生变化，不能继续目录断点：${currentEntry.relativePath}`)
+        }
+
+        if (currentEntry.status === 'done') {
+          const destinationIdentity = task.direction === 'upload'
+            ? await controller.statRemoteFile(currentEntry.destinationPath)
+            : await statLocalFile(currentEntry.destinationPath)
+          if (destinationIdentity?.size === sourceIdentity.size) {
+            continue
+          }
+        }
+
+        manifest = updateTransferManifestEntry(manifest, currentEntry.relativePath, {
+          status: 'running',
+          transferredBytes: 0
+        })
+        await this.updateDirectoryTransferProgress(
+          transferId,
+          manifest,
+          sender,
+          currentEntry.relativePath,
+          transferTracker,
+          'immediate'
+        )
+
+        await this.executeManifestEntryWithRetry(
+          transferId,
+          task.direction,
+          currentEntry,
+          controller,
+          transferState,
+          sender,
+          (progress) => {
+            const completedBefore = transferManifestProgress(manifest).transferredBytes
+            const transferredBytes = completedBefore + Math.max(0, progress.transferredBytes ?? 0)
+            const totalBytes = transferManifestProgress(manifest).totalBytes
+            void this.updateTransfer(transferId, {
+              progress: directoryProgressPercent(manifest, currentEntry.relativePath, progress.transferredBytes ?? 0),
+              status: 'running',
+              speed: transferTracker({ ...progress, transferredBytes }),
+              message: currentEntry.relativePath,
+              transferredBytes: Math.min(totalBytes, transferredBytes),
+              totalBytes,
+              retryAttempt: undefined
+            }, sender, 'throttled')
+          }
+        )
+        this.ensureTransferActive(transferState)
+
+        manifest = updateTransferManifestEntry(manifest, currentEntry.relativePath, {
+          status: 'done',
+          transferredBytes: sourceIdentity.size
+        })
+        await this.updateDirectoryTransferProgress(
+          transferId,
+          manifest,
+          sender,
+          currentEntry.relativePath,
+          transferTracker,
+          'immediate'
+        )
+      }
+
+      if (!isTransferManifestComplete(manifest)) {
+        throw new Error('目录传输未完成，manifest 中仍有待传文件')
+      }
+      const totals = transferManifestProgress(manifest)
+      await this.updateTransfer(transferId, {
+        progress: 100,
+        status: 'done',
+        speed: undefined,
+        message: undefined,
+        transferredBytes: totals.totalBytes,
+        totalBytes: totals.totalBytes,
+        manifest,
+        resumable: false,
+        retryAttempt: undefined
+      }, sender)
+
+      if (task.direction === 'upload') {
+        await this.refreshRemoteFiles(tabId).catch((error) => {
+          appWarn('[FileTerm][Transfer] Directory upload completed but remote listing refresh failed', error)
+        })
+      }
+    } catch (error) {
+      if (transferState.canceled || this.transferStopReasons.has(transferId)) {
+        return this.getSnapshot()
+      }
+
+      const runningEntry = manifest.files.find((entry) => entry.status === 'running')
+      if (runningEntry) {
+        const partialIdentity = await (task.direction === 'upload'
+          ? controller.statRemoteFile(runningEntry.partialPath)
+          : statLocalFile(runningEntry.partialPath)).catch(() => null)
+        manifest = updateTransferManifestEntry(manifest, runningEntry.relativePath, {
+          status: 'pending',
+          transferredBytes: Math.min(
+            runningEntry.sourceIdentity.size,
+            partialIdentity?.size ?? 0
+          )
+        })
+      }
+      const totals = transferManifestProgress(manifest)
+      await this.updateTransfer(transferId, {
+        progress: totals.percent,
+        status: 'interrupted',
+        message: error instanceof Error ? error.message : '目录传输失败',
+        speed: undefined,
+        transferredBytes: totals.transferredBytes,
+        totalBytes: totals.totalBytes,
+        manifest,
+        resumable: true,
+        retryAttempt: undefined
+      }, sender)
+      throw error
+    } finally {
+      this.transferCancels.delete(transferId)
+      this.transferStopReasons.delete(transferId)
+      this.persistTransfers()
+    }
+
+    return this.getSnapshot()
+  }
+
+  private async executeManifestEntryWithRetry(
+    transferId: string,
+    direction: TransferTask['direction'],
+    entry: TransferManifestEntry,
+    controller: LiveSessionController,
+    transferState: { canceled: boolean },
+    sender: WebContents,
+    onProgress: (progress: TransferProgress) => void
+  ) {
+    let retryAttempt = 0
+    while (true) {
+      this.ensureTransferActive(transferState)
+      try {
+        const partialIdentity = direction === 'upload'
+          ? await controller.statRemoteFile(entry.partialPath)
+          : await statLocalFile(entry.partialPath)
+        const resumeOffset = partialIdentity?.size ?? 0
+        if (resumeOffset > entry.sourceIdentity.size) {
+          throw new Error(`断点文件大于源文件：${entry.relativePath}`)
+        }
+
+        if (resumeOffset < entry.sourceIdentity.size || (entry.sourceIdentity.size === 0 && !partialIdentity)) {
+          if (direction === 'upload') {
+            await controller.uploadFile(entry.sourcePath, entry.partialPath, onProgress, { resumeOffset })
+          } else {
+            await mkdir(path.dirname(entry.partialPath), { recursive: true })
+            await controller.downloadFile(entry.sourcePath, entry.partialPath, onProgress, { resumeOffset })
+          }
+        }
+
+        const completedPartial = direction === 'upload'
+          ? await controller.statRemoteFile(entry.partialPath)
+          : await statLocalFile(entry.partialPath)
+        if (!completedPartial || completedPartial.size !== entry.sourceIdentity.size) {
+          throw new Error(
+            `传输校验失败：${entry.relativePath} 断点大小为 ${completedPartial?.size ?? 0}，期望 ${entry.sourceIdentity.size}`
+          )
+        }
+        if (direction === 'upload') {
+          await controller.replaceRemoteFile(entry.partialPath, entry.destinationPath)
+        } else {
+          await replaceLocalFile(entry.partialPath, entry.destinationPath)
+        }
+        return
+      } catch (error) {
+        if (
+          transferState.canceled
+          || this.transferStopReasons.has(transferId)
+          || !isRetryableTransferError(error)
+          || retryAttempt >= TRANSFER_RETRY_DELAYS_MS.length
+        ) {
+          throw error
+        }
+        const delayMs = TRANSFER_RETRY_DELAYS_MS[retryAttempt]
+        retryAttempt += 1
+        await this.updateTransfer(transferId, {
+          status: 'running',
+          message: `连接波动，${delayMs / 1000} 秒后重试 ${entry.relativePath}（${retryAttempt}/${TRANSFER_RETRY_DELAYS_MS.length}）`,
+          speed: undefined,
+          retryAttempt
+        }, sender)
+        await waitForRetry(delayMs)
+      }
+    }
+  }
+
+  private updateDirectoryTransferProgress(
+    transferId: string,
+    manifest: TransferManifest,
+    sender: WebContents,
+    message: string,
+    transferTracker: ReturnType<typeof createTransferSpeedTracker>,
+    emitMode: 'immediate' | 'throttled'
+  ) {
+    const totals = transferManifestProgress(manifest)
+    return this.updateTransfer(transferId, {
+      progress: totals.percent,
+      status: 'running',
+      speed: transferTracker(totals),
+      message,
+      transferredBytes: totals.transferredBytes,
+      totalBytes: totals.totalBytes,
+      manifest,
+      resumable: true,
+      retryAttempt: undefined
+    }, sender, emitMode)
+  }
+
+  private async transferSingleFileWithRetry(
+    transferId: string,
+    direction: TransferTask['direction'],
+    sourcePath: string,
+    partialPath: string,
+    sourceSize: number,
+    controller: LiveSessionController,
+    transferState: { canceled: boolean },
+    sender: WebContents,
+    onProgress: (progress: TransferProgress) => void
+  ) {
+    let retryAttempt = 0
+    while (true) {
+      this.ensureTransferActive(transferState)
+      const partialIdentity = direction === 'upload'
+        ? await controller.statRemoteFile(partialPath)
+        : await statLocalFile(partialPath)
+      const resumeOffset = partialIdentity?.size ?? 0
+      if (resumeOffset > sourceSize) {
+        throw new Error('断点文件大于源文件，不能继续；请丢弃断点后重新传输')
+      }
+      if (resumeOffset === sourceSize && (sourceSize > 0 || partialIdentity)) {
+        return
+      }
+
+      try {
+        if (direction === 'upload') {
+          await controller.uploadFile(sourcePath, partialPath, onProgress, { resumeOffset })
+        } else {
+          await controller.downloadFile(sourcePath, partialPath, onProgress, { resumeOffset })
+        }
+        return
+      } catch (error) {
+        if (
+          transferState.canceled
+          || this.transferStopReasons.has(transferId)
+          || !isRetryableTransferError(error)
+          || retryAttempt >= TRANSFER_RETRY_DELAYS_MS.length
+        ) {
+          throw error
+        }
+        const delayMs = TRANSFER_RETRY_DELAYS_MS[retryAttempt]
+        retryAttempt += 1
+        await this.updateTransfer(transferId, {
+          status: 'running',
+          message: `连接波动，${delayMs / 1000} 秒后自动续传（${retryAttempt}/${TRANSFER_RETRY_DELAYS_MS.length}）`,
+          speed: undefined,
+          retryAttempt
+        }, sender)
+        await waitForRetry(delayMs)
+      }
+    }
+  }
+
+  private async executeResumableFileTransfer(
+    transferId: string,
+    tabId: string,
+    sender: WebContents,
+    resume: boolean
+  ): Promise<WorkspaceSnapshot> {
+    const task = this.transfers.get(transferId)
+    const controller = this.sessionRuntime.requireController(tabId)
+    if (
+      !task
+      || task.targetType !== 'file'
+      || !task.sourcePath
+      || !task.destinationPath
+      || !task.partialPath
+    ) {
+      throw new Error('传输任务缺少恢复所需的文件信息')
+    }
+
+    const transferState = { canceled: false }
+    const transferTracker = createTransferSpeedTracker()
+    let currentSourceIdentity = task.sourceIdentity
+    this.setTransferCancel(transferId, async () => {
+      transferState.canceled = true
+      await controller.abortTransfer()
+    })
+
+    try {
+      const sourceIdentity = task.direction === 'upload'
+        ? await statLocalFile(task.sourcePath)
+        : await controller.statRemoteFile(task.sourcePath)
+      if (!sourceIdentity) {
+        throw new Error('传输源文件不存在或无法读取')
+      }
+      currentSourceIdentity = sourceIdentity
+      if (resume && !sameTransferIdentity(sourceIdentity, task.sourceIdentity)) {
+        throw new Error('源文件已发生变化，不能继续旧断点；请丢弃后重新传输')
+      }
+
+      if (!resume) {
+        if (task.direction === 'upload') {
+          await controller.removeRemoteFileIfExists(task.partialPath)
+        } else {
+          await removeLocalFileIfExists(task.partialPath)
+        }
+      }
+
+      const partialIdentity = resume
+        ? task.direction === 'upload'
+          ? await controller.statRemoteFile(task.partialPath)
+          : await statLocalFile(task.partialPath)
+        : null
+
+      if (
+        resume
+        && !partialIdentity
+        && task.progress >= 99
+        && task.transferredBytes === sourceIdentity.size
+      ) {
+        const destinationIdentity = task.direction === 'upload'
+          ? await controller.statRemoteFile(task.destinationPath)
+          : await statLocalFile(task.destinationPath)
+        if (destinationIdentity?.size === sourceIdentity.size) {
+          await this.updateTransfer(transferId, {
+            progress: 100,
+            status: 'done',
+            speed: undefined,
+            message: undefined,
+            transferredBytes: sourceIdentity.size,
+            totalBytes: sourceIdentity.size,
+            resumable: false,
+            retryAttempt: undefined,
+            cleanupPending: false
+          }, sender)
+          return this.getSnapshot()
+        }
+      }
+      const resumeOffset = partialIdentity?.size ?? 0
+      if (resumeOffset > sourceIdentity.size) {
+        throw new Error('断点文件大于源文件，不能继续；请丢弃断点后重新传输')
+      }
+
+      await this.updateTransfer(transferId, {
+        progress: sourceIdentity.size > 0 ? Math.min(99, Math.round((resumeOffset / sourceIdentity.size) * 100)) : 0,
+        status: 'running',
+        speed: undefined,
+        message: resumeOffset > 0 ? `从 ${formatTransferByteCount(resumeOffset)} 继续` : task.partialPath,
+        transferredBytes: resumeOffset,
+        totalBytes: sourceIdentity.size,
+        sourceIdentity,
+        resumable: true,
+        retryAttempt: undefined,
+        cleanupPending: false
+      }, sender)
+
+      const onProgress = (progress: TransferProgress) => {
+        if (transferState.canceled || this.transferStopReasons.has(transferId)) {
+          return
+        }
+        void this.updateTransfer(transferId, {
+          progress: progress.percent,
+          status: 'running',
+          speed: transferTracker(progress),
+          message: progress.message ?? task.partialPath,
+          transferredBytes: progress.transferredBytes,
+          totalBytes: progress.totalBytes,
+          retryAttempt: undefined
+        }, sender, 'throttled')
+      }
+      await this.transferSingleFileWithRetry(
+        transferId,
+        task.direction,
+        task.sourcePath,
+        task.partialPath,
+        sourceIdentity.size,
+        controller,
+        transferState,
+        sender,
+        onProgress
+      )
+
+      if (transferState.canceled) {
+        return this.getSnapshot()
+      }
+
+      await this.updateTransfer(transferId, {
+        progress: 99,
+        status: 'verifying',
+        speed: undefined,
+        message: '正在校验文件大小...',
+        transferredBytes: sourceIdentity.size,
+        totalBytes: sourceIdentity.size
+      }, sender)
+      const completedPartial = task.direction === 'upload'
+        ? await controller.statRemoteFile(task.partialPath)
+        : await statLocalFile(task.partialPath)
+      if (!completedPartial || completedPartial.size !== sourceIdentity.size) {
+        throw new Error(`传输校验失败：断点文件大小为 ${completedPartial?.size ?? 0}，期望 ${sourceIdentity.size}`)
+      }
+
+      await this.updateTransfer(transferId, {
+        status: 'finalizing',
+        message: '正在替换目标文件...'
+      }, sender)
+      if (task.direction === 'upload') {
+        await controller.replaceRemoteFile(task.partialPath, task.destinationPath)
+      } else {
+        await replaceLocalFile(task.partialPath, task.destinationPath)
+      }
+
+      await this.updateTransfer(transferId, {
+        progress: 100,
+        status: 'done',
+        speed: undefined,
+        message: undefined,
+        transferredBytes: sourceIdentity.size,
+        totalBytes: sourceIdentity.size,
+        resumable: false,
+        retryAttempt: undefined,
+        cleanupPending: false
+      }, sender)
+
+      if (task.direction === 'upload') {
+        await this.refreshRemoteFiles(tabId).catch((error) => {
+          appWarn('[FileTerm][Transfer] Upload completed but remote listing refresh failed', error)
+        })
+      }
+    } catch (error) {
+      if (transferState.canceled || this.transferStopReasons.has(transferId)) {
+        return this.getSnapshot()
+      }
+
+      const partialIdentity = await (task.direction === 'upload'
+        ? controller.statRemoteFile(task.partialPath)
+        : statLocalFile(task.partialPath)).catch(() => null)
+      const canResume = Boolean(
+        partialIdentity
+        && currentSourceIdentity
+        && partialIdentity.size <= currentSourceIdentity.size
+      )
+      await this.updateTransfer(transferId, {
+        status: canResume ? 'interrupted' : 'failed',
+        message: error instanceof Error ? error.message : '传输失败',
+        speed: undefined,
+        transferredBytes: partialIdentity?.size,
+        totalBytes: currentSourceIdentity?.size,
+        progress: partialIdentity && currentSourceIdentity?.size
+          ? Math.min(99, Math.round((partialIdentity.size / currentSourceIdentity.size) * 100))
+          : task.progress,
+        resumable: canResume,
+        retryAttempt: undefined
+      }, sender)
+      throw error
+    } finally {
+      this.transferCancels.delete(transferId)
+      this.transferStopReasons.delete(transferId)
+      this.persistTransfers()
+    }
+
+    return this.getSnapshot()
   }
 
   private async collectRemoteDownloadEntries(
@@ -909,12 +1536,17 @@ export class WorkspaceService {
     files: Array<{
       remotePath: string
       relativePath: string
+      sourceIdentity: { size: number; modifiedAt?: number }
     }>
   }> {
     this.ensureTransferActive(transferState)
     const entries = (await controller.openRemotePath(currentPath)).filter((entry) => entry.name !== '..')
     const directories: string[] = []
-    const files: Array<{ remotePath: string; relativePath: string }> = []
+    const files: Array<{
+      remotePath: string
+      relativePath: string
+      sourceIdentity: { size: number; modifiedAt?: number }
+    }> = []
 
     for (const entry of entries) {
       this.ensureTransferActive(transferState)
@@ -927,9 +1559,14 @@ export class WorkspaceService {
         continue
       }
 
+      const sourceIdentity = await controller.statRemoteFile(entry.path)
+      if (!sourceIdentity) {
+        throw new Error(`无法读取远端文件信息：${entry.path}`)
+      }
       files.push({
         remotePath: entry.path,
-        relativePath
+        relativePath,
+        sourceIdentity
       })
     }
 
@@ -958,11 +1595,36 @@ export class WorkspaceService {
     })
   }
 
-  private addTransfer(direction: 'upload' | 'download', name: string, tabId: string, sender: WebContents) {
-    const transferId = this.transfers.add(direction, name)
+  private addTransfer(
+    direction: 'upload' | 'download',
+    name: string,
+    tabId: string,
+    sender: WebContents,
+    details?: Partial<Omit<TransferTask, 'id' | 'direction' | 'name' | 'progress' | 'status'>>
+  ) {
+    const transferId = this.transfers.add(direction, name, details)
     this.transferTabs.set(transferId, tabId)
     this.emitTransferUpdate(transferId, sender)
+    this.persistTransfers()
     return transferId
+  }
+
+  private assertNoConflictingTransfer(
+    profileId: string,
+    direction: TransferTask['direction'],
+    destinationPath: string
+  ) {
+    const conflict = this.transfers.list().find((transfer) => (
+      transfer.profileId === profileId
+      && transfer.direction === direction
+      && transfer.destinationPath === destinationPath
+      && transfer.status !== 'done'
+      && transfer.status !== 'canceled'
+      && !(transfer.status === 'failed' && !transfer.resumable)
+    ))
+    if (conflict) {
+      throw new Error(`该目标已有未完成传输：${conflict.name}。请继续或丢弃原任务。`)
+    }
   }
 
   private setTransferCancel(transferId: string, cancel: () => Promise<void> | void) {
@@ -974,7 +1636,7 @@ export class WorkspaceService {
     return WorkspaceService.DISCONNECTED_TRANSFER_MESSAGES[locale]
   }
 
-  private finalizeTransfersForTab(tabId: string, message: string) {
+  private async finalizeTransfersForTab(tabId: string, message: string) {
     const transferIds = [...this.transferTabs.entries()]
       .filter(([, mappedTabId]) => mappedTabId === tabId)
       .map(([transferId]) => transferId)
@@ -983,18 +1645,24 @@ export class WorkspaceService {
       return
     }
 
+    const stopOperations: Array<Promise<unknown>> = []
     for (const transferId of transferIds) {
       const transfer = this.transfers.get(transferId)
-      if (!transfer || (transfer.status !== 'running' && transfer.status !== 'queued')) {
+      if (!transfer || !['running', 'queued', 'verifying', 'finalizing'].includes(transfer.status)) {
         continue
       }
 
+      this.transferStopReasons.set(transferId, 'pause')
+      const cancel = this.transferCancels.get(transferId)
+      if (cancel) {
+        stopOperations.push(Promise.resolve().then(cancel))
+      }
       this.transferTabs.delete(transferId)
       this.transferCancels.delete(transferId)
       this.transferCanceling.delete(transferId)
       this.clearTransferUpdateTimer(transferId)
       const didUpdate = this.transfers.update(transferId, {
-        status: 'canceled',
+        status: transfer.resumable ? 'interrupted' : 'canceled',
         speed: undefined,
         message
       })
@@ -1005,6 +1673,14 @@ export class WorkspaceService {
         }
       }
     }
+    this.persistTransfers()
+    await Promise.allSettled(stopOperations)
+    await Promise.allSettled(
+      transferIds
+        .map((transferId) => this.transferRuns.get(transferId))
+        .filter((run): run is Promise<WorkspaceSnapshot> => Boolean(run))
+    )
+    transferIds.forEach((transferId) => this.transferStopReasons.delete(transferId))
   }
 
   private ensureTransferActive(transferState: { canceled: boolean }) {
@@ -1015,7 +1691,7 @@ export class WorkspaceService {
 
   private updateTransfer(
     transferId: string,
-    patch: Partial<Pick<TransferTask, 'progress' | 'status' | 'message' | 'speed' | 'transferredBytes' | 'totalBytes'>>,
+    patch: Partial<Omit<TransferTask, 'id' | 'direction' | 'name'>>,
     sender: WebContents,
     emitMode: 'immediate' | 'throttled' = 'immediate'
   ) {
@@ -1035,6 +1711,57 @@ export class WorkspaceService {
 
     this.clearTransferUpdateTimer(transferId)
     this.emitTransferUpdate(transferId, sender)
+    this.persistTransfers()
+  }
+
+  private async removeTransferPartial(transfer: TransferTask): Promise<{ message: string; pending: boolean }> {
+    const partialPaths = transfer.manifest?.files.map((entry) => entry.partialPath)
+      ?? (transfer.partialPath ? [transfer.partialPath] : [])
+    if (!partialPaths.length) {
+      return { message: '传输已取消', pending: false }
+    }
+    if (transfer.direction === 'download') {
+      await Promise.all(partialPaths.map((partialPath) => removeLocalFileIfExists(partialPath)))
+      return { message: '传输已取消，断点已删除', pending: false }
+    }
+
+    const tab = this.tabs.list().find((candidate) => (
+      candidate.profileId === transfer.profileId
+      && Boolean(this.sessionRuntime.getController(candidate.id))
+      && this.sessionRuntime.get(candidate.id)?.connected
+    ))
+    if (!tab) {
+      return {
+        message: `传输已取消；${partialPaths.length} 个远端断点需要在重连后清理`,
+        pending: true
+      }
+    }
+    const controller = this.sessionRuntime.requireController(tab.id)
+    for (const partialPath of partialPaths) {
+      await controller.removeRemoteFileIfExists(partialPath)
+    }
+    return { message: '传输已取消，远端断点已删除', pending: false }
+  }
+
+  private async restoreTransfers(): Promise<void> {
+    if (!this.transferJournal) {
+      return
+    }
+    try {
+      this.transfers.replaceAll(await this.transferJournal.load())
+      await this.transferJournal.save(this.transfers.list())
+    } catch (error) {
+      appWarn('[FileTerm][Transfer] Failed to restore transfer journal', error)
+    }
+  }
+
+  private persistTransfers() {
+    if (!this.transferJournal) {
+      return
+    }
+    void this.transferJournal.save(this.transfers.list()).catch((error) => {
+      appWarn('[FileTerm][Transfer] Failed to persist transfer journal', error)
+    })
   }
 
   private scheduleTransferUpdate(transferId: string, sender: WebContents) {
@@ -1140,6 +1867,64 @@ function formatTransferSpeed(bytesPerSecond: number) {
 
   const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2
   return `${value.toFixed(digits)} ${units[unitIndex]}`
+}
+
+function formatTransferByteCount(bytes: number) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = Math.max(0, bytes)
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const digits = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2
+  return `${value.toFixed(digits)} ${units[unitIndex]}`
+}
+
+function directoryProgressPercent(
+  manifest: TransferManifest,
+  relativePath: string,
+  currentTransferredBytes: number
+) {
+  const totalWeight = manifest.files.reduce((sum, entry) => sum + Math.max(entry.sourceIdentity.size, 1), 0)
+  if (totalWeight === 0) {
+    return 99
+  }
+  const completedWeight = manifest.files.reduce((sum, entry) => {
+    const weight = Math.max(entry.sourceIdentity.size, 1)
+    if (entry.status === 'done') {
+      return sum + weight
+    }
+    if (entry.relativePath === relativePath) {
+      const currentWeight = entry.sourceIdentity.size === 0
+        ? currentTransferredBytes > 0 ? 1 : 0
+        : Math.min(weight, Math.max(0, currentTransferredBytes))
+      return sum + currentWeight
+    }
+    return sum
+  }, 0)
+  return Math.max(1, Math.min(99, Math.round((completedWeight / totalWeight) * 100)))
+}
+
+function isRetryableTransferError(error: unknown) {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code ?? '')
+    : ''
+  if (/ECONNRESET|ECONNABORTED|EPIPE|ETIMEDOUT|ENETDOWN|ENETRESET|ENETUNREACH|EHOSTUNREACH/i.test(code)) {
+    return true
+  }
+
+  const message = error instanceof Error ? error.message : String(error)
+  if (/源文件已发生变化|断点文件大于源文件|传输校验失败|permission denied|not permitted|authentication|login incorrect|\b530\b|\b550\b/i.test(message)) {
+    return false
+  }
+  return /connection|socket|channel|session|closed|timeout|timed out|unexpected eof|end of file|not connected|write after end|ECONN/i.test(message)
+}
+
+function waitForRetry(delayMs: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, delayMs)
+  })
 }
 
 export { seedCommandFolders, seedCommandTemplates, seedProfiles }

@@ -25,6 +25,7 @@ export function OverviewPage({
         ...profiles.filter(p => p.lastUsedAt == null)
       ]
     : profiles
+  const visibleRecentProfiles = recentProfiles.slice(0, 3)
   const sshCount = profiles.filter(p => p.type === 'ssh').length
   const ftpCount = profiles.filter(p => p.type === 'ftp').length
   const secureFtpCount = profiles.filter(p => p.type === 'ftp' && p.secure).length
@@ -100,13 +101,13 @@ export function OverviewPage({
       </section>
 
       {/* Recent Connections */}
-      {recentProfiles.length > 0 && (
+      {visibleRecentProfiles.length > 0 && (
         <section className="overview-recent">
           <div className="section-header">
             <h2 className="section-title">{t.overviewRecentConnections}</h2>
           </div>
           <div className="recent-grid">
-            {recentProfiles.map((profile) => (
+            {visibleRecentProfiles.map((profile) => (
               <div
                 key={profile.id}
                 className="recent-card"
