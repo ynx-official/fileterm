@@ -17,7 +17,7 @@ export interface IpcWindowOptions {
   openFileEditorWindow(parent: BrowserWindow, input: { source: 'local' | 'remote'; path: string; name: string; tabId?: string; encoding?: string }): void
   openLogsDirectory(): Promise<void>
   requestQuitApp(): void
-  confirmCloseWindow(action: 'quit' | 'hide' | 'cancel'): void
+  confirmCloseWindow(action: 'quit' | 'hide' | 'cancel'): void | Promise<void>
 }
 
 export interface IpcServices {

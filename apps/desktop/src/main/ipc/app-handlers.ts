@@ -100,9 +100,8 @@ export function registerAppHandlers(options: IpcWindowOptions) {
     options.requestQuitApp()
   })
 
-  ipcMain.handle('app:confirmCloseWindow', (_event, action: 'quit' | 'hide' | 'cancel') => {
-    options.confirmCloseWindow(action)
-  })
+  ipcMain.handle('app:confirmCloseWindow', (_event, action: 'quit' | 'hide' | 'cancel') =>
+    options.confirmCloseWindow(action))
 }
 
 function getWindowMenu(

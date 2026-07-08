@@ -3,26 +3,39 @@ import type { FileTermDesktopApi, TransferTask } from '@fileterm/core'
 import { isActiveTransfer } from '../../app/app-utils'
 import { TransferBar } from './TransferBar'
 import { TransferPopover } from './TransferPopover'
+import { scopeTransfersToSession, type TransferSessionTab } from './transfer-scope'
 
 export function TransferCenter({
+  activeProfileId,
+  activeTabId,
   desktopApi,
   fullWidth,
   initialTransfers,
   isPending,
   onError,
+  sessionTabs,
   visible
 }: {
+  activeProfileId?: string
+  activeTabId?: string | null
   desktopApi?: FileTermDesktopApi
   fullWidth: boolean
   initialTransfers: TransferTask[]
   isPending: boolean
   onError(scope: string, error: unknown): void
+  sessionTabs: TransferSessionTab[]
   visible: boolean
 }) {
   const [transfers, setTransfers] = useState(initialTransfers)
   const [showTransfers, setShowTransfers] = useState(false)
   const previousActiveCountRef = useRef(0)
-  const activeCount = transfers.reduce(
+  const scopedTransfers = scopeTransfersToSession(
+    transfers,
+    activeTabId,
+    activeProfileId,
+    sessionTabs
+  )
+  const activeCount = scopedTransfers.reduce(
     (count, transfer) => count + (isActiveTransfer(transfer) ? 1 : 0),
     0
   )
@@ -58,6 +71,16 @@ export function TransferCenter({
     }
     previousActiveCountRef.current = activeCount
   }, [activeCount])
+
+  useEffect(() => {
+    setShowTransfers(false)
+  }, [activeProfileId, activeTabId])
+
+  useEffect(() => {
+    if (!visible) {
+      setShowTransfers(false)
+    }
+  }, [visible])
 
   const runTransferAction = async (
     scope: string,
@@ -101,7 +124,7 @@ export function TransferCenter({
 
       {showTransfers ? (
         <TransferPopover
-          transfers={transfers}
+          transfers={scopedTransfers}
           onDiscardTransfer={(transferId) => desktopApi
             ? runTransferAction('丢弃传输断点', (id) => desktopApi.discardTransfer(id), transferId)
             : undefined}

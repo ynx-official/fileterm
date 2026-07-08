@@ -14,6 +14,8 @@ import {
   type WorkspaceTab
 } from '@fileterm/core'
 import { LiveFtpSessionController, LiveSshSessionController } from '../session-controllers.js'
+import { appWarn } from '../app-logger.js'
+import { resolveShellFileAccess } from '../sessions/shell-cwd-integration.js'
 
 export type LiveSessionController = LiveSshSessionController | LiveFtpSessionController
 
@@ -36,6 +38,7 @@ export class WorkspaceSessionRuntime {
   private readonly terminalOutputBuffers = new Map<string, string[]>()
   private readonly terminalOutputTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly metricsPausedRemoteFileOperations = new Set<string>()
+  private readonly shellLoginUsers = new Map<string, string>()
   private readonly pendingSshInteractions = new Map<string, {
     tabId: string
     resolve(response: SshInteractionResponse): void
@@ -97,6 +100,7 @@ export class WorkspaceSessionRuntime {
     await this.liveControllers.get(tabId)?.disconnect()
     this.flushTerminalOutput(tabId)
     this.liveControllers.delete(tabId)
+    this.shellLoginUsers.delete(tabId)
     this.remoteFileOperations.delete(tabId)
     this.tabSenders.delete(tabId)
     this.sessions.delete(tabId)
@@ -116,6 +120,7 @@ export class WorkspaceSessionRuntime {
       })
     }
     this.liveControllers.delete(tabId)
+    this.shellLoginUsers.delete(tabId)
   }
 
   async shutdown() {
@@ -150,6 +155,7 @@ export class WorkspaceSessionRuntime {
     }
     this.terminalOutputTimers.clear()
     this.terminalOutputBuffers.clear()
+    this.shellLoginUsers.clear()
   }
 
   requireController(tabId: string) {
@@ -224,6 +230,7 @@ export class WorkspaceSessionRuntime {
     }
 
     if (profile.type === 'ssh') {
+      this.shellLoginUsers.delete(tabId)
       let sshController: LiveSshSessionController | null = null
       sshController = new LiveSshSessionController(
           tabId,
@@ -236,7 +243,14 @@ export class WorkspaceSessionRuntime {
           (cwd) => {
             void this.handleShellCwdChanged(tabId, cwd).catch(() => undefined)
           },
-          () => undefined,
+          (user) => {
+            if (!this.shellLoginUsers.has(tabId)) {
+              this.shellLoginUsers.set(tabId, user)
+            }
+            void this.handleShellUserChanged(tabId, user).catch((error) => {
+              appWarn(`[FileTerm][SSH] Could not synchronize file access for shell user ${user}`, error)
+            })
+          },
           (summary, transcript, connected) => {
             this.flushTerminalOutput(tabId)
             const current = this.sessions.get(tabId)
@@ -250,6 +264,7 @@ export class WorkspaceSessionRuntime {
               summary,
               terminalTranscript: transcript,
               remoteFiles: connected ? current.remoteFiles : [],
+              shellUser: connected ? current.shellUser : undefined,
               fileAccessMode: connected ? (sshController?.getFileAccessMode() ?? current.fileAccessMode) : 'user',
               hasReusableSudoAuth: connected ? (sshController?.hasReusableSudoAuth() ?? false) : false,
               connected,
@@ -434,11 +449,10 @@ export class WorkspaceSessionRuntime {
   async setFileAccessMode(tabId: string, mode: 'user' | 'root', options?: RemoteFileAccessOptions) {
     await this.runRemoteFileOperation(tabId, async (controller, current) => {
       const previousMode = controller.getFileAccessMode()
-      if (previousMode === mode) {
+      const nextSudoUser = options?.sudoUser?.trim() || current.sudoUser || 'root'
+      if (previousMode === mode && (mode === 'user' || nextSudoUser === current.sudoUser)) {
         return
       }
-
-      const nextSudoUser = options?.sudoUser?.trim() || current.sudoUser || 'root'
 
       await controller.setFileAccessMode(mode, options)
       try {
@@ -517,6 +531,42 @@ export class WorkspaceSessionRuntime {
       return
     }
 
+    await this.emitSnapshotForTab(tabId)
+  }
+
+  private async handleShellUserChanged(tabId: string, user: string) {
+    const current = this.sessions.get(tabId)
+    const loginUser = this.shellLoginUsers.get(tabId)
+    if (!current || !loginUser || current.shellUser === user) {
+      return
+    }
+
+    this.sessions.set(tabId, {
+      ...current,
+      shellUser: user
+    })
+    if (!current.connected) {
+      await this.emitSnapshotForTab(tabId)
+      return
+    }
+
+    const target = resolveShellFileAccess(loginUser, user)
+    try {
+      await this.setFileAccessMode(tabId, target.mode, target.sudoUser ? { sudoUser: target.sudoUser } : undefined)
+    } catch (error) {
+      await this.emitSnapshotForTab(tabId)
+      throw error
+    }
+
+    const latest = this.sessions.get(tabId)
+    if (
+      latest?.followShellCwd !== false
+      && latest?.shellCwd
+      && latest.remotePath !== latest.shellCwd
+    ) {
+      await this.followShellCwd(tabId, latest.shellCwd)
+      return
+    }
     await this.emitSnapshotForTab(tabId)
   }
 

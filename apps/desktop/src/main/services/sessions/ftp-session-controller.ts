@@ -227,7 +227,7 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
     }
     appLog(`[FileTerm][FTP] Upload start ${localPath} -> ${remotePath} (${formatTransferBytes(total)})`)
     try {
-      await this.runWithConnectedClient(async () => {
+      await this.runWithConnectedClient(() => this.runAbortableTransfer(options?.signal, async () => {
         let progressBase = resumeOffset
         this.ftp.trackProgress((progress) => {
           const transferredBytes = Math.min(total, progressBase + progress.bytes)
@@ -278,7 +278,7 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
         } finally {
           this.ftp.trackProgress()
         }
-      })
+      }))
     } catch (error) {
       appWarn(`[FileTerm][FTP] Upload failed ${localPath} -> ${remotePath}`, error)
       throw error
@@ -292,7 +292,7 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
     options?: TransferFileOptions
   ): Promise<void> {
     try {
-      await this.runWithConnectedClient(async () => {
+      await this.runWithConnectedClient(() => this.runAbortableTransfer(options?.signal, async () => {
         const total = Math.max(await this.ftp.size(remotePath), 0)
         const progressTotal = Math.max(total, 1)
         const resumeOffset = Math.max(0, options?.resumeOffset ?? 0)
@@ -319,7 +319,7 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
         } finally {
           this.ftp.trackProgress()
         }
-      })
+      }))
     } catch (error) {
       appWarn(`[FileTerm][FTP] Download failed ${remotePath} -> ${localPath}`, error)
       throw error
@@ -348,6 +348,20 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
   private disconnectInternal() {
     this.ftp.close()
     this.connected = false
+  }
+
+  private async runAbortableTransfer<T>(signal: AbortSignal | undefined, action: () => Promise<T>): Promise<T> {
+    if (signal?.aborted) {
+      throw new Error('传输已暂停')
+    }
+
+    const abortTransfer = () => this.disconnectInternal()
+    signal?.addEventListener('abort', abortTransfer, { once: true })
+    try {
+      return await action()
+    } finally {
+      signal?.removeEventListener('abort', abortTransfer)
+    }
   }
 
   private async readRemoteDirectory(targetPath: string): Promise<RemoteFileItem[]> {
@@ -398,7 +412,8 @@ export class LiveFtpSessionController extends BaseFileSessionController implemen
   }
 
   private async ensureConnected() {
-    if (!this.connected) {
+    if (!this.connected || this.ftp.closed) {
+      this.connected = false
       await this.connectInternal()
     }
   }

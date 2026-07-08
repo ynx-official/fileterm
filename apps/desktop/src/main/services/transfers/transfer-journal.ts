@@ -117,22 +117,25 @@ function normalizeRestoredTransfer(transfer: TransferTask): TransferTask {
     && Boolean(transfer.sourcePath && transfer.destinationPath && transfer.partialPath)
   const hasDirectoryResumeMetadata = transfer.targetType === 'folder'
     && Boolean(transfer.sourcePath && transfer.destinationPath && manifest)
+  const isResumable = Boolean(
+    transfer.resumable
+    && transfer.profileId
+    && (hasFileResumeMetadata || hasDirectoryResumeMetadata)
+  )
+  const wasInterrupted = transfer.status === 'interrupted' && isResumable
 
   return {
     ...transfer,
     manifest,
     status: wasActive
-      ? transfer.resumable ? 'interrupted' : 'canceled'
+      ? isResumable ? 'paused' : 'canceled'
+      : wasInterrupted ? 'paused'
       : transfer.status,
     message: wasActive
-      ? transfer.resumable ? '应用退出前传输未完成，可在重连后继续' : '应用退出前传输未完成'
+      ? isResumable ? '应用退出前传输未完成，可手动继续' : '应用退出前传输未完成'
       : transfer.message,
     speed: undefined,
-    resumable: Boolean(
-      transfer.resumable
-      && transfer.profileId
-      && (hasFileResumeMetadata || hasDirectoryResumeMetadata)
-    )
+    resumable: isResumable
   }
 }
 
@@ -167,6 +170,7 @@ function isValidTransferManifest(value: unknown): value is TransferManifest {
       && typeof entry.sourcePath === 'string'
       && typeof entry.destinationPath === 'string'
       && typeof entry.partialPath === 'string'
+      && (entry.stagingPath === undefined || typeof entry.stagingPath === 'string')
       && typeof entry.sourceIdentity?.size === 'number'
       && Number.isFinite(entry.sourceIdentity.size)
       && entry.sourceIdentity.size >= 0

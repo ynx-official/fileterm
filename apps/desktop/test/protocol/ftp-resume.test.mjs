@@ -87,6 +87,10 @@ test('FTP controller executes APPE -> REST/STOR fallback without a network serve
   await controller.uploadFile(source, '/target.part', () => undefined, { resumeOffset: 7 })
   assert.equal(fake.files.get('/target.part').toString(), 'prefix-and-remainder')
   assert.deepEqual(fake.commands, ['REST 7'])
+
+  fake.closed = true
+  await controller.uploadFile(source, '/reconnected.part', () => undefined)
+  assert.equal(fake.accessCalls, 2)
 })
 
 for (const tlsMode of ['explicit', 'implicit']) {
@@ -465,14 +469,20 @@ class FakeBasicFtpClient {
   constructor(files) {
     this.files = files
     this.commands = []
+    this.accessCalls = 0
+    this.closed = false
     this.progress = undefined
     this.parseList = () => []
   }
 
-  async access(options) { this.accessOptions = options }
+  async access(options) {
+    this.accessCalls += 1
+    this.accessOptions = options
+    this.closed = false
+  }
   async cd() {}
   async pwd() { return '/' }
-  close() {}
+  close() { this.closed = true }
   trackProgress(handler) { this.progress = handler }
   async ensureDir() {}
   async size(remotePath) {

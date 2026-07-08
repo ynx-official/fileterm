@@ -4,6 +4,7 @@ const OSC_7_PREFIX = '\u001b]7;'
 const OSC_7_PATTERN = /\u001b]7;file:\/\/([^\u0007\u001b]*)(?:\u0007|\u001b\\)/g
 const OSC_USER_PATTERN = /\u001b]1337;RemoteUser=([^\u0007\u001b]*)(?:\u0007|\u001b\\)/g
 const MAX_REPORTED_CWD_LENGTH = 4096
+const MAX_REPORTED_USER_LENGTH = 256
 
 export type RemoteShellKind = 'bash' | 'zsh' | 'fish' | 'posix'
 
@@ -34,7 +35,7 @@ export class ShellCwdTracker {
     let matchUser: RegExpExecArray | null
     while ((matchUser = OSC_USER_PATTERN.exec(combined)) !== null) {
       lastCompleteEnd = Math.max(lastCompleteEnd, matchUser.index + matchUser[0].length)
-      const user = matchUser[1]
+      const user = parseRemoteUser(matchUser[1] ?? '')
       if (user) {
         updates.push({ user })
       }
@@ -86,12 +87,32 @@ export function findSetupEchoEnd(text: string): { lineStart: number; payloadEnd:
   
   const payloadEnd = Math.max(osc7End, oscUserEnd)
   const cwd = parseOsc7Payload(match7[1] ?? '')
-  const user = matchUser ? matchUser[1] : null
+  const user = matchUser ? parseRemoteUser(matchUser[1] ?? '') : null
 
   // Keep the real shell prompt visible. We only suppress the injected setup
   // command echo and its OSC payload, so the prompt printed after execution can
   // render naturally on first connect and later silent refreshes.
   return { lineStart, payloadEnd, cwd, user }
+}
+
+export function resolveShellFileAccess(
+  loginUser: string,
+  shellUser: string
+): { mode: 'user' | 'root'; sudoUser?: string } {
+  const normalizedLoginUser = loginUser.trim()
+  const normalizedShellUser = shellUser.trim()
+  if (!normalizedLoginUser || !normalizedShellUser || normalizedLoginUser === normalizedShellUser) {
+    return { mode: 'user' }
+  }
+  return { mode: 'root', sudoUser: normalizedShellUser }
+}
+
+function parseRemoteUser(value: string): string | null {
+  const user = value.trim()
+  if (!user || user.length > MAX_REPORTED_USER_LENGTH || /[\u0000-\u001f\u007f]/.test(user)) {
+    return null
+  }
+  return user
 }
 
 function parseOsc7Payload(payload: string): string | null {

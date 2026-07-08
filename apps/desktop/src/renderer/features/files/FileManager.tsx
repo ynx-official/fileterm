@@ -585,7 +585,7 @@ export function FileManager({
                 type="button"
                 onClick={onToggleRemoteFileAccessMode}
               >
-                {remoteFileAccessMode === 'root' ? 'root' : 'user'}
+                {remoteFileAccessMode === 'root' ? activeSession.sudoUser || 'root' : 'user'}
               </button>
             ) : null}
             <button title={t.downloadTo} type="button" disabled={!isRemoteConnected || !selectedRemoteFileItems.length} onClick={() => onDownloadFiles(selectedRemoteFileItems)}>

@@ -3,6 +3,7 @@ import { createReadStream, createWriteStream } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { readFile, stat, writeFile } from 'node:fs/promises'
+import { Readable, type Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ClientChannel, ConnectConfig, FileEntry, SFTPWrapper, Stats } from 'ssh2'
 import { Client } from 'ssh2'
@@ -41,7 +42,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private readonly ssh = new Client()
   private readonly execSsh = new Client()
   private readonly sftpSsh = new Client()
-  private readonly transferSsh = new Client()
+  private transferSsh = new Client()
   private readonly sshDebug = createSshDebugLogger(isSshDebugEnabled(), (message) => {
     this.appendSystemMessage(message)
   })
@@ -54,6 +55,8 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private hasRegisteredExecLifecycle = false
   private hasRegisteredSftpLifecycle = false
   private hasRegisteredTransferLifecycle = false
+  private transferSshClosed = false
+  private readonly activeTransferPipelines = new Set<{ source: Readable; destination: Writable }>()
   private shellStream?: {
     write(data: string): void
     setWindow(rows: number, cols: number, height: number, width: number): void
@@ -457,19 +460,31 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
       throw new Error('启用 root 视角需要开启 Exec Channel')
     }
 
-    if (options?.sudoUser?.trim()) {
-      this.sudoUser = options.sudoUser.trim()
-    }
-    if (options && 'sudoPassword' in options) {
-      this.sudoPassword = options.sudoPassword || undefined
-    }
+    const previousSudoUser = this.sudoUser
+    const previousSudoPassword = this.sudoPassword
+    const nextSudoUser = options?.sudoUser?.trim() || previousSudoUser
+    const nextSudoPassword = options && 'sudoPassword' in options
+      ? options.sudoPassword || undefined
+      : previousSudoPassword
+    const privilegedIdentityChanged = mode === 'root' && (
+      nextSudoUser !== previousSudoUser
+      || nextSudoPassword !== previousSudoPassword
+    )
 
-    if (mode === this.fileAccessMode) {
+    if (mode === this.fileAccessMode && !privilegedIdentityChanged) {
       return
     }
 
-    if (mode === 'root' && this.connected) {
-      await this.verifyRootFileAccess()
+    this.sudoUser = nextSudoUser
+    this.sudoPassword = nextSudoPassword
+    try {
+      if (mode === 'root' && this.connected) {
+        await this.verifyRootFileAccess()
+      }
+    } catch (error) {
+      this.sudoUser = previousSudoUser
+      this.sudoPassword = previousSudoPassword
+      throw error
     }
 
     this.fileAccessMode = mode
@@ -483,7 +498,10 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   async abortTransfer(): Promise<void> {
-    this.closeTransferSftpSession()
+    const pipelines = [...this.activeTransferPipelines]
+    await Promise.allSettled(pipelines.map(({ source, destination }) => (
+      this.stopTransferPipeline(source, destination)
+    )))
   }
 
   async write(data: string): Promise<void> {
@@ -897,31 +915,37 @@ fi
         remotePath,
         onProgress,
         new Error('Root file access mode enabled'),
-        resumeOffset
+        resumeOffset,
+        options?.signal,
+        options?.stagingPath
       )
       return
     }
 
-    await this.uploadFileAsUser(localPath, remotePath, onProgress, resumeOffset)
+    await this.uploadFileAsUser(localPath, remotePath, onProgress, resumeOffset, options?.signal)
   }
 
   private async uploadFileAsUser(
     localPath: string,
     remotePath: string,
     onProgress: (progress: TransferProgress) => void,
-    resumeOffset = 0
+    resumeOffset = 0,
+    signal?: AbortSignal
   ): Promise<void> {
-    let transferredBytes = resumeOffset
+    let transferredBytes = 0
     try {
       const sftp = await this.ensureTransferSftp()
       const info = await stat(localPath)
+      this.throwIfTransferAborted(signal)
       const total = info.size
       const progressTotal = Math.max(total, 1)
       if (resumeOffset > total) {
         throw new Error('SFTP 上传断点大于源文件，无法继续')
       }
+      transferredBytes = resumeOffset
       appLog(`[FileTerm][SFTP] Upload start ${localPath} -> ${remotePath} (${formatShellBytes(total)})`)
       await this.ensureRemoteDirectory(path.posix.dirname(remotePath), sftp)
+      this.throwIfTransferAborted(signal)
       if (resumeOffset < total || total === 0) {
         const localStream = createReadStream(localPath, { start: resumeOffset })
         const remoteStream = sftp.createWriteStream(remotePath, {
@@ -929,26 +953,42 @@ fi
           start: resumeOffset > 0 ? resumeOffset : undefined,
           mode: 0o644
         })
-        localStream.on('data', (chunk) => {
-          transferredBytes = Math.min(total, transferredBytes + chunk.length)
+        const reportProgress = () => {
+          // SFTP write streams acknowledge bytes asynchronously, so progress must follow
+          // confirmed remote writes rather than optimistic local reads.
+          const acknowledgedBytes = Math.min(
+            total,
+            resumeOffset + this.getWritableBytesWritten(remoteStream)
+          )
+          if (acknowledgedBytes <= transferredBytes) {
+            return
+          }
+          transferredBytes = acknowledgedBytes
           onProgress({
             percent: Math.min(99, Math.round((transferredBytes / progressTotal) * 100)),
             transferredBytes,
             totalBytes: total
           })
-        })
-        await pipeline(localStream, remoteStream)
+        }
+        remoteStream.on('drain', reportProgress)
+        remoteStream.on('finish', reportProgress)
+        remoteStream.on('close', reportProgress)
+        await this.runTransferPipeline(localStream, remoteStream, signal)
+        reportProgress()
       }
       await this.verifySftpRemoteUploadSize(sftp, remotePath, total)
       appLog(`[FileTerm][SFTP] Upload verified ${remotePath} (${formatShellBytes(total)})`)
       onProgress({ percent: 100, transferredBytes: total, totalBytes: total })
     } catch (error) {
+      if (signal?.aborted) {
+        throw this.transferAbortError()
+      }
       if (transferredBytes > resumeOffset || resumeOffset > 0) {
         appWarn(`[FileTerm][SFTP] Upload interrupted after ${formatShellBytes(transferredBytes)}: ${localPath} -> ${remotePath}`, error)
         throw new Error(`SFTP 上传已中断，已停止以避免提交不完整文件：${errorMessage(error)}`)
       }
       appWarn(`[FileTerm][SFTP] Upload could not start, falling back to shell stream: ${localPath} -> ${remotePath}`, error)
-      await this.uploadFileViaShell(localPath, remotePath, onProgress, error, false)
+      await this.uploadFileViaShell(localPath, remotePath, onProgress, error, false, signal)
     }
   }
 
@@ -965,7 +1005,8 @@ fi
         localPath,
         onProgress,
         new Error('Root file access mode enabled'),
-        resumeOffset
+        resumeOffset,
+        options?.signal
       )
       return
     }
@@ -982,55 +1023,56 @@ fi
           resolve(stats)
         })
       })
+      this.throwIfTransferAborted(options?.signal)
       const total = Math.max(attrs.size ?? 0, 0)
       const progressTotal = Math.max(total, 1)
       if (resumeOffset > total) {
         throw new Error('SFTP 下载断点大于远端文件，无法继续')
       }
       appLog(`[FileTerm][SFTP] Download start ${remotePath} -> ${localPath} (${formatShellBytes(total)})`)
-      if (resumeOffset === 0) {
-        await new Promise<void>((resolve, reject) => {
-          sftp.fastGet(remotePath, localPath, {
-            step: (transferred, _chunk, fileSize) => {
-              transferredBytes = Math.max(transferredBytes, transferred)
-              onProgress({
-                percent: Math.min(99, Math.round((transferred / progressTotal) * 100)),
-                transferredBytes: transferred,
-                totalBytes: Math.max(fileSize || total, 0)
-              })
-            }
-          }, (error) => {
-            if (error) {
-              reject(error)
-              return
-            }
-            resolve()
-          })
+      if (resumeOffset < total || total === 0) {
+        const remoteStream = sftp.createReadStream(remotePath, {
+          start: resumeOffset > 0 ? resumeOffset : undefined
         })
-      } else if (resumeOffset < total) {
-        const remoteStream = sftp.createReadStream(remotePath, { start: resumeOffset })
-        const localStream = createWriteStream(localPath, { flags: 'r+', start: resumeOffset })
-        remoteStream.on('data', (chunk: Buffer) => {
-          transferredBytes = Math.min(total, transferredBytes + chunk.length)
+        const localStream = createWriteStream(localPath, {
+          flags: resumeOffset > 0 ? 'r+' : 'w',
+          start: resumeOffset > 0 ? resumeOffset : undefined
+        })
+        const reportProgress = () => {
+          const acknowledgedBytes = Math.min(
+            total,
+            resumeOffset + this.getWritableBytesWritten(localStream)
+          )
+          if (acknowledgedBytes <= transferredBytes) {
+            return
+          }
+          transferredBytes = acknowledgedBytes
           onProgress({
             percent: Math.min(99, Math.round((transferredBytes / progressTotal) * 100)),
             transferredBytes,
             totalBytes: total
           })
-        })
-        await pipeline(remoteStream, localStream)
+        }
+        localStream.on('drain', reportProgress)
+        localStream.on('finish', reportProgress)
+        localStream.on('close', reportProgress)
+        await this.runTransferPipeline(remoteStream, localStream, options?.signal)
+        reportProgress()
       }
       const localInfo = await stat(localPath)
       this.assertRemoteUploadSize(localPath, localInfo.size, total)
       appLog(`[FileTerm][SFTP] Download verified ${remotePath} -> ${localPath} (${formatShellBytes(total)})`)
       onProgress({ percent: 100, transferredBytes: total, totalBytes: total })
     } catch (error) {
+      if (options?.signal?.aborted) {
+        throw this.transferAbortError()
+      }
       if (transferredBytes > resumeOffset || resumeOffset > 0) {
         appWarn(`[FileTerm][SFTP] Download interrupted after ${formatShellBytes(transferredBytes)}: ${remotePath} -> ${localPath}`, error)
         throw new Error(`SFTP 下载已中断，已停止以避免提交不完整文件：${errorMessage(error)}`)
       }
       appWarn(`[FileTerm][SFTP] Download could not start, falling back to shell stream: ${remotePath} -> ${localPath}`, error)
-      await this.downloadFileViaShell(remotePath, localPath, onProgress, error)
+      await this.downloadFileViaShell(remotePath, localPath, onProgress, error, resumeOffset, options?.signal)
     }
   }
 
@@ -1146,10 +1188,15 @@ fi
       throw new Error('Transfer SFTP connection not initialized')
     }
 
+    if (this.transferSshClosed) {
+      this.resetTransferClient(false)
+    }
+
     const sshConfig = this.sshConfig
     this.registerTransferLifecycle()
     await new Promise<void>((resolve, reject) => {
       let settled = false
+      this.transferSshClosed = false
       this.sshDebug.log('transfer-sftp', `准备建立传输 SFTP 连接: ${sshConfig.username}@${sshConfig.host}:${sshConfig.port}`)
       this.transferSsh.removeAllListeners('keyboard-interactive')
       this.transferSsh.removeAllListeners('banner')
@@ -1251,8 +1298,8 @@ fi
 
     this.hasRegisteredTransferLifecycle = true
     const markClosed = () => {
-      this.transferSftp?.end?.()
-      this.transferSftp = undefined
+      this.releaseTransferSftpHandle()
+      this.transferSshClosed = true
     }
 
     this.transferSsh.on('error', (error) => {
@@ -1271,9 +1318,24 @@ fi
   }
 
   private closeTransferSftpSession() {
+    this.releaseTransferSftpHandle()
+    this.transferSsh.end()
+    this.transferSshClosed = true
+  }
+
+  private releaseTransferSftpHandle() {
     this.transferSftp?.end?.()
     this.transferSftp = undefined
-    this.transferSsh.end()
+  }
+
+  private resetTransferClient(endCurrent = true) {
+    const currentTransferSsh = this.transferSsh
+    if (endCurrent) {
+      currentTransferSsh.end()
+    }
+    this.transferSsh = new Client()
+    this.hasRegisteredTransferLifecycle = false
+    this.transferSshClosed = false
   }
 
   private attachSftpWrapperLifecycle(sftp: SFTPWrapper, scope: 'sftp' | 'transfer-sftp') {
@@ -1473,11 +1535,7 @@ fi
         true
       )
     } catch (error) {
-      try {
-        await this.execCommand(`sh -lc ${shellQuote(`rm -f -- ${tempRemotePath}`)}`, { allowNonZeroWithStdout: true })
-      } catch {
-        // Best-effort cleanup for temp editor save artifacts.
-      }
+      this.scheduleTransferStagingCleanup(tempRemotePath)
       throw error
     }
   }
@@ -1487,7 +1545,8 @@ fi
     remotePath: string,
     onProgress: (progress: TransferProgress) => void,
     cause: unknown,
-    privileged = this.fileAccessMode === 'root'
+    privileged = this.fileAccessMode === 'root',
+    signal?: AbortSignal
   ): Promise<void> {
     this.ensureShellFileFallback(cause)
     const fileInfo = await stat(localPath)
@@ -1506,7 +1565,8 @@ fi
           transferredBytes,
           totalBytes: total
         })
-      }
+      },
+      signal
     )
     await this.verifyShellRemoteUploadSize(remotePath, total, privileged)
     appLog(`[FileTerm][SSH] Shell upload verified ${remotePath} (${formatShellBytes(total)}, privileged=${privileged ? 'yes' : 'no'})`)
@@ -1518,25 +1578,49 @@ fi
     remotePath: string,
     onProgress: (progress: TransferProgress) => void,
     cause: unknown,
-    resumeOffset = 0
+    resumeOffset = 0,
+    signal?: AbortSignal,
+    stagingPath?: string
   ): Promise<void> {
     this.ensureShellFileFallback(cause)
     const total = (await stat(localPath)).size
     if (resumeOffset > total) {
       throw new Error('root SFTP 上传断点大于源文件，无法继续')
     }
-    const tempRemotePath = await this.createTemporaryRemoteUploadPath(path.posix.basename(remotePath))
+    const tempRemotePath = stagingPath
+      ?? await this.createTemporaryRemoteUploadPath(path.posix.basename(remotePath))
     appLog(`[FileTerm][SFTP] Root upload staging ${localPath}@${resumeOffset} -> ${tempRemotePath} -> ${remotePath}`)
 
     try {
-      await this.uploadFileSliceAsUser(localPath, tempRemotePath, resumeOffset, (progress) => {
-        onProgress({
-          percent: Math.min(99, Math.max(1, progress.percent === 100 ? 99 : progress.percent)),
-          transferredBytes: progress.transferredBytes,
-          totalBytes: progress.totalBytes,
-          message: undefined
+      const sftp = await this.ensureTransferSftp()
+      let stagedSize = await this.readSftpFileSize(sftp, tempRemotePath) ?? 0
+      if (stagedSize > total) {
+        appWarn(
+          `[FileTerm][SFTP] Root staging ${tempRemotePath} is larger than its source; rebuilding it`
+        )
+        await sftpCall((done) => sftp.unlink(tempRemotePath, done)).catch((error) => {
+          if (!isSftpMissingError(error)) {
+            throw error
+          }
         })
-      })
+        stagedSize = 0
+      }
+      await this.uploadFileSliceAsUser(
+        localPath,
+        tempRemotePath,
+        stagedSize,
+        stagedSize,
+        (progress) => {
+          onProgress({
+            percent: Math.min(99, Math.max(1, progress.percent === 100 ? 99 : progress.percent)),
+            transferredBytes: progress.transferredBytes,
+            totalBytes: progress.totalBytes,
+            message: undefined
+          })
+        },
+        signal
+      )
+      this.throwIfTransferAborted(signal)
       onProgress({
         percent: 99,
         transferredBytes: total,
@@ -1544,12 +1628,13 @@ fi
         message: '正在应用 root 写入...'
       })
       await this.ensureRemoteDirectory(path.posix.dirname(remotePath))
+      this.throwIfTransferAborted(signal)
       if (resumeOffset > 0) {
         await this.execShellFileCommand(`
 set -e
 current=$(stat -c %s -- ${shellQuote(remotePath)} 2>/dev/null || wc -c < ${shellQuote(remotePath)} 2>/dev/null || echo -1)
 [ "$current" = ${resumeOffset} ] || { echo "resume offset changed: $current" >&2; exit 74; }
-cat -- ${shellQuote(tempRemotePath)} >> ${shellQuote(remotePath)}
+tail -c +${resumeOffset + 1} -- ${shellQuote(tempRemotePath)} >> ${shellQuote(remotePath)}
 rm -f -- ${shellQuote(tempRemotePath)}
 `, { allowNonZeroWithStdout: true }, true)
       } else {
@@ -1568,10 +1653,8 @@ rm -f -- ${shellQuote(tempRemotePath)}
         message: undefined
       })
     } catch (error) {
-      try {
-        await this.execCommand(`sh -lc ${shellQuote(`rm -f -- ${tempRemotePath}`)}`, { allowNonZeroWithStdout: true })
-      } catch {
-        // Best-effort cleanup for temp upload artifacts.
+      if (!stagingPath) {
+        this.scheduleTransferStagingCleanup(tempRemotePath)
       }
       throw error
     }
@@ -1581,26 +1664,73 @@ rm -f -- ${shellQuote(tempRemotePath)}
     localPath: string,
     remotePath: string,
     sourceOffset: number,
-    onProgress: (progress: TransferProgress) => void
+    remoteOffset: number,
+    onProgress: (progress: TransferProgress) => void,
+    signal?: AbortSignal
   ) {
     const sftp = await this.ensureTransferSftp()
     const total = (await stat(localPath)).size
-    const remaining = Math.max(0, total - sourceOffset)
     const progressTotal = Math.max(total, 1)
     let transferredBytes = sourceOffset
-    const localStream = createReadStream(localPath, { start: sourceOffset })
-    const remoteStream = sftp.createWriteStream(remotePath, { flags: 'w', mode: 0o600 })
-    localStream.on('data', (chunk) => {
-      transferredBytes = Math.min(total, transferredBytes + chunk.length)
-      onProgress({
-        percent: Math.min(99, Math.round((transferredBytes / progressTotal) * 100)),
-        transferredBytes,
-        totalBytes: total
-      })
+    onProgress({
+      percent: Math.min(99, Math.round((transferredBytes / progressTotal) * 100)),
+      transferredBytes,
+      totalBytes: total
     })
-    await pipeline(localStream, remoteStream)
-    await this.verifySftpRemoteUploadSize(sftp, remotePath, remaining)
+    if (sourceOffset < total) {
+      const localStream = createReadStream(localPath, { start: sourceOffset })
+      const remoteStream = sftp.createWriteStream(remotePath, {
+        flags: remoteOffset > 0 ? 'r+' : 'w',
+        start: remoteOffset > 0 ? remoteOffset : undefined,
+        mode: 0o600
+      })
+      const reportProgress = () => {
+        const acknowledgedBytes = Math.min(
+          total,
+          sourceOffset + this.getWritableBytesWritten(remoteStream)
+        )
+        if (acknowledgedBytes <= transferredBytes) {
+          return
+        }
+        transferredBytes = acknowledgedBytes
+        onProgress({
+          percent: Math.min(99, Math.round((transferredBytes / progressTotal) * 100)),
+          transferredBytes,
+          totalBytes: total
+        })
+      }
+      remoteStream.on('drain', reportProgress)
+      remoteStream.on('finish', reportProgress)
+      remoteStream.on('close', reportProgress)
+      await this.runTransferPipeline(localStream, remoteStream, signal)
+      reportProgress()
+    } else if (total === 0 && remoteOffset === 0) {
+      const emptySource = Readable.from([])
+      const remoteStream = sftp.createWriteStream(remotePath, { flags: 'w', mode: 0o600 })
+      await this.runTransferPipeline(emptySource, remoteStream, signal)
+    }
+    await this.verifySftpRemoteUploadSize(sftp, remotePath, total - (sourceOffset - remoteOffset))
     onProgress({ percent: 100, transferredBytes: total, totalBytes: total })
+  }
+
+  private async readSftpFileSize(sftp: SFTPWrapper, remotePath: string): Promise<number | null> {
+    try {
+      const attrs = await new Promise<{ size?: number }>((resolve, reject) => {
+        sftp.stat(remotePath, (error, stats) => {
+          if (error || !stats) {
+            reject(error ?? new Error(`Failed to stat remote file: ${remotePath}`))
+            return
+          }
+          resolve(stats)
+        })
+      })
+      return typeof attrs.size === 'number' ? attrs.size : null
+    } catch (error) {
+      if (isSftpMissingError(error)) {
+        return null
+      }
+      throw error
+    }
   }
 
   private async verifySftpRemoteUploadSize(sftp: SFTPWrapper, remotePath: string, expectedSize: number): Promise<void> {
@@ -1614,6 +1744,102 @@ rm -f -- ${shellQuote(tempRemotePath)}
       })
     })
     this.assertRemoteUploadSize(remotePath, attrs.size, expectedSize)
+  }
+
+  private async runTransferPipeline(
+    source: Readable,
+    destination: Writable,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const activePipeline = { source, destination }
+    let rejectAbort: ((error: Error) => void) | undefined
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject
+    })
+    const abortPipeline = () => {
+      void this.stopTransferPipeline(source, destination)
+        .catch(() => undefined)
+        .finally(() => rejectAbort?.(this.transferAbortError()))
+    }
+    this.activeTransferPipelines.add(activePipeline)
+    signal?.addEventListener('abort', abortPipeline, { once: true })
+    let pipelinePromise: Promise<void> | undefined
+    try {
+      if (signal?.aborted) {
+        await this.stopTransferPipeline(source, destination)
+        throw this.transferAbortError()
+      }
+      pipelinePromise = pipeline(source, destination)
+      await (signal ? Promise.race([pipelinePromise, abortPromise]) : pipelinePromise)
+    } finally {
+      signal?.removeEventListener('abort', abortPipeline)
+      this.activeTransferPipelines.delete(activePipeline)
+      void pipelinePromise?.catch(() => undefined)
+    }
+  }
+
+  private async stopTransferPipeline(source: Readable, destination: Writable): Promise<void> {
+    if (source.destroyed && destination.destroyed) {
+      return
+    }
+
+    source.pause()
+    source.unpipe(destination)
+
+    // Let SFTP acknowledge data already handed to the writable before closing
+    // its file handle. Destroying both streams at once can leave a zero-byte
+    // checkpoint even though the renderer has already observed progress.
+    if (!destination.destroyed && !destination.writableEnded && !destination.writableFinished) {
+      await new Promise<void>((resolve) => {
+        let settled = false
+        const finish = () => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          destination.off('finish', finish)
+          destination.off('close', finish)
+          destination.off('error', finish)
+          resolve()
+        }
+        const timeout = setTimeout(finish, 5_000)
+        destination.once('finish', finish)
+        destination.once('close', finish)
+        destination.once('error', finish)
+        destination.end()
+      })
+    }
+
+    if (!source.destroyed) {
+      source.destroy()
+    }
+    if (!destination.destroyed) {
+      destination.destroy()
+    }
+  }
+
+  private getWritableBytesWritten(stream: Writable): number {
+    const value = (stream as Writable & { bytesWritten?: unknown }).bytesWritten
+    return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0
+  }
+
+  private throwIfTransferAborted(signal?: AbortSignal) {
+    if (signal?.aborted) {
+      throw this.transferAbortError()
+    }
+  }
+
+  private transferAbortError() {
+    return new Error('传输已暂停')
+  }
+
+  private scheduleTransferStagingCleanup(remotePath: string) {
+    void this.ensureTransferSftp()
+      .then((sftp) => sftpCall((done) => sftp.unlink(remotePath, done)))
+      .catch((error) => {
+        if (!isSftpMissingError(error)) {
+          appWarn(`[FileTerm][SFTP] Could not clean transfer staging file ${remotePath}`, error)
+        }
+      })
   }
 
   private async verifyShellRemoteUploadSize(remotePath: string, expectedSize: number, privileged: boolean): Promise<void> {
@@ -1648,7 +1874,8 @@ rm -f -- ${shellQuote(tempRemotePath)}
     localPath: string,
     onProgress: (progress: TransferProgress) => void,
     cause: unknown,
-    resumeOffset = 0
+    resumeOffset = 0,
+    signal?: AbortSignal
   ): Promise<void> {
     this.ensureShellFileFallback(cause)
     const remoteIdentity = await this.statRemoteFile(remotePath)
@@ -1670,7 +1897,8 @@ rm -f -- ${shellQuote(tempRemotePath)}
         percent: Math.min(99, Math.round((transferredBytes / Math.max(total, 1)) * 100)),
         transferredBytes,
         totalBytes: total
-      })
+      }),
+      signal
     )
     const localInfo = await stat(localPath)
     this.assertRemoteUploadSize(localPath, localInfo.size, total)
@@ -1684,7 +1912,8 @@ rm -f -- ${shellQuote(tempRemotePath)}
     resumeOffset: number,
     expectedBytes: number,
     privileged: boolean,
-    onProgress: (transferredBytes: number) => void
+    onProgress: (transferredBytes: number) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     const execClient = await this.ensureExecConnection()
     const shellCommand = resumeOffset > 0
@@ -1710,6 +1939,7 @@ rm -f -- ${shellQuote(tempRemotePath)}
         if (settled) return
         settled = true
         clearTimeout(timeoutId)
+        signal?.removeEventListener('abort', abortTransfer)
         localStream.destroy()
         channel?.destroy()
         reject(error)
@@ -1718,11 +1948,18 @@ rm -f -- ${shellQuote(tempRemotePath)}
         if (settled) return
         settled = true
         clearTimeout(timeoutId)
+        signal?.removeEventListener('abort', abortTransfer)
         resolve()
       }
+      const abortTransfer = () => safeReject(this.transferAbortError())
       const timeoutId = setTimeout(() => {
         safeReject(new Error('文件下载超时'))
       }, 10 * 60 * 1000)
+      signal?.addEventListener('abort', abortTransfer, { once: true })
+      if (signal?.aborted) {
+        abortTransfer()
+        return
+      }
 
       localStream.on('error', (error) => {
         safeReject(error instanceof Error ? error : new Error(String(error)))
@@ -1888,7 +2125,8 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
     command: string,
     privileged: boolean,
     expectedBytes: number,
-    onProgress?: (transferredBytes: number) => void
+    onProgress?: (transferredBytes: number) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     const execClient = await this.ensureExecConnection()
     return new Promise<void>((resolve, reject) => {
@@ -1904,6 +2142,7 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
         if (!settled) {
           settled = true
           clearTimeout(timeoutId)
+          signal?.removeEventListener('abort', abortTransfer)
           resolve()
         }
       }
@@ -1912,6 +2151,7 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
         if (!settled) {
           settled = true
           clearTimeout(timeoutId)
+          signal?.removeEventListener('abort', abortTransfer)
           try {
             readStream.destroy()
           } catch {
@@ -1926,9 +2166,16 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
         }
       }
 
+      const abortTransfer = () => safeReject(this.transferAbortError())
+
       const timeoutId = setTimeout(() => {
         safeReject(new Error('文件上传超时'))
       }, 10 * 60 * 1000)
+      signal?.addEventListener('abort', abortTransfer, { once: true })
+      if (signal?.aborted) {
+        abortTransfer()
+        return
+      }
 
       const handlePrivilegeError = (message: string): boolean => {
         if (!privileged) {

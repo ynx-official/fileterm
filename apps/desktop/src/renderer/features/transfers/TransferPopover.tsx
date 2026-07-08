@@ -62,7 +62,7 @@ export function TransferPopover({
     handler: (id: string) => Promise<void> | void
   ) => {
     setPendingActions((current) => ({ ...current, [transferId]: action }))
-    void Promise.resolve(handler(transferId)).catch(() => {
+    void Promise.resolve().then(() => handler(transferId)).catch(() => undefined).finally(() => {
       setPendingActions((current) => {
         const next = { ...current }
         delete next[transferId]

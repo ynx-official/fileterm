@@ -166,6 +166,21 @@ platform probe
 - macOS 菜单栏托盘图标使用 `apps/desktop/build/trayTemplate*.png` template 资源，由 main process 设置为 `setTemplateImage(true)`。
 - 产品更名后，main process 首次启动只迁移旧用户目录中的应用自有 JSON 数据；Chromium session、缓存与日志不迁移。
 
+## 4.3 传输暂停与恢复边界
+
+- `packages/core` 的 `TransferTask.tabId` 记录任务创建时所属的连接标签，renderer 据此隔离同一 profile 下的并行标签任务。
+- 标签关闭后，旧任务仍按 profile 作为可重新打开的历史断点；仍然存在的其他连接标签任务不会串入当前标签。
+- 主动暂停、标签关闭、连接断开、应用退出和重启恢复都只保留断点并进入 `paused`，不会自动续传；继续传输只能由用户显式触发。
+- 单次传输取消通过 controller 调用参数中的 `AbortSignal` 传播。该信号只属于运行时，不进入 `TransferTask` 或传输日志。
+- 真正退出应用时，main process 必须先等待活动任务停止并刷新 transfer journal，再放行窗口关闭和 `app.quit()`；macOS 隐藏窗口不触发 workspace shutdown。
+
+## 4.4 SSH 终端与文件身份联动
+
+- 远端 shell integration 在 prompt 上报真实 `cwd` 和 `id -un`，renderer 不解析命令文本、提示符或 `sudo` 输出。
+- 每个 SSH controller 的首次用户上报是登录身份；后续终端用户变化会单向驱动文件访问身份，并在切换成功后按最新 cwd 重新跟随。
+- 文件区手动切换 user/root 只改变独立的 SFTP/exec 文件通道，不向交互终端写命令；相同 shell 用户的重复 prompt 不会覆盖手动选择。
+- 终端与文件通道不是同一远端进程。文件区进入特权身份仍需通过独立 exec channel 校验 sudo，优先复用终端输入期间已捕获的授权或远端免密 sudo。
+
 ## 5. 当前仓库结构
 
 ```txt
@@ -446,12 +461,12 @@ interface WorkspaceTab {
 - 单文件和目录 manifest 任务由 main process 持久化到 Electron `userData/transfer-journal.json`；renderer 不直接读写 journal。
 - 上传和下载都先写入 `.fileterm-part` 临时文件，校验大小后再替换正式目标。
 - SFTP 与 FTP/FTPS 分别在 controller 内实现 offset 读写和远端收尾，不把协议命令伪统一到 renderer 或 transfer UI。
-- 传输调度使用 `profileId` 作为跨重启身份，不持久化生命周期短暂的 `tabId`；普通中断任务在对应连接恢复后自动继续，root 任务需要先恢复 root 授权。
+- 传输调度使用 `profileId` 作为跨重启身份，不依赖生命周期短暂的 `tabId` 恢复连接；所有中断任务都等待用户手动继续，root 任务继续前还需要恢复 root 授权。
 - 高频字节进度仍只走 `transfer:update`，journal 只在任务创建、状态切换和收尾时更新；恢复 offset 以实际临时文件大小为准。
 - 普通断线和暂停保留临时文件；只有显式丢弃才清理断点。
 - 本地最终替换采用可回滚的备份重命名。Windows 文件占用导致替换失败时保留 `.fileterm-part`，避免丢失已传数据。
 - 目录任务持久化逐文件 manifest：已完成文件经过目标大小复核后跳过，当前文件按真实 `.fileterm-part` 长度继续。
-- SFTP root 上传保留 `/tmp` staging，再由 sudo 写入目标同目录断点；普通 SFTP/FTP/FTPS 直接写目标同目录断点。
+- SFTP root 上传为每个任务持久化一个不可预测的 `/tmp` staging 路径；staging 始终保存源文件从 0 开始的连续前缀，暂停和重启后按实际长度续写，再由 sudo 只提交目标断点尚缺的后缀。普通 SFTP/FTP/FTPS 直接写目标同目录断点。
 - FTP 上传优先使用 `APPE`，服务器不支持时回退 `REST + STOR`；回退结果不安全时删除断点并从零重传，避免拼接出等长但错误的文件。
 - FTP 安全模式明确区分未加密 FTP、显式 FTPS 和隐式 FTPS。
 - SFTP 可恢复路径保持有序流式写入。并行绝对 offset 会让文件长度无法证明前缀连续，因此在没有持久化范围位图前不用于断点判断。

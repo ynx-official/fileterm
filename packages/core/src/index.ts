@@ -112,6 +112,7 @@ export interface TransferManifestEntry {
   sourcePath: string
   destinationPath: string
   partialPath: string
+  stagingPath?: string
   sourceIdentity: TransferFileIdentity
   status: TransferManifestEntryStatus
   transferredBytes: number
@@ -133,6 +134,7 @@ export interface TransferTask {
   speed?: string
   transferredBytes?: number
   totalBytes?: number
+  tabId?: string
   profileId?: string
   sessionType?: SessionType
   fileAccessMode?: 'user' | 'root'
@@ -140,6 +142,7 @@ export interface TransferTask {
   sourcePath?: string
   destinationPath?: string
   partialPath?: string
+  stagingPath?: string
   sourceIdentity?: TransferFileIdentity
   manifest?: TransferManifest
   resumable?: boolean
@@ -162,6 +165,8 @@ export interface TransferTargetOptions {
 
 export interface TransferFileOptions {
   resumeOffset?: number
+  signal?: AbortSignal
+  stagingPath?: string
 }
 
 export interface RemoteFileStat {
@@ -334,6 +339,7 @@ export interface SessionSnapshot {
   terminalTranscript?: string
   remotePath: string
   shellCwd?: string
+  shellUser?: string
   followShellCwd?: boolean
   remoteFilesLoading?: boolean
   remoteFiles: RemoteFileItem[]

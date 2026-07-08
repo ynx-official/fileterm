@@ -3362,11 +3362,17 @@ export function App() {
         </main>
 
         <TransferCenter
+          activeProfileId={activeTab?.profileId}
+          activeTabId={displayedSessionTabId}
           desktopApi={desktopApi}
           fullWidth={!showSidebar}
           initialTransfers={workspace.transfers}
           isPending={isBusy}
           onError={(scope, err) => reportError(setError, scope, err)}
+          sessionTabs={visibleWorkspaceTabs.map((tab) => ({
+            id: tab.id,
+            profileId: tab.profileId
+          }))}
           visible={!isHomeWorkspaceVisible}
         />
 

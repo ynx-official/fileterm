@@ -25,6 +25,7 @@ let commandManagerWindow: BrowserWindow | null = null
 let commandFormWindow: BrowserWindow | null = null
 let fileEditorWindow: BrowserWindow | null = null
 let isQuitting = false
+let quitPreparationPromise: Promise<void> | undefined
 let tray: Tray | null = null
 
 const isMac = process.platform === 'darwin'
@@ -321,6 +322,10 @@ function getWindowIconOptions() {
 }
 
 function requestQuitConfirmation() {
+  if (quitPreparationPromise) {
+    return
+  }
+
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.show()
     mainWindow.focus()
@@ -328,9 +333,43 @@ function requestQuitConfirmation() {
     return
   }
 
-  isQuitting = true
-  void ipcServices?.workspaceService.shutdown()
-  app.quit()
+  void quitApplication()
+}
+
+function shutdownWorkspace() {
+  return Promise.resolve(ipcServices?.workspaceService.shutdown()).catch((error) => {
+    safeConsoleError('[FileTerm] failed to shut down workspace cleanly', error)
+  })
+}
+
+function quitApplication(): Promise<void> {
+  if (quitPreparationPromise) {
+    return quitPreparationPromise
+  }
+
+  quitPreparationPromise = (async () => {
+    await shutdownWorkspace()
+    isQuitting = true
+
+    const childWindows = [
+      connectionManagerWindow,
+      connectionFormWindow,
+      commandManagerWindow,
+      commandFormWindow,
+      fileEditorWindow
+    ]
+    for (const child of childWindows) {
+      if (child && !child.isDestroyed()) {
+        child.close()
+      }
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.close()
+    }
+    app.quit()
+  })()
+
+  return quitPreparationPromise
 }
 
 function requestCloseFocusedWindow() {
@@ -524,6 +563,9 @@ function createMainWindow() {
       return
     }
     event.preventDefault()
+    if (quitPreparationPromise) {
+      return
+    }
     win.webContents.send('app:window-close-request', { isQuit: false })
   })
   win.webContents.on('before-input-event', (event, input) => {
@@ -865,25 +907,9 @@ app.whenReady().then(() => {
     requestQuitApp: () => {
       requestQuitConfirmation()
     },
-    confirmCloseWindow: (action) => {
+    confirmCloseWindow: async (action) => {
       if (action === 'quit') {
-        isQuitting = true
-        const childWindows = [
-          connectionManagerWindow,
-          connectionFormWindow,
-          commandManagerWindow,
-          commandFormWindow,
-          fileEditorWindow
-        ]
-        for (const child of childWindows) {
-          if (child && !child.isDestroyed()) {
-            child.close()
-          }
-        }
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.close()
-        }
-        app.quit()
+        await quitApplication()
       } else if (action === 'hide') {
         const childWindows = [
           connectionManagerWindow,
@@ -919,7 +945,6 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  void ipcServices?.workspaceService.shutdown()
   if (process.platform !== 'darwin') {
     app.quit()
   }
@@ -927,7 +952,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', (event) => {
   if (isQuitting) {
-    void ipcServices?.workspaceService.shutdown()
     return
   }
 
