@@ -365,6 +365,22 @@ export function ConnectionManagerModal({
           <span className="manager-actions">
             {!isFolder && (
               <button
+                aria-label={t.connect}
+                className="manager-icon-action"
+                title={t.connect}
+                type="button"
+                onMouseDown={stopInteractiveEvent}
+                onPointerDown={stopInteractiveEvent}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onOpenProfile(node.id)
+                }}
+              >
+                <AppIcon name="brand" size={14} />
+              </button>
+            )}
+            {!isFolder && (
+              <button
                 aria-label={t.edit}
                 className="manager-icon-action"
                 title={t.edit}
