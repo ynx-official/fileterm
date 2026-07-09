@@ -593,8 +593,10 @@ textarea:focus-visible,
 }
 
 .network-panel {
-  height: 30px;
-  margin-top: 4px;
+  height: 36px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-light);
   font-family: "SF Mono", Menlo, Consolas, monospace;
   font-size: 11px;
 }
