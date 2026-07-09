@@ -69,12 +69,12 @@ theme system   ████████████████░░░░  tok
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | SSH profile 管理 | 已完成 | 新增、编辑、删除、文件夹分组、JSON 文件持久化、group/parentId 双向同步 |
-| FTP profile 管理 | 已完成 | 独立于 SSH 的连接模型 |
+| FTP/FTPS profile 管理 | 已完成 | 独立于 SSH 的 FTP/FTPS 连接模型 |
 | SSH shell | 已完成 | xterm.js 渲染、输入输出、自适应 resize、搜索、剪贴板互通、雾透悬浮命令输入条 |
 | 文件编辑器 | 已完成 | Monaco Editor 提供双栏文件树/编辑区、语法高亮、查找替换、编码与语言切换 |
 | SFTP 文件管理 | 已完成 | 远程目录浏览、读/写/新建/删除/重命名/权限修改 |
-| FTP 文件管理 | 已完成 | FTP 会话与远程文件能力 |
-| Transfer center | 已完成 | 上传下载任务队列、进度、速度、取消、文件/文件夹递归 |
+| FTP/FTPS 文件管理 | 已完成 | FTP/FTPS 会话安全传输与远程文件能力 |
+| Transfer center | 已完成 | 支持断点续传（SFTP/FTP/FTPS）、上传下载任务队列、进度、速度、取消、文件/文件夹递归 |
 | Workspace tabs | 已完成 | 多标签并行连接、断开/重连、session 状态持久化、标签切换动效 |
 | Theme system | 已完成 | tokens → CSS vars → skin，深色/浅色主题一键切换 |
 | 远程连接状态 | 已完成 | 连接状态提示、系统资源监控面板、侧栏收起态资源摘要 |
@@ -161,8 +161,8 @@ fileterm/
 
 当前重点：
 
-1. 稳住 `SSH / SFTP / FTP` MVP 主链路。
-2. 拆分 `ipc.ts`、`workspace-service.ts`、`session-controllers.ts`、`App.tsx`。
+1. 稳住 `SSH / SFTP / FTP / FTPS` MVP 主链路与断点续传。
+2. 拆分 `workspace-service.ts`、`session-controllers.ts`、`App.tsx`（已完成 `ipc/` 拆分）。
 3. 把领域类型继续收敛到 `packages/core`。
 4. 完善 transfer center、错误提示、主题、终端输入、文件抽屉和桌面壳体验。
 5. 准备 macOS / Windows 可分发版本。
@@ -249,12 +249,12 @@ The goal of the initial version is not to support every possible protocol, but r
 | Capability | Status | Description |
 | --- | --- | --- |
 | SSH Profile Management | Completed | Create, edit, delete connection profiles, group profiles into folders, persist using JSON files, and synchronize `group` name and `parentId` bidirectionally |
-| FTP Profile Management | Completed | Separate connection model independent of SSH profiles |
+| FTP/FTPS Profile Management | Completed | Separate FTP/FTPS connection model independent of SSH profiles |
 | SSH Shell | Completed | Powered by xterm.js, input/output handling, adaptive resizing, text search, clipboard sync, and floating frosted command bar |
 | File Editor | Completed | Powered by Monaco Editor, dual-pane layout (file tree & edit area), syntax highlighting, search/replace, encoding, and language selection |
 | SFTP File Explorer | Completed | Directory navigation, read/write actions, create/delete files/folders, rename, and permissions modification (chmod) |
-| FTP File Explorer | Completed | Clean file-only session management and remote file actions |
-| Transfer Center | Completed | Upload/download queue, progress updates, speed rates, task cancellation, and recursive directory handling |
+| FTP/FTPS File Explorer | Completed | Clean FTP/FTPS session management, secure transfers, and remote file actions |
+| Transfer Center | Completed | Resumable transfers (SFTP/FTP/FTPS), upload/download queue, progress updates, speed rates, task cancellation, and recursive directory handling |
 | Workspace Tabs | Completed | Multi-tab parallel connections, disconnect/reconnect, session persistence, and smooth tab transition animations |
 | Theme System | Completed | tokens → CSS variables → components skins, and one-click dark/light mode toggle |
 | Connection Status Panel | Completed | Active connection health indicator, system resource usage graphs, and sidebar collapsed metadata overview |
@@ -341,8 +341,8 @@ fileterm/
 
 Current Priorities:
 
-1. Finalize and stabilize the core `SSH / SFTP / FTP` MVP path.
-2. Refactor and split code: `ipc/`, `workspace-service.ts`, `session-controllers.ts`, and `App.tsx`.
+1. Stabilize the core `SSH / SFTP / FTP / FTPS` MVP path and resumable transfers.
+2. Refactor and split code: `workspace-service.ts`, `session-controllers.ts`, and `App.tsx` (Completed splitting `ipc/` into submodules).
 3. Consolidate and move all shared types into `packages/core`.
 4. Improve the transfer center UI, global error reporting, theme stability, terminal input shortcuts, file drawers, and desktop shell integration.
 5. Package and prepare production-ready distributables for macOS and Windows.
