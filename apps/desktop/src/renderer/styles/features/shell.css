@@ -774,7 +774,7 @@
   display: flex;
   align-items: flex-end;
   min-width: 0;
-  padding-left: 12px;
+  padding-left: 0;
   gap: 4px;
   position: relative;
   bottom: -1px;
@@ -810,6 +810,10 @@
 
 .fs-tab.active {
   border: 1px solid var(--border-light);
+}
+
+.fs-tab.active:first-child {
+  border-left-color: transparent;
 }
 
 .tab-dot {
