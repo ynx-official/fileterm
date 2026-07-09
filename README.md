@@ -74,13 +74,17 @@ theme system   ████████████████░░░░  tok
 | 文件编辑器 | 已完成 | Monaco Editor 提供双栏文件树/编辑区、语法高亮、查找替换、编码与语言切换 |
 | SFTP 文件管理 | 已完成 | 远程目录浏览、读/写/新建/删除/重命名/权限修改 |
 | FTP/FTPS 文件管理 | 已完成 | FTP/FTPS 会话安全传输与远程文件能力 |
+| 终端目录跟随 (CWD) | 已完成 | SSH 终端与文件管理器当前工作目录自动双向同步跟随 |
+| Sudo 与 Root 权限同步 | 已完成 | 终端执行 sudo/su 时自动感知并双向同步更新文件管理器为 Root 对应读写权限 |
+| 虚拟滚动文件列表 | 已完成 | 引入虚拟列表（Virtual List）高效率渲染，万级文件目录浏览极速不卡顿 |
 | Transfer center | 已完成 | 支持断点续传（SFTP/FTP/FTPS）、上传下载任务队列、进度、速度、取消、文件/文件夹递归 |
 | Workspace tabs | 已完成 | 多标签并行连接、断开/重连、session 状态持久化、标签切换动效 |
-| Theme system | 已完成 | tokens → CSS vars → skin，深色/浅色主题一键切换 |
+| Theme system | 已完成 | tokens → CSS vars → skin，深色/浅色主题一键切换，焦点模式适配 |
 | 远程连接状态 | 已完成 | 连接状态提示、系统资源监控面板、侧栏收起态资源摘要 |
-| 命令模板 | 已完成 | 快捷命令模板、文件夹分组、参数占位符、一键发送 |
-| 桌面壳与布局 | 已完成 | macOS 标题栏避让、侧栏收起、文件面板抽屉、工作区焦点模式、macOS template 托盘图标 |
-| 工作区侧边栏 | 已完成 | 概览 → 连接管理器 → 命令管理器 → 设置四页导航 |
+| 命令模板 | 已完成 | 快捷命令模板（支持命令编辑行号）、文件夹分组、参数占位符、一键发送 |
+| 桌面壳与布局 | 已完成 | 左侧边栏宽度支持鼠标拖拽拉伸、macOS 标题栏避让、侧栏收起、文件面板抽屉、工作区焦点模式、macOS template 托盘图标 |
+| 工作区侧边栏 | 已完成 | 概览 → 连接管理器 → 命令管理器 → 设置四页导航（支持自定义按钮动作） |
+| 离线化适配 | 已完成 | 全局图标与字体资源本地离线化部署，优化 macOS 钥匙串存储策略规避重复系统弹窗，适配内网气泡开发环境 |
 | 窗口管理 | 已完成 | 主窗口、连接管理器、命令管理器、文件编辑器独立窗口 |
 
 ### 外部开源项目
@@ -255,12 +259,16 @@ The goal of the initial version is not to support every possible protocol, but r
 | SFTP File Explorer | Completed | Directory navigation, read/write actions, create/delete files/folders, rename, and permissions modification (chmod) |
 | FTP/FTPS File Explorer | Completed | Clean FTP/FTPS session management, secure transfers, and remote file actions |
 | Transfer Center | Completed | Resumable transfers (SFTP/FTP/FTPS), upload/download queue, progress updates, speed rates, task cancellation, and recursive directory handling |
+| Terminal CWD Sync | Completed | Active SSH terminal current working directory automatically syncs bidirectionally with the file explorer view |
+| Sudo & Root Sync | Completed | Detects sudo/su actions inside terminal and updates file manager credentials for root file read/write operations |
+| Virtualized File List | Completed | Uses virtualized list (virtual scrolling) for high-performance rendering of directories containing tens of thousands of files |
 | Workspace Tabs | Completed | Multi-tab parallel connections, disconnect/reconnect, session persistence, and smooth tab transition animations |
-| Theme System | Completed | tokens → CSS variables → components skins, and one-click dark/light mode toggle |
+| Theme System | Completed | tokens → CSS variables → components skins, one-click dark/light mode toggle, and focus mode adaptation |
 | Connection Status Panel | Completed | Active connection health indicator, system resource usage graphs, and sidebar collapsed metadata overview |
-| Command Templates | Completed | Quick snippets, folder nesting, parameter placeholders, and single-click terminal dispatching |
-| Desktop Shell & Layout | Completed | macOS native title bar spacing, collapsible sidebars, file drawer panel, focus mode toggle, and macOS template tray icon |
-| Workspace Sidebar | Completed | Overview → Connection Manager → Command Manager → Settings navigation |
+| Command Templates | Completed | Quick snippets (with editor line numbers), folder nesting, parameter placeholders, and single-click terminal dispatching |
+| Desktop Shell & Layout | Completed | Mouse resizable left sidebar, macOS native title bar spacing, collapsible sidebars, file drawer panel, focus mode toggle, and macOS template tray icon |
+| Workspace Sidebar | Completed | Overview → Connection Manager → Command Manager → Settings navigation (supports custom actions) |
+| Air-Gapped Compliance | Completed | Fully offlined icon/font assets, optimized macOS Keychain credentials storage logic to eliminate security dialogs, ideal for secure intranet developer environments |
 | Window Manager | Completed | Independent windows for main app, connection manager, command manager, and file editor |
 
 ### External Open Source Projects
