@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { mkdir, readdir, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { WebContents } from 'electron'
@@ -28,6 +27,7 @@ import {
 import type { ProfileRepository } from '@fileterm/storage'
 import { seedCommandFolders, seedCommandTemplates, seedProfiles, seedTransfers } from './workspace/seed-data.js'
 import { WorkspaceSessionRuntime, type LiveSessionController } from './workspace/workspace-session-runtime.js'
+import { WorkspaceTabLifecycleService } from './workspace/workspace-tab-lifecycle.js'
 import { WorkspaceTabsState } from './workspace/workspace-tabs.js'
 import { WorkspaceTransfersState } from './workspace/workspace-transfers.js'
 import { TransferJournal } from './transfers/transfer-journal.js'
@@ -45,6 +45,13 @@ import {
   transferManifestProgress,
   updateTransferManifestEntry
 } from './transfers/transfer-manifest.js'
+import {
+  createTransferSpeedTracker,
+  directoryProgressPercent,
+  formatTransferByteCount,
+  rootUploadStagingPath,
+  withRootUploadStagingPaths
+} from './transfers/transfer-runtime-utils.js'
 import { appWarn } from './app-logger.js'
 
 const TRANSFER_UPDATE_INTERVAL_MS = 200
@@ -65,6 +72,7 @@ export class WorkspaceService {
   private readonly transferRuns = new Map<string, Promise<WorkspaceSnapshot>>()
   private readonly transferJournal?: TransferJournal
   private readonly transferReady: Promise<void>
+  private readonly tabLifecycle: WorkspaceTabLifecycleService
   private shutdownPromise?: Promise<void>
   private readonly privilegedAccess = new Map<string, RemoteFileAccessOptions>()
   private readonly sessionRuntime = new WorkspaceSessionRuntime({
@@ -89,6 +97,16 @@ export class WorkspaceService {
   ) {
     this.profileRepository = profileRepository
     this.transferJournal = options?.transferJournal
+    this.tabLifecycle = new WorkspaceTabLifecycleService({
+      tabs: this.tabs,
+      sessionRuntime: this.sessionRuntime,
+      profileRepository: this.profileRepository,
+      privilegedAccess: this.privilegedAccess,
+      getSnapshot: () => this.getSnapshot(),
+      createController: (tabId, profile, initialTranscript) => this.createController(tabId, profile, initialTranscript),
+      finalizeTransfersForTab: (tabId, message) => this.finalizeTransfersForTab(tabId, message),
+      getDisconnectedTransferMessage: () => this.getDisconnectedTransferMessage()
+    })
     this.transferReady = this.restoreTransfers()
   }
 
@@ -145,10 +163,7 @@ export class WorkspaceService {
   }
 
   bindWorkspaceSender(sender: WebContents) {
-    for (const tab of this.tabs.list()) {
-      this.sessionRuntime.setSender(tab.id, sender)
-      void this.sessionRuntime.restoreTabData(tab.id)
-    }
+    this.tabLifecycle.bindWorkspaceSender(sender)
   }
 
   async createProfile(input: CreateProfileInput): Promise<WorkspaceSnapshot> {
@@ -265,148 +280,23 @@ export class WorkspaceService {
   }
 
   async openProfile(profileId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
-    const profile = await this.profileRepository.getById(profileId)
-    if (!profile) {
-      throw new Error(`Profile not found: ${profileId}`)
-    }
-
-    const tabId = randomUUID()
-    this.tabs.open(tabId, profile)
-    this.sessionRuntime.setSender(tabId, sender)
-    const controller = this.createController(tabId, profile)
-
-    const snapshot: SessionSnapshot = {
-      profileId: profile.id,
-      accessHost: profile.host,
-      summary: profile.type === 'ssh' ? '连接主机...' : controller.getSummary(),
-      terminalTranscript:
-        controller.type === 'ssh' ? controller.getTerminalTranscript() : undefined,
-      remotePath: controller.getRemotePath(),
-      shellCwd: controller.type === 'ssh' ? controller.getShellCwd() : undefined,
-      followShellCwd: profile.type === 'ssh',
-      remoteFiles: [],
-      fileAccessMode: controller.getFileAccessMode(),
-      sudoUser: profile.type === 'ssh' ? 'root' : undefined,
-      hasReusableSudoAuth: controller.type === 'ssh' ? controller.hasReusableSudoAuth() : false,
-      connected: false
-    }
-
-    this.sessionRuntime.set(tabId, snapshot)
-    void this.sessionRuntime.connect(tabId, controller).catch((error) => {
-      appWarn('[FileTerm][Session] Connection failed', error)
-    })
-    void this.profileRepository.touchProfile(profileId)
-
-    return this.getSnapshot()
+    return this.tabLifecycle.openProfile(profileId, sender)
   }
 
   async reconnectTab(tabId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
-    const tab = this.tabs.getById(tabId)
-    if (!tab) {
-      throw new Error(`Tab not found: ${tabId}`)
-    }
-
-    const currentSender = this.sessionRuntime.getSender(tabId)
-    const reusableSender = currentSender && !currentSender.isDestroyed() ? currentSender : sender
-    if (!reusableSender || reusableSender.isDestroyed()) {
-      throw new Error(`Tab sender unavailable: ${tabId}`)
-    }
-    this.sessionRuntime.setSender(tabId, reusableSender)
-
-    await this.finalizeTransfersForTab(tabId, this.getDisconnectedTransferMessage())
-    await this.sessionRuntime.disconnect(tabId)
-
-    const profile = await this.profileRepository.getById(tab.profileId)
-    if (!profile) {
-      throw new Error(`Profile not found: ${tab.profileId}`)
-    }
-
-    const current = this.sessionRuntime.get(tabId)
-    const disconnectedTranscript = appendDisconnectedTranscript(current?.terminalTranscript)
-    this.sessionRuntime.set(tabId, {
-      profileId: profile.id,
-      accessHost: profile.host,
-      summary: current?.accessHost ? `Disconnected from ${current.accessHost}` : 'Disconnected',
-      terminalTranscript: disconnectedTranscript,
-      remotePath: current?.remotePath ?? profile.remotePath,
-      shellCwd: current?.shellCwd,
-      followShellCwd: current?.followShellCwd ?? (profile.type === 'ssh'),
-      remoteFiles: [],
-      fileAccessMode: 'user',
-      sudoUser: current?.sudoUser ?? (profile.type === 'ssh' ? 'root' : undefined),
-      hasReusableSudoAuth: false,
-      connected: false,
-      systemMetrics: undefined
-    })
-
-    const controller = this.createController(tabId, profile, disconnectedTranscript)
-    this.sessionRuntime.set(tabId, {
-      profileId: profile.id,
-      accessHost: profile.host,
-      summary: profile.type === 'ssh' ? '连接主机...' : `连接主机 ${profile.host}:${profile.port}...`,
-      terminalTranscript:
-        controller.type === 'ssh' ? controller.getTerminalTranscript() : undefined,
-      remotePath: current?.remotePath ?? profile.remotePath,
-      shellCwd: current?.shellCwd,
-      followShellCwd: current?.followShellCwd ?? (profile.type === 'ssh'),
-      remoteFiles: [],
-      fileAccessMode: controller.getFileAccessMode(),
-      sudoUser: current?.sudoUser ?? (profile.type === 'ssh' ? 'root' : undefined),
-      hasReusableSudoAuth: controller.type === 'ssh' ? controller.hasReusableSudoAuth() : false,
-      connected: false,
-      systemMetrics: undefined
-    })
-    this.tabs.updateStatus(tabId, 'connecting')
-    this.tabs.activate(tabId)
-
-    void this.sessionRuntime.connect(tabId, controller).catch((error) => {
-      appWarn('[FileTerm][Session] Reconnection failed', error)
-    })
-    await this.sessionRuntime.emitSnapshot(reusableSender)
-    return this.getSnapshot()
+    return this.tabLifecycle.reconnectTab(tabId, sender)
   }
 
   async activateTab(tabId: string): Promise<WorkspaceSnapshot> {
-    if (!this.tabs.has(tabId)) {
-      return this.getSnapshot()
-    }
-    this.tabs.activate(tabId)
-    return this.getSnapshot()
+    return this.tabLifecycle.activateTab(tabId)
   }
 
   async closeTab(tabId: string): Promise<WorkspaceSnapshot> {
-    await this.finalizeTransfersForTab(tabId, '标签已关闭，传输已暂停，可手动继续')
-    await this.sessionRuntime.teardown(tabId)
-    this.privilegedAccess.delete(tabId)
-    this.tabs.remove(tabId)
-    return this.getSnapshot()
+    return this.tabLifecycle.closeTab(tabId)
   }
 
   async disconnectTab(tabId: string): Promise<WorkspaceSnapshot> {
-    const tab = this.tabs.getById(tabId)
-    const current = this.sessionRuntime.get(tabId)
-    if (!tab || !current) {
-      throw new Error(`Tab not found: ${tabId}`)
-    }
-
-    await this.finalizeTransfersForTab(tabId, '连接已主动断开，传输已暂停，可手动继续')
-    await this.sessionRuntime.disconnect(tabId)
-    this.privilegedAccess.delete(tabId)
-    const latest = this.sessionRuntime.get(tabId) ?? current
-    const disconnectedTranscript = appendDisconnectedTranscript(latest.terminalTranscript)
-    this.sessionRuntime.set(tabId, {
-      ...latest,
-      summary: latest.accessHost ? `Disconnected from ${latest.accessHost}` : 'Disconnected',
-      terminalTranscript: disconnectedTranscript,
-      remoteFiles: [],
-      fileAccessMode: 'user',
-      hasReusableSudoAuth: false,
-      connected: false,
-      systemMetrics: undefined
-    })
-    this.tabs.updateStatus(tabId, 'closed')
-    await this.sessionRuntime.emitSnapshotForTab(tabId)
-    return this.getSnapshot()
+    return this.tabLifecycle.disconnectTab(tabId)
   }
 
   async resolveSshInteraction(requestId: string, response: SshInteractionResponse): Promise<void> {
@@ -1795,56 +1685,6 @@ export class WorkspaceService {
   }
 }
 
-function appendDisconnectedTranscript(transcript?: string) {
-  const base = transcript ?? ''
-  if (base.endsWith('连接已断开\r\n')) {
-    return base
-  }
-
-  const separator = base && !base.endsWith('\n') ? '\r\n' : ''
-  return `${base}${separator}连接已断开\r\n`
-}
-
-function rootUploadStagingPath() {
-  return `/tmp/fileterm-root-upload-${randomUUID()}.part`
-}
-
-function withRootUploadStagingPaths(transfer: TransferTask): TransferTask {
-  if (
-    transfer.direction !== 'upload'
-    || transfer.fileAccessMode !== 'root'
-    || !transfer.profileId
-  ) {
-    return transfer
-  }
-
-  const stagingPath = transfer.partialPath
-    ? transfer.stagingPath ?? rootUploadStagingPath()
-    : transfer.stagingPath
-  let manifest = transfer.manifest
-  if (transfer.manifest) {
-    let manifestChanged = false
-    const files = transfer.manifest.files.map((entry) => {
-      if (entry.stagingPath) {
-        return entry
-      }
-      manifestChanged = true
-      return {
-        ...entry,
-        stagingPath: rootUploadStagingPath()
-      }
-    })
-    if (manifestChanged) {
-      manifest = { ...transfer.manifest, files }
-    }
-  }
-
-  if (stagingPath === transfer.stagingPath && manifest === transfer.manifest) {
-    return transfer
-  }
-  return { ...transfer, stagingPath, manifest }
-}
-
 function isSkippableLocalReadError(error: unknown) {
   return Boolean(
     error
@@ -1852,122 +1692,6 @@ function isSkippableLocalReadError(error: unknown) {
     && 'code' in error
     && (((error as { code?: string }).code === 'EACCES') || ((error as { code?: string }).code === 'EPERM'))
   )
-}
-
-function createTransferSpeedTracker() {
-  const minSampleMs = 120
-  const smoothingFactor = 0.35
-  let sampleStartBytes: number | undefined
-  let sampleStartTimestamp: number | undefined
-  let smoothedBytesPerSecond: number | undefined
-  let lastSpeed: string | undefined
-
-  return (progress: TransferProgress) => {
-    if (progress.transferredBytes === undefined) {
-      return lastSpeed
-    }
-
-    const now = Date.now()
-    if (sampleStartBytes === undefined || sampleStartTimestamp === undefined) {
-      sampleStartBytes = progress.transferredBytes
-      sampleStartTimestamp = now
-      return lastSpeed
-    }
-
-    const deltaBytes = progress.transferredBytes - sampleStartBytes
-    const deltaMs = now - sampleStartTimestamp
-
-    if (deltaBytes <= 0 || deltaMs < minSampleMs) {
-      return lastSpeed
-    }
-
-    const instantBytesPerSecond = deltaBytes / (deltaMs / 1000)
-    smoothedBytesPerSecond = smoothedBytesPerSecond === undefined
-      ? instantBytesPerSecond
-      : (smoothedBytesPerSecond * (1 - smoothingFactor)) + (instantBytesPerSecond * smoothingFactor)
-
-    lastSpeed = formatTransferSpeed(smoothedBytesPerSecond)
-    sampleStartBytes = progress.transferredBytes
-    sampleStartTimestamp = now
-
-    return lastSpeed
-  }
-}
-
-function formatTransferSpeed(bytesPerSecond: number) {
-  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) {
-    return undefined
-  }
-
-  const units = ['B/s', 'KB/s', 'MB/s', 'GB/s']
-  let value = bytesPerSecond
-  let unitIndex = 0
-
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-
-  const digits = value >= 100 ? 0 : value >= 10 ? 1 : 2
-  return `${value.toFixed(digits)} ${units[unitIndex]}`
-}
-
-function formatTransferByteCount(bytes: number) {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  let value = Math.max(0, bytes)
-  let unitIndex = 0
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024
-    unitIndex += 1
-  }
-  const digits = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2
-  return `${value.toFixed(digits)} ${units[unitIndex]}`
-}
-
-function directoryProgressPercent(
-  manifest: TransferManifest,
-  relativePath: string,
-  currentTransferredBytes: number
-) {
-  const totalWeight = manifest.files.reduce((sum, entry) => sum + Math.max(entry.sourceIdentity.size, 1), 0)
-  if (totalWeight === 0) {
-    return 99
-  }
-  const completedWeight = manifest.files.reduce((sum, entry) => {
-    const weight = Math.max(entry.sourceIdentity.size, 1)
-    if (entry.status === 'done') {
-      return sum + weight
-    }
-    if (entry.relativePath === relativePath) {
-      const currentWeight = entry.sourceIdentity.size === 0
-        ? currentTransferredBytes > 0 ? 1 : 0
-        : Math.min(weight, Math.max(0, currentTransferredBytes))
-      return sum + currentWeight
-    }
-    return sum
-  }, 0)
-  return Math.max(1, Math.min(99, Math.round((completedWeight / totalWeight) * 100)))
-}
-
-function isRetryableTransferError(error: unknown) {
-  const code = error && typeof error === 'object' && 'code' in error
-    ? String((error as { code?: unknown }).code ?? '')
-    : ''
-  if (/ECONNRESET|ECONNABORTED|EPIPE|ETIMEDOUT|ENETDOWN|ENETRESET|ENETUNREACH|EHOSTUNREACH/i.test(code)) {
-    return true
-  }
-
-  const message = error instanceof Error ? error.message : String(error)
-  if (/源文件已发生变化|断点文件大于源文件|传输校验失败|permission denied|not permitted|authentication|login incorrect|\b530\b|\b550\b/i.test(message)) {
-    return false
-  }
-  return /connection|socket|channel|session|closed|timeout|timed out|unexpected eof|end of file|not connected|write after end|ECONN/i.test(message)
-}
-
-function waitForRetry(delayMs: number) {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, delayMs)
-  })
 }
 
 export { seedCommandFolders, seedCommandTemplates, seedProfiles }

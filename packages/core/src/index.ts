@@ -219,6 +219,23 @@ export interface NetworkRates {
   tx: string
 }
 
+export type RemoteSystemPlatform = 'linux' | 'busybox' | 'windows' | 'unknown'
+
+export interface RawResourceUsageBreakdown {
+  totalBytes: number
+  usedBytes: number
+  availableBytes: number
+  percent: number
+}
+
+export interface RawNetworkInterfaceMetrics {
+  name: string
+  rxBytes: number
+  txBytes: number
+  rxBytesPerSecond: number
+  txBytesPerSecond: number
+}
+
 export interface SystemIdentity {
   osName: string
   kernelName: string
@@ -278,6 +295,7 @@ export interface FileSystemRow {
 }
 
 export interface SystemMetrics {
+  platform?: RemoteSystemPlatform
   ip: string
   uptime: string
   uptimeSeconds?: number
@@ -293,9 +311,15 @@ export interface SystemMetrics {
   memoryCacheUsage?: string
   memoryKernelUsage?: string
   memoryBreakdown: ResourceUsageBreakdown
+  memoryRaw?: RawResourceUsageBreakdown & {
+    appBytes?: number
+    cacheBytes?: number
+    kernelBytes?: number
+  }
   swapPercent: number
   swapUsage: string
   swapBreakdown: ResourceUsageBreakdown
+  swapRaw?: RawResourceUsageBreakdown
   diskRows: Array<{ path: string; usage: string }>
   fileSystemRows: FileSystemRow[]
   networkInterfaces: string[]
@@ -305,6 +329,7 @@ export interface SystemMetrics {
   networkInterfaceRows: NetworkInterfaceRow[]
   networkRatesByInterface?: Record<string, NetworkRates>
   networkSamplesByInterface?: Record<string, NetworkSamplePoint[]>
+  networkRawByInterface?: Record<string, RawNetworkInterfaceMetrics>
   topProcesses: SidebarProcessItem[]
 }
 

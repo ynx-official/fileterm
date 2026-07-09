@@ -22,7 +22,8 @@ import type {
   TransferProgress
 } from '@fileterm/core'
 import { BaseFileSessionController } from './base-file-session-controller.js'
-import { buildMetricsCommand, parentRemotePath, parseSystemMetrics, toRemoteFileItem } from './session-file-utils.js'
+import { parentRemotePath, toRemoteFileItem } from './session-file-utils.js'
+import { collectSshSystemMetrics, type RemoteSystemPlatform } from './system-metrics/index.js'
 import {
   findSetupEchoEnd,
   SETUP_NEEDLE,
@@ -78,6 +79,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private awaitingSudoPasswordInput = false
   private pendingSudoPasswordInput = ''
   private metrics?: SystemMetrics
+  private metricsPlatform?: RemoteSystemPlatform
   private readonly acceptedHostFingerprints = new Set<string>()
 
   constructor(
@@ -1083,8 +1085,11 @@ fi
     }
 
     try {
-      const raw = await this.execCommand('sh', { allowNonZeroWithStdout: true }, false, `${buildMetricsCommand()}\n`)
-      this.metrics = parseSystemMetrics(raw)
+      const result = await collectSshSystemMetrics({
+        exec: (command, options, stdinPayload) => this.execCommand(command, options, false, stdinPayload)
+      }, this.metricsPlatform)
+      this.metricsPlatform = result.platform
+      this.metrics = result.metrics
       return this.metrics
     } catch (error) {
       this.sshDebug.log('exec', `系统信息采集失败: ${error instanceof Error ? error.message : String(error)}`)

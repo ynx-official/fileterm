@@ -26,6 +26,7 @@ import { CommandEditorModal, emptyCommandForm, toCommandTemplateInput } from './
 import { CommandManagerModal } from './features/commands/CommandManagerModal'
 import { ConnectionManagerModal } from './features/connections/ConnectionManagerModal'
 import { SettingsModal } from './features/settings/SettingsModal'
+import { ConnectionFormHost } from './features/connections/ConnectionFormHost'
 import { ConnectionModal } from './features/connections/ConnectionModal'
 import { SshCredentialsModal } from './features/connections/SshCredentialsModal'
 import { SshHostVerificationModal } from './features/connections/SshHostVerificationModal'
@@ -39,8 +40,9 @@ import type { SendScope, SessionSendTarget } from './features/common/session-sen
 import { resolveSelectedTabIds } from './features/common/session-send-targets'
 import { TabBar, type OrderedTabEntry, type TabContextTarget } from './features/layout/TabBar'
 import { TabContextMenu } from './features/layout/TabContextMenu'
-import { SystemSidebar } from './features/system/SystemSidebar'
-import { TransferCenter } from './features/transfers/TransferCenter'
+import { WindowMenubar } from './features/layout/WindowMenubar'
+import { SystemSidebarShell } from './features/system/SystemSidebarShell'
+import { TransferCenterHost } from './features/transfers/TransferCenterHost'
 import { WorkspaceStage } from './features/workspace/WorkspaceStage'
 import { useThemeMode, type ThemeMode } from './hooks/useThemeMode'
 import { defaultLocale, setLocale, t, type AppLocale } from './i18n'
@@ -3061,21 +3063,15 @@ export function App() {
   if (isConnectionFormWindow) {
     return (
       <StandaloneWindowFrame isWindows={isWindowsDesktop} showPlatformTitlebar={false} title={editingProfileId ? t.editConnection : t.newConnection}>
-        <ConnectionModal
+        <ConnectionFormHost
+          editingProfileId={editingProfileId}
           errorMessage={formError}
           groupOptions={connectionGroupOptions}
           mode={editingProfileId ? 'edit' : formWindowMode}
           form={form}
+          profiles={workspace.profiles}
           setForm={updateForm}
-          onClearHostFingerprint={() => {
-            const editingProfile = editingProfileId
-              ? workspace.profiles.find((profile) => profile.id === editingProfileId) ?? null
-              : null
-            if (editingProfile) {
-              void handleClearHostFingerprint(editingProfile)
-              setForm((prev) => ({ ...prev, trustedHostFingerprint: '' }))
-            }
-          }}
+          onClearHostFingerprint={(profile) => { void handleClearHostFingerprint(profile) }}
           standalone
           onSubmit={handleSaveProfile}
           onClose={closeCurrentWindow}
@@ -3179,67 +3175,22 @@ export function App() {
           '--brand-width': `${brandWidth}px`
         } as CSSProperties}
       >
-        {isWindowsDesktop ? (
-          <div className="window-menubar">
-            <div className="window-menu-items">
-              <button type="button" onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect()
-                void desktopApi?.showWindowMenu('file', Math.round(rect.left), Math.round(rect.bottom))
-              }}>File</button>
-              <button type="button" onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect()
-                void desktopApi?.showWindowMenu('view', Math.round(rect.left), Math.round(rect.bottom))
-              }}>View</button>
-              <button type="button" onClick={(e) => {
-                const rect = e.currentTarget.getBoundingClientRect()
-                void desktopApi?.showWindowMenu('window', Math.round(rect.left), Math.round(rect.bottom))
-              }}>Window</button>
-            </div>
-            <div className="window-control-buttons">
-              <button aria-label="Minimize" type="button" onClick={() => { void desktopApi?.minimizeCurrentWindow() }}>
-                <svg width="10" height="10" viewBox="0 0 10 10"><line x1="1" y1="5" x2="9" y2="5" stroke="currentColor" strokeWidth="1" /></svg>
-              </button>
-              <button aria-label="Maximize" type="button" onClick={() => { void desktopApi?.toggleMaximizeCurrentWindow() }}>
-                {isMaximized ? (
-                  <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1.5,3.5 L6.5,3.5 L6.5,8.5 L1.5,8.5 Z M3.5,3.5 L3.5,1.5 L8.5,1.5 L8.5,6.5 L6.5,6.5" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
-                ) : (
-                  <svg width="10" height="10" viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
-                )}
-              </button>
-              <CloseButton aria-label="Close" onClick={() => { void desktopApi?.closeCurrentWindow() }} size="window" />
-            </div>
-          </div>
-        ) : null}
+        {isWindowsDesktop ? <WindowMenubar desktopApi={desktopApi} isMaximized={isMaximized} /> : null}
         {!isHomeWorkspaceVisible && (
           <TabBar {...tabBarProps} />
         )}
 
         {showSidebar ? (
-          <aside className={`fs-sidebar ${isSystemSidebarCollapsed ? 'is-collapsed' : ''}`} style={{ position: 'relative' }}>
-            <SystemSidebar
-              activeProfile={activeProfile}
-              activeSession={activeSession}
-              collapsed={isSystemSidebarCollapsed}
-              onOpenSystemInfo={handleOpenSystemInfo}
-              onToggleCollapsed={() => {
-                setIsSystemSidebarCollapsed((prev) => {
-                  const nextCollapsed = !prev
-                  if (!nextCollapsed) {
-                    setSidebarWidth(214)
-                  }
-                  return nextCollapsed
-                })
-              }}
-            />
-            {!isSystemSidebarCollapsed ? (
-              <div
-                aria-label={t.resizeSidebar}
-                className={`sidebar-resizer ${isResizingSidebar ? 'is-active' : ''}`}
-                onMouseDown={() => setIsResizingSidebar(true)}
-                role="separator"
-              />
-            ) : null}
-          </aside>
+          <SystemSidebarShell
+            activeProfile={activeProfile}
+            activeSession={activeSession}
+            collapsed={isSystemSidebarCollapsed}
+            isResizing={isResizingSidebar}
+            onOpenSystemInfo={handleOpenSystemInfo}
+            onResizeStart={() => setIsResizingSidebar(true)}
+            onRestoreWidth={() => setSidebarWidth(214)}
+            onToggleCollapsed={setIsSystemSidebarCollapsed}
+          />
         ) : null}
 
         <main className={`fs-main ${error ? 'has-status' : 'no-status'} ${showSidebar ? '' : 'full-width'}`}>
@@ -3361,7 +3312,7 @@ export function App() {
           </div>
         </main>
 
-        <TransferCenter
+        <TransferCenterHost
           activeProfileId={activeTab?.profileId}
           activeTabId={displayedSessionTabId}
           desktopApi={desktopApi}
@@ -3369,10 +3320,7 @@ export function App() {
           initialTransfers={workspace.transfers}
           isPending={isBusy}
           onError={(scope, err) => reportError(setError, scope, err)}
-          sessionTabs={visibleWorkspaceTabs.map((tab) => ({
-            id: tab.id,
-            profileId: tab.profileId
-          }))}
+          sessionTabs={visibleWorkspaceTabs}
           visible={!isHomeWorkspaceVisible}
         />
 
@@ -3525,21 +3473,15 @@ export function App() {
       ) : null}
 
       {showForm ? (
-        <ConnectionModal
+        <ConnectionFormHost
+          editingProfileId={editingProfileId}
           errorMessage={formError}
           groupOptions={connectionGroupOptions}
           mode={editingProfileId ? 'edit' : 'create'}
           form={form}
+          profiles={workspace.profiles}
           setForm={updateForm}
-          onClearHostFingerprint={() => {
-            const editingProfile = editingProfileId
-              ? workspace.profiles.find((profile) => profile.id === editingProfileId) ?? null
-              : null
-            if (editingProfile) {
-              void handleClearHostFingerprint(editingProfile)
-              setForm((prev) => ({ ...prev, trustedHostFingerprint: '' }))
-            }
-          }}
+          onClearHostFingerprint={(profile) => { void handleClearHostFingerprint(profile) }}
           onSubmit={handleSaveProfile}
           onClose={() => {
             setShowForm(false)

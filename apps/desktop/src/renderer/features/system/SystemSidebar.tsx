@@ -294,11 +294,6 @@ function formatLegacyUptime(fallback?: string) {
     return '-'
   }
 
-  const zhDayMatch = value.match(/^(\d+)\s*天$/)
-  if (zhDayMatch) {
-    return `${zhDayMatch[1]}${t.uptimeDayUnit}`
-  }
-
   const enDayHourMatch = value.match(/^(\d+)\s+days?,\s+(\d+):(\d+)$/i)
   if (enDayHourMatch) {
     const [, days, hours, minutes] = enDayHourMatch
