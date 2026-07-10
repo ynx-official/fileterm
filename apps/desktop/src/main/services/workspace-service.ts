@@ -17,6 +17,7 @@ import {
   type SessionSnapshot,
   type PermissionChangeOptions,
   type TransferTargetOptions,
+  type WorkspaceSessionTabEvent,
   type WorkspaceSnapshot
 } from '@fileterm/core'
 import type { ProfileRepository } from '@fileterm/storage'
@@ -26,27 +27,30 @@ import { WorkspaceTabLifecycleService } from './workspace/workspace-tab-lifecycl
 import { WorkspaceTabsState } from './workspace/workspace-tabs.js'
 import type { TransferJournal } from './transfers/transfer-journal.js'
 import { TransferService } from './transfers/transfer-service.js'
+import { appWarn } from './app-logger.js'
 
 export class WorkspaceService {
   private readonly profileRepository: ProfileRepository
   private readonly tabs = new WorkspaceTabsState()
+  private readonly sessionRuntime: WorkspaceSessionRuntime
   private readonly transferService: TransferService
   private readonly tabLifecycle: WorkspaceTabLifecycleService
   private shutdownPromise?: Promise<void>
   private readonly privilegedAccess = new Map<string, RemoteFileAccessOptions>()
-  private readonly sessionRuntime = new WorkspaceSessionRuntime({
-    getSnapshot: () => this.getSnapshot(),
-    updateTabStatus: (tabId, status) => {
-      this.tabs.updateStatus(tabId, status)
-    },
-    getTabStatus: (tabId) => this.tabs.getById(tabId)?.status,
-    rememberTrustedHostFingerprint: (profileId, fingerprint) =>
-      this.rememberTrustedHostFingerprint(profileId, fingerprint),
-    onTabDisconnected: (tabId) => {
-      this.privilegedAccess.delete(tabId)
-      return this.finalizeTransfersForTab(tabId, this.getDisconnectedTransferMessage())
+  private readonly handleSessionTabEvent = (event: WorkspaceSessionTabEvent) => {
+    if (event.type === 'status-changed') {
+      this.tabs.updateStatus(event.tabId, event.status)
+      return
     }
-  })
+    if (event.type === 'disconnected') {
+      this.privilegedAccess.delete(event.tabId)
+      void this.transferService
+        .finalizeTransfersForTab(event.tabId, this.transferService.getDisconnectedTransferMessage())
+        .catch((error) => {
+          appWarn(`[FileTerm][Workspace] Failed to finalize transfers for disconnected tab ${event.tabId}`, error)
+        })
+    }
+  }
 
   constructor(
     profileRepository: ProfileRepository,
@@ -56,6 +60,12 @@ export class WorkspaceService {
     }
   ) {
     this.profileRepository = profileRepository
+    this.sessionRuntime = new WorkspaceSessionRuntime({
+      getSnapshot: () => this.getSnapshot(),
+      getTabStatus: (tabId) => this.tabs.getById(tabId)?.status,
+      rememberTrustedHostFingerprint: (profileId, fingerprint) =>
+        this.rememberTrustedHostFingerprint(profileId, fingerprint)
+    })
     this.transferService = new TransferService({
       tabs: this.tabs,
       sessionRuntime: this.sessionRuntime,
@@ -63,6 +73,7 @@ export class WorkspaceService {
       getLocale: () => options?.getLocale?.() ?? 'zhCN',
       transferJournal: options?.transferJournal
     })
+    this.sessionRuntime.on('tab-event', this.handleSessionTabEvent)
     this.tabLifecycle = new WorkspaceTabLifecycleService({
       tabs: this.tabs,
       sessionRuntime: this.sessionRuntime,
@@ -84,6 +95,7 @@ export class WorkspaceService {
 
   private async performShutdown() {
     await this.transferService.shutdown()
+    this.sessionRuntime.off('tab-event', this.handleSessionTabEvent)
     await this.sessionRuntime.shutdown()
     await this.transferService.flushJournal()
   }
@@ -471,14 +483,6 @@ export class WorkspaceService {
       })
       return this.getSnapshot()
     })
-  }
-
-  private finalizeTransfersForTab(tabId: string, message: string): Promise<void> {
-    return this.transferService.finalizeTransfersForTab(tabId, message)
-  }
-
-  private getDisconnectedTransferMessage(): string {
-    return this.transferService.getDisconnectedTransferMessage()
   }
 }
 

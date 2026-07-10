@@ -75,6 +75,41 @@ export interface WorkspaceTab {
   status: TabStatus
 }
 
+export type WorkspaceSessionTabEvent =
+  | {
+      type: 'status-changed'
+      tabId: string
+      status: TabStatus
+      summary: string
+      connected: boolean
+    }
+  | {
+      type: 'disconnected'
+      tabId: string
+      summary: string
+    }
+  | {
+      type: 'cwd-changed'
+      tabId: string
+      shellCwd: string
+      remotePath: string
+      followShellCwd: boolean
+    }
+  | {
+      type: 'file-access-changed'
+      tabId: string
+      source: 'shell' | 'manual'
+      fileAccessMode: 'user' | 'root'
+      shellUser?: string
+      sudoUser?: string
+    }
+  | {
+      type: 'ssh-handshake'
+      tabId: string
+      phase: 'connected' | 'failed'
+      summary: string
+    }
+
 export interface RemoteFileItem {
   path: string
   name: string

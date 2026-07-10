@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { EventEmitter } from 'node:events'
 import type { WebContents } from 'electron'
 import {
   mergeSystemMetricsHistory,
@@ -11,6 +12,7 @@ import {
   type SshInteractionRequest,
   type SshInteractionResponse,
   type WorkspaceSnapshot,
+  type WorkspaceSessionTabEvent,
   type WorkspaceTab
 } from '@fileterm/core'
 import { LiveFtpSessionController, LiveSshSessionController } from '../session-controllers.js'
@@ -22,7 +24,11 @@ export type LiveSessionController = LiveSshSessionController | LiveFtpSessionCon
 
 export const REMOTE_SESSION_DISCONNECTED_MESSAGE = '会话已断开，请先重连。'
 
-export class WorkspaceSessionRuntime {
+type WorkspaceSessionRuntimeEvents = {
+  'tab-event': [event: WorkspaceSessionTabEvent]
+}
+
+export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntimeEvents> {
   private readonly sessions = new Map<string, SessionSnapshot>()
   private readonly liveControllers = new Map<string, LiveSessionController>()
   private readonly metricsPollers = new Map<string, ReturnType<typeof setInterval>>()
@@ -53,12 +59,11 @@ export class WorkspaceSessionRuntime {
   constructor(
     private readonly options: {
       getSnapshot(): Promise<WorkspaceSnapshot>
-      updateTabStatus(tabId: string, status: WorkspaceTab['status']): void
       getTabStatus(tabId: string): WorkspaceTab['status'] | undefined
       rememberTrustedHostFingerprint(profileId: string, fingerprint: string): Promise<void>
-      onTabDisconnected?(tabId: string, summary: string): void | Promise<void>
     }
   ) {
+    super()
     this.terminalOutputBatcher = new TerminalOutputBatcher((tabId, chunk) => {
       this.sendToTab(tabId, 'terminal:data', { tabId, chunk })
     })
@@ -275,10 +280,14 @@ export class WorkspaceSessionRuntime {
             connected,
             systemMetrics: connected ? current.systemMetrics : undefined
           })
-          this.options.updateTabStatus(
+          const status = statusFromTerminalState(summary, connected, this.options.getTabStatus(tabId))
+          this.emit('tab-event', {
+            type: 'status-changed',
             tabId,
-            statusFromTerminalState(summary, connected, this.options.getTabStatus(tabId))
-          )
+            status,
+            summary,
+            connected
+          })
           this.sendToTab(tabId, 'terminal:state', {
             tabId,
             summary,
@@ -286,7 +295,7 @@ export class WorkspaceSessionRuntime {
             connected
           })
           if (wasConnected && !connected) {
-            void this.options.onTabDisconnected?.(tabId, summary)
+            this.emit('tab-event', { type: 'disconnected', tabId, summary })
           }
           void this.emitSnapshotForTab(tabId)
         },
@@ -326,7 +335,17 @@ export class WorkspaceSessionRuntime {
         remoteFiles: current.remoteFiles,
         systemMetrics: current.systemMetrics
       })
-      this.options.updateTabStatus(tabId, 'connected')
+      const summary = controller.getSummary()
+      this.emit('tab-event', {
+        type: 'status-changed',
+        tabId,
+        status: 'connected',
+        summary,
+        connected: true
+      })
+      if (controller.type === 'ssh') {
+        this.emit('tab-event', { type: 'ssh-handshake', tabId, phase: 'connected', summary })
+      }
       await this.emitSnapshotForTab(tabId)
 
       let remoteFilesError: string | null = null
@@ -431,7 +450,17 @@ export class WorkspaceSessionRuntime {
           })
         }
       }
-      this.options.updateTabStatus(tabId, 'error')
+      const summary = this.sessions.get(tabId)?.summary ?? '连接失败'
+      this.emit('tab-event', {
+        type: 'status-changed',
+        tabId,
+        status: 'error',
+        summary,
+        connected: false
+      })
+      if (controller.type === 'ssh') {
+        this.emit('tab-event', { type: 'ssh-handshake', tabId, phase: 'failed', summary })
+      }
       this.stopMetricsPolling(tabId)
     }
 
@@ -456,13 +485,21 @@ export class WorkspaceSessionRuntime {
     )
   }
 
-  async setFileAccessMode(tabId: string, mode: 'user' | 'root', options?: RemoteFileAccessOptions) {
+  async setFileAccessMode(
+    tabId: string,
+    mode: 'user' | 'root',
+    options?: RemoteFileAccessOptions,
+    source: 'shell' | 'manual' = 'manual'
+  ) {
     await this.runRemoteFileOperation(
       tabId,
       async (controller, current) => {
         const previousMode = controller.getFileAccessMode()
         const nextSudoUser = options?.sudoUser?.trim() || current.sudoUser || 'root'
         if (previousMode === mode && (mode === 'user' || nextSudoUser === current.sudoUser)) {
+          if (source === 'shell') {
+            this.emitFileAccessChanged(tabId, source)
+          }
           return
         }
 
@@ -478,6 +515,7 @@ export class WorkspaceSessionRuntime {
             remotePath: controller.getRemotePath(),
             remoteFiles
           })
+          this.emitFileAccessChanged(tabId, source)
           await this.emitSnapshotForTab(tabId)
         } catch (error) {
           if (mode === 'root') {
@@ -546,10 +584,12 @@ export class WorkspaceSessionRuntime {
 
     if (current.followShellCwd !== false && current.remotePath !== cwd) {
       await this.followShellCwd(tabId, cwd)
+      this.emitCwdChanged(tabId)
       return
     }
 
     await this.emitSnapshotForTab(tabId)
+    this.emitCwdChanged(tabId)
   }
 
   private async handleShellUserChanged(tabId: string, user: string) {
@@ -570,7 +610,12 @@ export class WorkspaceSessionRuntime {
 
     const target = resolveShellFileAccess(loginUser, user)
     try {
-      await this.setFileAccessMode(tabId, target.mode, target.sudoUser ? { sudoUser: target.sudoUser } : undefined)
+      await this.setFileAccessMode(
+        tabId,
+        target.mode,
+        target.sudoUser ? { sudoUser: target.sudoUser } : undefined,
+        'shell'
+      )
     } catch (error) {
       await this.emitSnapshotForTab(tabId)
       throw error
@@ -582,6 +627,35 @@ export class WorkspaceSessionRuntime {
       return
     }
     await this.emitSnapshotForTab(tabId)
+  }
+
+  private emitCwdChanged(tabId: string) {
+    const current = this.sessions.get(tabId)
+    if (!current?.shellCwd) {
+      return
+    }
+    this.emit('tab-event', {
+      type: 'cwd-changed',
+      tabId,
+      shellCwd: current.shellCwd,
+      remotePath: current.remotePath,
+      followShellCwd: current.followShellCwd !== false
+    })
+  }
+
+  private emitFileAccessChanged(tabId: string, source: 'shell' | 'manual') {
+    const current = this.sessions.get(tabId)
+    if (!current) {
+      return
+    }
+    this.emit('tab-event', {
+      type: 'file-access-changed',
+      tabId,
+      source,
+      fileAccessMode: current.fileAccessMode ?? 'user',
+      shellUser: current.shellUser,
+      sudoUser: current.sudoUser
+    })
   }
 
   private async followShellCwd(tabId: string, cwd: string) {
