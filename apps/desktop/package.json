@@ -14,6 +14,7 @@
     "prepackage:win": "npm --prefix ../.. run sync:version",
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:electron\"",
     "dev:renderer": "vite",
+    "predev:main": "node ./scripts/clean-dist-electron.mjs",
     "dev:main": "tsc -p tsconfig.node.json --watch",
     "dev:electron": "wait-on tcp:5188 file:dist-electron/main/main.js && electron .",
     "build": "npm run build:renderer && npm run build:main",

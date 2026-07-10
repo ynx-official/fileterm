@@ -57,8 +57,10 @@ export function FileEditorModal({
   errorMessage,
   file,
   isBusy,
+  isDirty,
   isSaving,
   onClose,
+  onDraftChange,
   onReloadWithEncoding,
   onSave,
   standalone = false,
@@ -67,8 +69,10 @@ export function FileEditorModal({
   errorMessage: string | null
   file: FileContentSnapshot
   isBusy: boolean
+  isDirty?: boolean
   isSaving: boolean
   onClose(): void
+  onDraftChange?(content: string, encoding: string): void
   onReloadWithEncoding(encoding: string): void
   onSave(content: string, encoding: string): void
   standalone?: boolean
@@ -126,7 +130,13 @@ export function FileEditorModal({
     }
   }, [openMenu])
 
-  const isDirty = content !== file.content || encoding !== (file.encoding ?? 'utf-8')
+  useEffect(() => {
+    onDraftChange?.(content, encoding)
+  }, [content, encoding, onDraftChange])
+
+  const effectiveIsDirty =
+    isDirty !== undefined ? isDirty : content !== file.content || encoding !== (file.encoding ?? 'utf-8')
+
   const lineCount = useMemo(() => (content.match(/\n/g)?.length ?? 0) + 1, [content])
   const characterCount = content.length
   const currentEncoding = findEncodingOption(encoding)
@@ -247,13 +257,13 @@ export function FileEditorModal({
         <div className="file-editor-title">
           <span>{file.source === 'remote' ? t.editRemoteFile : t.editLocalFile}</span>
           <strong>{file.name}</strong>
-          {isDirty ? <b>{t.fileEditorUnsaved}</b> : null}
+          {effectiveIsDirty ? <b>{t.fileEditorUnsaved}</b> : null}
         </div>
         <div className="file-editor-header-actions">
           <button
             aria-busy={isSaving}
-            className={`file-editor-save-button ${isDirty ? 'is-dirty' : ''} ${isSaving ? 'is-saving' : ''}`}
-            disabled={!isDirty || isBusy || isSaving}
+            className={`file-editor-save-button ${effectiveIsDirty ? 'is-dirty' : ''} ${isSaving ? 'is-saving' : ''}`}
+            disabled={!effectiveIsDirty || isBusy || isSaving}
             onClick={() => onSave(content, encoding)}
             type="button"
           >
@@ -270,7 +280,7 @@ export function FileEditorModal({
             <div className="file-editor-menubar">
               <EditorMenuButton current={openMenu} label={t.fileEditorFile} menu="file" onToggle={setOpenMenu}>
                 <MenuAction
-                  disabled={!isDirty || isBusy || isSaving}
+                  disabled={!effectiveIsDirty || isBusy || isSaving}
                   label={isSaving ? t.saving : t.save}
                   onClick={() => onSave(content, encoding)}
                 />
