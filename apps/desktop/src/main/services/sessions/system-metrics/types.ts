@@ -4,6 +4,7 @@ export type { RemoteSystemPlatform }
 
 export interface SystemMetricsCommandOptions {
   allowNonZeroWithStdout?: boolean
+  timeoutMs?: number
 }
 
 export interface SystemMetricsExecutor {

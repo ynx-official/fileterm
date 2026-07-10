@@ -41,7 +41,7 @@ compatibility:
 
 - `AGENTS.md`
 - `docs/architecture.md`
-- `docs/plans/active/multiplatform-system-observability.md`
+- `docs/plans/completed/multiplatform-system-observability.md`
 - `apps/desktop/src/main/main.ts`
 - `apps/desktop/src/preload/preload.cts`
 - `apps/desktop/src/renderer/App.tsx`

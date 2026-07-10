@@ -20,17 +20,16 @@ export async function collectSshSystemMetrics(
   preferredPlatform?: RemoteSystemPlatform
 ): Promise<SystemMetricsCollectionResult> {
   if (preferredPlatform && preferredPlatform !== 'unknown') {
-    try {
-      const collector = collectors[preferredPlatform]
-      const metrics = await collector.collect(executor)
-      return { platform: metrics.platform ?? preferredPlatform, metrics }
-    } catch {
-      // Cached platform can become stale when a tab reconnects to a different host.
-    }
+    const collector = collectors[preferredPlatform]
+    const metrics = await collector.collect(executor)
+    return { platform: metrics.platform ?? preferredPlatform, metrics }
   }
 
   const platform = await probeRemoteSystemPlatform(executor)
-  const collector = platform === 'unknown' ? linuxCollector : collectors[platform]
+  if (platform === 'unknown') {
+    throw new Error('Unable to determine remote system platform')
+  }
+  const collector = collectors[platform]
   const metrics = await collector.collect(executor)
   return {
     platform: metrics.platform ?? collector.platform,

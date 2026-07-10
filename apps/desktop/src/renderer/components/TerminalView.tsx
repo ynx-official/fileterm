@@ -6,6 +6,7 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { copyText } from '../app/app-utils'
+import { trimHydratedTerminalChunk } from '../app/terminal-transcript'
 import { t } from '../i18n'
 import { ContextMenu } from '../features/common/ContextMenu'
 import { CloseButton } from '../features/common/CloseButton'
@@ -445,7 +446,7 @@ export const TerminalView = memo(function TerminalView({
       preserveVisibleBuffer?: boolean
     } = {}
   ) => {
-    const { force = false, freezeCols = false, preserveVisibleBuffer = false } = options
+    const { force = false, freezeCols = false } = options
     const host = hostRef.current
     if (!host) {
       return
@@ -470,17 +471,8 @@ export const TerminalView = memo(function TerminalView({
     const previousSize = lastSyncedSizeRef.current
     const liveCols = Math.max(1, displayCols - TERMINAL_REMOTE_GUARD_COLS)
     const cols = freezeCols && previousSize ? previousSize.cols : liveCols
-    const shouldPreserveVisibleBuffer = preserveVisibleBuffer && previousSize && previousSize.cols !== cols
-    const visibleBufferSnapshot = shouldPreserveVisibleBuffer ? snapshotTerminalBuffer(terminal) : ''
     if (terminal.cols !== cols || terminal.rows !== rows) {
       terminal.resize(cols, rows)
-      if (shouldPreserveVisibleBuffer && visibleBufferSnapshot) {
-        renderedTranscriptRef.current = trimTranscript(visibleBufferSnapshot)
-        pendingWriteRef.current = ''
-        terminal.reset()
-        terminal.write(visibleBufferSnapshot)
-        suppressHydratedChunksUntilRef.current = Date.now() + 300
-      }
       terminal.refresh(0, Math.max(terminal.rows - 1, 0))
     }
 
@@ -490,6 +482,8 @@ export const TerminalView = memo(function TerminalView({
       width: Math.floor(width),
       height: Math.floor(height)
     }
+    const remoteGridChanged =
+      !previousSize || previousSize.cols !== nextSize.cols || previousSize.rows !== nextSize.rows
     if (
       !force &&
       previousSize &&
@@ -501,6 +495,9 @@ export const TerminalView = memo(function TerminalView({
       return
     }
     lastSyncedSizeRef.current = nextSize
+    if (!remoteGridChanged) {
+      return
+    }
 
     void window.fileterm?.resizeTerminal(tabId, nextSize.cols, nextSize.rows, nextSize.width, nextSize.height)
   }
@@ -708,12 +705,22 @@ export const TerminalView = memo(function TerminalView({
     const offData = window.fileterm?.onTerminalData(({ tabId: nextTabId, chunk }) => {
       if (nextTabId === tabId) {
         lastTerminalOutputAtRef.current = Date.now()
-        if (Date.now() < suppressHydratedChunksUntilRef.current && renderedTranscriptRef.current.endsWith(chunk)) {
+        const shouldTrimHydratedBacklog = Date.now() < suppressHydratedChunksUntilRef.current
+        if (shouldTrimHydratedBacklog) {
+          // IPC ordering can leave one queued batch behind an authoritative
+          // snapshot. Consume that single backlog opportunity; repeated fuzzy
+          // trimming could eat legitimate repeated terminal output.
+          suppressHydratedChunksUntilRef.current = 0
+        }
+        const visibleChunk = shouldTrimHydratedBacklog
+          ? trimHydratedTerminalChunk(renderedTranscriptRef.current, chunk)
+          : chunk
+        if (!visibleChunk) {
           return
         }
-        appendRenderedTranscript(chunk)
+        appendRenderedTranscript(visibleChunk)
         clearSearchDecorations()
-        scheduleTerminalWrite(formatTerminalChunk(terminal, chunk))
+        scheduleTerminalWrite(formatTerminalChunk(terminal, visibleChunk))
         if (pendingPromptResizeRef.current) {
           scheduleSettledHorizontalResize()
         }
@@ -731,6 +738,7 @@ export const TerminalView = memo(function TerminalView({
           replaceTerminalWithTranscript(terminal, transcript)
         }
         if (!wasConnectedRef.current && connected) {
+          lastSyncedSizeRef.current = null
           preserveVisibleBufferRef.current = false
           awaitingCommandCompletionRef.current = false
           pendingPromptResizeRef.current = false

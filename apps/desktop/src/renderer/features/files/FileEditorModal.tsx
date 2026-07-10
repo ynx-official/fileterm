@@ -216,6 +216,9 @@ export function FileEditorModal({
   }
 
   const convertContent = (converter: (text: string) => string) => {
+    if (isBusy || isSaving) {
+      return
+    }
     const editor = editorRef.current
     if (!editor) {
       return
@@ -284,7 +287,11 @@ export function FileEditorModal({
                   label={isSaving ? t.saving : t.save}
                   onClick={() => onSave(content, encoding)}
                 />
-                <MenuAction label={t.fileEditorReloadEncoding} onClick={() => setOpenMenu('encoding')} />
+                <MenuAction
+                  disabled={effectiveIsDirty || isBusy || isSaving}
+                  label={t.fileEditorReloadEncoding}
+                  onClick={() => setOpenMenu('encoding')}
+                />
               </EditorMenuButton>
               <EditorMenuButton current={openMenu} label={t.edit} menu="edit" onToggle={setOpenMenu}>
                 <MenuAction label={t.fileEditorUndo} onClick={() => void runEditorAction('undo')} />
@@ -357,6 +364,7 @@ export function FileEditorModal({
                   fontLigatures: true,
                   fontSize: 13,
                   lineHeight: 20,
+                  readOnly: isBusy || isSaving,
                   minimap: { enabled: showMinimap },
                   padding: { top: 14, bottom: 8 },
                   renderLineHighlight: 'line',
@@ -389,9 +397,9 @@ export function FileEditorModal({
                 {EDITOR_ENCODINGS.map((option) => (
                   <button
                     className={option.value === encoding ? 'is-active' : ''}
+                    disabled={effectiveIsDirty || isBusy || isSaving}
                     key={option.value}
                     onClick={() => {
-                      setEncoding(option.value)
                       onReloadWithEncoding(option.value)
                       setOpenMenu(null)
                     }}

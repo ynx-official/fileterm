@@ -23,7 +23,14 @@ let connectionManagerWindow: BrowserWindow | null = null
 let connectionFormWindow: BrowserWindow | null = null
 let commandManagerWindow: BrowserWindow | null = null
 let commandFormWindow: BrowserWindow | null = null
-let fileEditorWindow: BrowserWindow | null = null
+const fileEditorWindows = new Set<BrowserWindow>()
+const approvedFileEditorCloses = new Set<BrowserWindow>()
+const fileEditorWindowsByKey = new Map<string, BrowserWindow>()
+const pendingFileEditorCloseRequests = new Map<
+  BrowserWindow,
+  { promise: Promise<boolean>; resolve(approved: boolean): void }
+>()
+const childWindowsHiddenWithMain = new Set<BrowserWindow>()
 let isQuitting = false
 let quitPreparationPromise: Promise<void> | undefined
 let tray: Tray | null = null
@@ -321,13 +328,49 @@ function requestQuitConfirmation() {
   }
 
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.show()
-    mainWindow.focus()
+    showMainWindowAndChildren()
     mainWindow.webContents.send('app:window-close-request', { isQuit: true })
     return
   }
 
   void quitApplication()
+}
+
+function getOpenChildWindows() {
+  return [
+    connectionManagerWindow,
+    connectionFormWindow,
+    commandManagerWindow,
+    commandFormWindow,
+    ...fileEditorWindows
+  ].filter((window): window is BrowserWindow => Boolean(window && !window.isDestroyed()))
+}
+
+function showMainWindowAndChildren() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+  mainWindow.show()
+  mainWindow.focus()
+  for (const child of childWindowsHiddenWithMain) {
+    if (!child.isDestroyed()) {
+      child.show()
+    }
+  }
+  childWindowsHiddenWithMain.clear()
+}
+
+function hideMainWindowAndChildren() {
+  childWindowsHiddenWithMain.clear()
+  for (const child of getOpenChildWindows()) {
+    if (child.isVisible()) {
+      childWindowsHiddenWithMain.add(child)
+      child.hide()
+    }
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.hide()
+  }
 }
 
 function shutdownWorkspace() {
@@ -341,19 +384,21 @@ function quitApplication(): Promise<void> {
     return quitPreparationPromise
   }
 
-  quitPreparationPromise = (async () => {
+  const prepareQuit = async () => {
+    // File editor renderers own their draft state. Ask every editor to close
+    // before shutting down the workspace so Cmd/Ctrl+Q cannot silently discard
+    // an unsaved draft. Dirty editors answer only after the user decides.
+    for (const editorWindow of [...fileEditorWindows]) {
+      if (!(await requestFileEditorWindowClose(editorWindow))) {
+        return
+      }
+    }
+
     await shutdownWorkspace()
     isQuitting = true
 
-    const childWindows = [
-      connectionManagerWindow,
-      connectionFormWindow,
-      commandManagerWindow,
-      commandFormWindow,
-      fileEditorWindow
-    ]
-    for (const child of childWindows) {
-      if (child && !child.isDestroyed()) {
+    for (const child of getOpenChildWindows()) {
+      if (!child.isDestroyed()) {
         child.close()
       }
     }
@@ -361,7 +406,15 @@ function quitApplication(): Promise<void> {
       mainWindow.close()
     }
     app.quit()
-  })()
+  }
+
+  const preparation = prepareQuit()
+  const preparationWithCleanup = preparation.finally(() => {
+    if (!isQuitting) {
+      quitPreparationPromise = undefined
+    }
+  })
+  quitPreparationPromise = preparationWithCleanup
 
   return quitPreparationPromise
 }
@@ -487,8 +540,7 @@ function createTray() {
       label: '显示主窗口',
       click: () => {
         if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.show()
-          mainWindow.focus()
+          showMainWindowAndChildren()
         } else {
           createMainWindow()
         }
@@ -510,13 +562,12 @@ function createTray() {
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isVisible()) {
         if (mainWindow.isFocused()) {
-          mainWindow.hide()
+          hideMainWindowAndChildren()
         } else {
           mainWindow.focus()
         }
       } else {
-        mainWindow.show()
-        mainWindow.focus()
+        showMainWindowAndChildren()
       }
     } else {
       createMainWindow()
@@ -584,7 +635,7 @@ function createMainWindow() {
         connectionFormWindow,
         commandManagerWindow,
         commandFormWindow,
-        fileEditorWindow
+        ...fileEditorWindows
       ]
       for (const child of childWindows) {
         if (child && !child.isDestroyed()) {
@@ -830,6 +881,11 @@ function openCommandFormWindow(parent: BrowserWindow, mode: 'create' | 'edit', c
   )
 }
 
+function getFileEditorWindowKey(input: { source: 'local' | 'remote'; path: string; tabId?: string }) {
+  const normalizedPath = input.source === 'local' && isWindows ? input.path.toLocaleLowerCase() : input.path
+  return `${input.source}:${input.tabId ?? ''}:${normalizedPath}`
+}
+
 function openFileEditorWindow(
   parent: BrowserWindow,
   input: {
@@ -840,8 +896,13 @@ function openFileEditorWindow(
     encoding?: string
   }
 ) {
-  if (fileEditorWindow && !fileEditorWindow.isDestroyed()) {
-    fileEditorWindow.close()
+  const editorKey = getFileEditorWindowKey(input)
+  const existingWindow = fileEditorWindowsByKey.get(editorKey)
+  if (existingWindow && !existingWindow.isDestroyed()) {
+    showMainWindowAndChildren()
+    existingWindow.show()
+    existingWindow.focus()
+    return
   }
 
   const win = createNativeChildWindow(parent, {
@@ -854,16 +915,38 @@ function openFileEditorWindow(
     frame: false
   })
 
-  fileEditorWindow = win
+  fileEditorWindows.add(win)
+  fileEditorWindowsByKey.set(editorKey, win)
   attachWindowDiagnostics(win, 'file-editor')
+  win.webContents.on('render-process-gone', () => {
+    resolvePendingFileEditorClose(win, true)
+    approvedFileEditorCloses.add(win)
+    if (!win.isDestroyed()) {
+      win.destroy()
+    }
+  })
   win.once('ready-to-show', () => {
     centerChildWindowToParent(parent, win)
     win.show()
   })
-  win.on('closed', () => {
-    if (fileEditorWindow === win) {
-      fileEditorWindow = null
+  win.on('close', (event) => {
+    if (isQuitting || approvedFileEditorCloses.delete(win)) {
+      return
     }
+    if (win.webContents.isDestroyed() || win.webContents.isCrashed()) {
+      return
+    }
+    event.preventDefault()
+    void requestFileEditorWindowClose(win)
+  })
+  win.on('closed', () => {
+    fileEditorWindows.delete(win)
+    approvedFileEditorCloses.delete(win)
+    childWindowsHiddenWithMain.delete(win)
+    if (fileEditorWindowsByKey.get(editorKey) === win) {
+      fileEditorWindowsByKey.delete(editorKey)
+    }
+    resolvePendingFileEditorClose(win, true)
   })
 
   loadAppWindow(
@@ -878,6 +961,61 @@ function openFileEditorWindow(
     },
     uiPreferences
   )
+}
+
+function requestFileEditorWindowClose(win: BrowserWindow): Promise<boolean> {
+  if (!fileEditorWindows.has(win) || win.isDestroyed()) {
+    return Promise.resolve(true)
+  }
+
+  const pending = pendingFileEditorCloseRequests.get(win)
+  if (pending) {
+    return pending.promise
+  }
+
+  if (win.webContents.isDestroyed() || win.webContents.isCrashed()) {
+    approvedFileEditorCloses.add(win)
+    win.destroy()
+    return Promise.resolve(true)
+  }
+
+  let resolveRequest: (approved: boolean) => void = () => undefined
+  const promise = new Promise<boolean>((resolve) => {
+    resolveRequest = resolve
+  })
+  pendingFileEditorCloseRequests.set(win, { promise, resolve: resolveRequest })
+  try {
+    win.webContents.send('app:file-editor-close-request')
+  } catch (error) {
+    safeConsoleError('[FileTerm] failed to request file editor close', error)
+    pendingFileEditorCloseRequests.delete(win)
+    approvedFileEditorCloses.add(win)
+    win.destroy()
+    resolveRequest(true)
+  }
+  return promise
+}
+
+function resolvePendingFileEditorClose(win: BrowserWindow, approved: boolean) {
+  const pending = pendingFileEditorCloseRequests.get(win)
+  if (!pending) {
+    return
+  }
+  pendingFileEditorCloseRequests.delete(win)
+  pending.resolve(approved)
+}
+
+function confirmCloseFileEditorWindow(win: BrowserWindow) {
+  if (!fileEditorWindows.has(win) || win.isDestroyed()) {
+    return
+  }
+  resolvePendingFileEditorClose(win, true)
+  approvedFileEditorCloses.add(win)
+  win.close()
+}
+
+function cancelCloseFileEditorWindow(win: BrowserWindow) {
+  resolvePendingFileEditorClose(win, false)
 }
 
 app.whenReady().then(() => {
@@ -917,6 +1055,8 @@ app.whenReady().then(() => {
     openConnectionFormWindow,
     openCommandFormWindow,
     openFileEditorWindow,
+    confirmCloseFileEditorWindow,
+    cancelCloseFileEditorWindow,
     openLogsDirectory,
     requestQuitApp: () => {
       requestQuitConfirmation()
@@ -925,21 +1065,7 @@ app.whenReady().then(() => {
       if (action === 'quit') {
         await quitApplication()
       } else if (action === 'hide') {
-        const childWindows = [
-          connectionManagerWindow,
-          connectionFormWindow,
-          commandManagerWindow,
-          commandFormWindow,
-          fileEditorWindow
-        ]
-        for (const child of childWindows) {
-          if (child && !child.isDestroyed()) {
-            child.close()
-          }
-        }
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.hide()
-        }
+        hideMainWindowAndChildren()
       }
     }
   })
@@ -947,8 +1073,7 @@ app.whenReady().then(() => {
 
   app.on('activate', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.show()
-      mainWindow.focus()
+      showMainWindowAndChildren()
       return
     }
 

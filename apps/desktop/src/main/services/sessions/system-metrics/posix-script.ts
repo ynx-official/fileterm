@@ -1,9 +1,38 @@
 import type { RemoteSystemPlatform } from './types.js'
 
+export const POSIX_METRICS_COMPLETE_MARKER = '__FILETERM_METRICS_COMPLETE__'
+
+export function assertPosixMetricsComplete(raw: string, platform: 'Linux' | 'BusyBox') {
+  if (!raw.includes(POSIX_METRICS_COMPLETE_MARKER)) {
+    throw new Error(`${platform} metrics script did not emit ${POSIX_METRICS_COMPLETE_MARKER}`)
+  }
+}
+
 export function buildPosixMetricsCommand(platform: Extract<RemoteSystemPlatform, 'linux' | 'busybox'>) {
   return `cd / >/dev/null 2>&1 || true
 sleep_interval="0.15"
 sleep "$sleep_interval" >/dev/null 2>&1 || sleep_interval="1"
+run_bounded() {
+  limit="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    if timeout -k 1 1 true >/dev/null 2>&1; then
+      timeout -k 1 "$limit" "$@"
+    else
+      timeout "$limit" "$@"
+    fi
+    return $?
+  fi
+  if command -v busybox >/dev/null 2>&1 && busybox timeout 1 true >/dev/null 2>&1; then
+    if busybox timeout -k 1 1 true >/dev/null 2>&1; then
+      busybox timeout -k 1 "$limit" "$@"
+    else
+      busybox timeout "$limit" "$@"
+    fi
+    return $?
+  fi
+  return 124
+}
 read_cpu_stat() {
   awk '/^cpu / {print $2, $3, $4, $5, $6, $7, $8, $9; exit}' /proc/stat 2>/dev/null
 }
@@ -249,7 +278,7 @@ if [ -z "$cpu_info" ]; then
     }
   ')
 fi
-gpu_info=$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits 2>/dev/null | awk -F',' '
+gpu_info=$(run_bounded 1 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader,nounits 2>/dev/null | awk -F',' '
   function trim(value) {
     sub(/^[[:space:]]+/, "", value)
     sub(/[[:space:]]+$/, "", value)
@@ -263,7 +292,7 @@ gpu_info=$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,
   }
 ')
 if [ -z "$gpu_info" ]; then
-  gpu_info=$(lspci 2>/dev/null | awk '
+  gpu_info=$(run_bounded 1 lspci 2>/dev/null | awk '
     BEGIN { IGNORECASE=1 }
     /VGA compatible controller|3D controller|Display controller/ {
       line=$0
@@ -281,6 +310,7 @@ rx1=$(awk -F: 'NR>2 {name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[
 tx1=$(awk -F: 'NR>2 {name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[:space:]]+/); if (name != "lo") sum += values[10]} END {printf "%.0f", sum+0}' /proc/net/dev 2>/dev/null)
 before_file="/tmp/fileterm-if-before-$$"
 after_file="/tmp/fileterm-if-after-$$"
+trap 'rm -f "$before_file" "$after_file"' 0 1 2 15
 awk -F: 'NR>2 {name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[:space:]]+/); if (name != "lo") printf "%s|%.0f|%.0f\\n", name, values[2], values[10]}' /proc/net/dev 2>/dev/null > "$before_file"
 sleep "$sleep_interval"
 rx2=$(awk -F: 'NR>2 {name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[:space:]]+/); if (name != "lo") sum += values[2]} END {printf "%.0f", sum+0}' /proc/net/dev 2>/dev/null)
@@ -290,15 +320,13 @@ sample_ms=$(awk -v interval="$sleep_interval" 'BEGIN { printf "%d", interval * 1
 [ -z "$sample_ms" ] && sample_ms=1000
 rx_rate=$(awk -v before="$rx1" -v after="$rx2" -v ms="$sample_ms" 'BEGIN { if (ms > 0) printf "%d", (after-before) * 1000 / ms; else print 0 }')
 tx_rate=$(awk -v before="$tx1" -v after="$tx2" -v ms="$sample_ms" 'BEGIN { if (ms > 0) printf "%d", (after-before) * 1000 / ms; else print 0 }')
-disk=$(df -hP 2>/dev/null | awk 'NR>1 {printf "%s|%s/%s\\n", $6, $4, $2}' | head -n 12)
-[ -z "$disk" ] && disk=$(df -h 2>/dev/null | awk 'NR>1 {printf "%s|%s/%s\\n", $NF, $(NF-2), $(NF-4)}' | head -n 12)
-[ -z "$disk" ] && disk=$(df 2>/dev/null | awk 'NR>1 {printf "%s|%sK/%sK\\n", $NF, $(NF-2), $(NF-4)}' | head -n 12)
-filesystems=$(df -hP 2>/dev/null | awk 'NR>1 {printf "%s|%s|%s|%s|%s|%s\\n", $1, $2, $3, $5, $4, $6}' | head -n 20)
-[ -z "$filesystems" ] && filesystems=$(df -h 2>/dev/null | awk 'NR>1 {printf "%s|%s|%s|%s|%s|%s\\n", $1, $(NF-4), $(NF-3), $(NF-1), $(NF-2), $NF}' | head -n 20)
-[ -z "$filesystems" ] && filesystems=$(df 2>/dev/null | awk 'NR>1 {printf "%s|%sK|%sK|%s|%sK|%s\\n", $1, $(NF-4), $(NF-3), $(NF-1), $(NF-2), $NF}' | head -n 20)
-procs=$(ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {printf "%.1fM|%s|%s|%s\\n", $1/1024, $2, $3, $4}')
-[ -z "$procs" ] && procs=$(ps -eo rss=,pcpu=,comm= 2>/dev/null | awk 'NF >= 3 {printf "%.1fM|%s|0|%s\\n", $1/1024, $2, $3}')
-[ -z "$procs" ] && procs=$(ps 2>/dev/null | awk 'NR>1 && NF >= 4 {printf "0.0M|0|0|%s\\n", $NF}')
+df_flags="-kP"
+df -kPl / >/dev/null 2>&1 && df_flags="-kPl"
+df_output=$(run_bounded 2 df "$df_flags" 2>/dev/null)
+disk=$(printf "%s\\n" "$df_output" | awk 'NR>1 {printf "%s|%sK/%sK\\n", $6, $4, $2}' | head -n 12)
+filesystems=$(printf "%s\\n" "$df_output" | awk 'NR>1 {printf "%s|%sK|%sK|%s|%sK|%s\\n", $1, $2, $3, $5, $4, $6}' | head -n 20)
+procs=$(run_bounded 1 ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {printf "%.1fM|%s|%s|%s\\n", $1/1024, $2, $3, $4}')
+[ -z "$procs" ] && procs=$(run_bounded 1 ps 2>/dev/null | awk 'NR>1 && NF >= 4 {printf "0.0M|0|0|%s\\n", $NF}')
 echo "__PLATFORM__${platform}"
 echo "__OS__$os_name"
 echo "__KERNEL_NAME__$kernel_name"
@@ -348,5 +376,6 @@ echo "__FILESYSTEMS_END__"
 echo "__PROCS_START__"
 echo "$procs"
 echo "__PROCS_END__"
+echo "${POSIX_METRICS_COMPLETE_MARKER}"
 `
 }

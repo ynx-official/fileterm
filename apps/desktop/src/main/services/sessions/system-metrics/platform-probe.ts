@@ -12,8 +12,8 @@ export async function probeRemoteSystemPlatform(executor: SystemMetricsExecutor)
 async function probePosixPlatform(executor: SystemMetricsExecutor): Promise<RemoteSystemPlatform> {
   try {
     const raw = await executor.exec(
-      'sh -lc \'printf "__FILETERM_PROBE_START__\\n"; uname -s 2>/dev/null; if command -v busybox >/dev/null 2>&1; then busybox 2>&1 | head -n 1; fi; if [ -f /etc/openwrt_release ]; then printf "openwrt\\n"; fi; printf "__FILETERM_PROBE_END__\\n"\'',
-      { allowNonZeroWithStdout: true }
+      'sh -lc \'printf "__FILETERM_PROBE_START__\\n"; uname -s 2>/dev/null; shell_exe=$(readlink /proc/$$/exe 2>/dev/null || readlink /bin/sh 2>/dev/null || true); case "$shell_exe" in *busybox*) printf "busybox\\n" ;; esac; if [ -f /etc/openwrt_release ]; then printf "openwrt\\n"; fi; printf "__FILETERM_PROBE_END__\\n"\'',
+      { allowNonZeroWithStdout: true, timeoutMs: 3000 }
     )
     const body = extractProbeBody(raw)
     if (!body) {
@@ -41,7 +41,7 @@ async function probeWindowsPlatform(executor: SystemMetricsExecutor): Promise<Re
 
   for (const command of commands) {
     try {
-      const raw = await executor.exec(command, { allowNonZeroWithStdout: true })
+      const raw = await executor.exec(command, { allowNonZeroWithStdout: true, timeoutMs: 3000 })
       if (/windows|win32nt/i.test(raw)) {
         return 'windows'
       }

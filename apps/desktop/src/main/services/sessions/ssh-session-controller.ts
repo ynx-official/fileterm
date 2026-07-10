@@ -24,6 +24,7 @@ import { BaseFileSessionController } from './base-file-session-controller.js'
 import { parentRemotePath, toRemoteFileItem } from './session-file-utils.js'
 import { collectSshSystemMetrics, type RemoteSystemPlatform } from './system-metrics/index.js'
 import { probeRemoteSystemPlatform } from './system-metrics/platform-probe.js'
+import type { SystemMetricsCommandOptions } from './system-metrics/types.js'
 import { findSetupEchoEnd, SHELL_CWD_SETUP, ShellCwdTracker, supportsPosixShellSetup } from './shell-cwd-integration.js'
 import { createSshDebugLogger, isSshDebugEnabled, singleLine } from './ssh-debug-logger.js'
 import { decodeBuffer, encodeText } from '../text-encoding.js'
@@ -34,6 +35,9 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private static readonly TRANSCRIPT_LIMIT = 200_000
   private static readonly REMOTE_FILE_READ_TIMEOUT_MS = 20_000
   private static readonly REMOTE_FILE_WRITE_TIMEOUT_MS = 20_000
+  private static readonly METRICS_WARNING_INTERVAL_MS = 30_000
+  private static readonly SHELL_SETUP_SETTLE_MS = 200
+  private static readonly SHELL_SETUP_TIMEOUT_MS = 1200
 
   private readonly ssh = new Client()
   private readonly execSsh = new Client()
@@ -65,9 +69,16 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private readonly shellCwdTracker = new ShellCwdTracker()
   private cwdSetupInjected = false
   private shellPlatformProbe?: Promise<void>
+  private platformProbePromise?: Promise<RemoteSystemPlatform>
+  private metricsRefreshPromise?: Promise<SystemMetrics | undefined>
+  private shellPlatform: RemoteSystemPlatform = 'unknown'
+  private pendingShellInput: string[] = []
+  private shellSetupCanceled = false
   private suppressEcho = false
   private echoBuf = ''
   private shellSetupReleaseTimer?: ReturnType<typeof setTimeout>
+  private shellSetupSettleTimer?: ReturnType<typeof setTimeout>
+  private shellSetupVisiblePrefixLength?: number
   private lastInjectTime = 0
   private fileAccessMode: 'user' | 'root' = 'user'
   private shellUser?: string
@@ -79,6 +90,8 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private recentKeystrokes = ''
   private metrics?: SystemMetrics
   private metricsPlatform?: RemoteSystemPlatform
+  private lastMetricsWarningAt = 0
+  private connectionGeneration = 0
   private readonly acceptedHostFingerprints = new Set<string>()
 
   constructor(
@@ -99,8 +112,14 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   override async connect(): Promise<void> {
+    this.connectionGeneration += 1
     this.cwdSetupInjected = false
     this.shellPlatformProbe = undefined
+    this.platformProbePromise = undefined
+    this.metricsRefreshPromise = undefined
+    this.shellPlatform = 'unknown'
+    this.pendingShellInput = []
+    this.shellSetupCanceled = false
     this.metricsPlatform = undefined
     this.lastInjectTime = 0
     this.clearShellSetupSuppression()
@@ -176,7 +195,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
               }
 
               stream.on('data', (chunk: Buffer) => {
-                let text = chunk.toString('utf8')
+                const text = chunk.toString('utf8')
 
                 if (text.trim().length > 0) {
                   this.scheduleShellSetup(stream)
@@ -195,17 +214,13 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                       this.sshDebug.log('main', `Initial shell user detected via injection: ${echoEnd.user}`)
                       this.handleShellUserChange(echoEnd.user)
                     }
-
-                    const beforeCmd = this.echoBuf.slice(0, echoEnd.lineStart)
-                    const afterOsc7 = this.echoBuf.slice(echoEnd.payloadEnd)
-                    text = beforeCmd + afterOsc7
-                    this.clearShellSetupSuppression()
-                  } else if (this.echoBuf.length >= 16384) {
-                    text = this.echoBuf
-                    this.clearShellSetupSuppression()
-                  } else {
-                    return
+                    this.shellSetupVisiblePrefixLength = echoEnd.lineStart
+                    this.scheduleShellSetupSettle(stream)
                   }
+                  if (this.echoBuf.length >= 16384) {
+                    this.finishShellSetupSuppression(stream)
+                  }
+                  return
                 }
 
                 this.transcript.append(text)
@@ -228,7 +243,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                 // We inject the setup script silently to query the actual user.
                 const strippedText = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').trimEnd()
                 const now = Date.now()
-                if (supportsPosixShellSetup(this.metricsPlatform) && strippedText.endsWith('#') && !this.suppressEcho) {
+                if (supportsPosixShellSetup(this.shellPlatform) && strippedText.endsWith('#') && !this.suppressEcho) {
                   // Only inject if we think we aren't root AND it's been a while since the last injection
                   // to prevent infinite loops (because the injected script itself triggers a new prompt)
                   if (this.shellUser !== 'root' && now - this.lastInjectTime > 2000) {
@@ -238,6 +253,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                 }
 
                 this.onData(text)
+                this.flushPendingShellInput(stream)
               })
               stream.on('close', () => {
                 this.handlePrimaryDisconnect(stream)
@@ -349,7 +365,9 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     const profile = this.profile as SshProfile
     if (profile.enableExecChannel === false) {
       this.cwdSetupInjected = true
-      this.sshDebug.log('main', 'Exec Channel 已禁用，跳过 shell CWD 注入')
+      this.shellPlatform = 'unknown'
+      this.sshDebug.log('main', 'Exec Channel 已禁用，跳过平台探测与 shell CWD 注入')
+      this.flushPendingShellInput(stream)
       return
     }
 
@@ -359,6 +377,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
       if (this.shellPlatformProbe === probe) {
         this.shellPlatformProbe = undefined
       }
+      this.flushPendingShellInput(stream)
     }
     void probe.then(clearProbe, (error) => {
       clearProbe()
@@ -369,9 +388,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private async detectPlatformAndSetupShell(stream: { write(data: string): void }) {
     let platform: RemoteSystemPlatform = 'unknown'
     try {
-      platform = await probeRemoteSystemPlatform({
-        exec: (command, options, stdinPayload) => this.execCommand(command, options, false, stdinPayload)
-      })
+      platform = await this.resolveRemoteSystemPlatform()
     } catch (error) {
       this.sshDebug.log(
         'exec',
@@ -379,11 +396,14 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
       )
     }
 
-    if (!this.connected || this.shellStream !== stream || this.cwdSetupInjected) {
+    if (!this.connected || this.shellStream !== stream || this.cwdSetupInjected || this.shellSetupCanceled) {
       return
     }
 
-    this.metricsPlatform = platform
+    this.shellPlatform = platform
+    if (platform !== 'unknown') {
+      this.metricsPlatform = platform
+    }
     this.cwdSetupInjected = true
     if (!supportsPosixShellSetup(platform)) {
       this.sshDebug.log('main', `远端平台为 ${platform}，跳过 POSIX shell CWD 注入`)
@@ -393,8 +413,56 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     this.injectShellSetup(stream)
   }
 
+  private resolveRemoteSystemPlatform(): Promise<RemoteSystemPlatform> {
+    if (this.metricsPlatform && this.metricsPlatform !== 'unknown') {
+      return Promise.resolve(this.metricsPlatform)
+    }
+    if (this.platformProbePromise) {
+      return this.platformProbePromise
+    }
+
+    const generation = this.connectionGeneration
+    const execProbeCommand = async (command: string, options?: SystemMetricsCommandOptions, stdinPayload?: string) => {
+      if (!this.connected || this.connectionGeneration !== generation) {
+        throw new Error('SSH connection changed before platform probe completed')
+      }
+
+      const output = await this.execCommand(command, options, false, stdinPayload)
+      if (!this.connected || this.connectionGeneration !== generation) {
+        throw new Error('SSH connection changed before platform probe completed')
+      }
+      return output
+    }
+    // Establish the shared Exec SSH transport once under the probe budget.
+    // Without this guard every POSIX/PowerShell/cmd candidate could wait for a
+    // fresh 15-second SSH handshake after the transport itself had failed.
+    const probe = this.withOperationTimeout(
+      this.ensureExecConnection(),
+      3000,
+      'Exec SSH connection timed out during platform detection'
+    ).then(() => probeRemoteSystemPlatform({ exec: execProbeCommand }))
+    this.platformProbePromise = probe
+    void probe.then(
+      (platform) => {
+        if (this.platformProbePromise !== probe) {
+          return
+        }
+        this.platformProbePromise = undefined
+        if (this.connected && this.connectionGeneration === generation) {
+          this.metricsPlatform = platform
+        }
+      },
+      () => {
+        if (this.platformProbePromise === probe) {
+          this.platformProbePromise = undefined
+        }
+      }
+    )
+    return probe
+  }
+
   private injectShellSetup(stream: { write(data: string): void }) {
-    if (!supportsPosixShellSetup(this.metricsPlatform) || !this.connected || this.shellStream !== stream) {
+    if (!supportsPosixShellSetup(this.shellPlatform) || !this.connected || this.shellStream !== stream) {
       return
     }
 
@@ -410,26 +478,84 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
       if (!this.suppressEcho) {
         return
       }
+      this.finishShellSetupSuppression(stream)
+    }, LiveSshSessionController.SHELL_SETUP_TIMEOUT_MS)
+  }
 
-      const bufferedText = this.echoBuf
-      this.clearShellSetupSuppression()
-      if (!bufferedText) {
+  private scheduleShellSetupSettle(stream: { write(data: string): void }) {
+    // Rebase the hard deadline after a valid marker. A marker that arrives near
+    // the original deadline must not let the replacement prompt escape.
+    if (this.shellSetupReleaseTimer) {
+      clearTimeout(this.shellSetupReleaseTimer)
+    }
+    this.shellSetupReleaseTimer = setTimeout(() => {
+      this.finishShellSetupSuppression(stream)
+    }, LiveSshSessionController.SHELL_SETUP_TIMEOUT_MS)
+    if (this.shellSetupSettleTimer) {
+      clearTimeout(this.shellSetupSettleTimer)
+    }
+    this.shellSetupSettleTimer = setTimeout(() => {
+      this.shellSetupSettleTimer = undefined
+      this.finishShellSetupSuppression(stream)
+    }, LiveSshSessionController.SHELL_SETUP_SETTLE_MS)
+  }
+
+  private finishShellSetupSuppression(stream: { write(data: string): void }) {
+    if (!this.suppressEcho) {
+      return
+    }
+
+    // Everything received after the injected command starts is internal setup
+    // output until we have positively identified the pre-command prefix.  A
+    // timeout must fail closed: replaying the buffer leaks the setup command on
+    // fish/restricted shells and redraws another prompt.
+    const visibleText =
+      this.shellSetupVisiblePrefixLength === undefined ? '' : this.echoBuf.slice(0, this.shellSetupVisiblePrefixLength)
+    this.clearShellSetupSuppression()
+    try {
+      if (visibleText) {
+        this.transcript.append(visibleText)
+        for (const update of this.shellCwdTracker.feed(visibleText)) {
+          if (update.cwd && update.cwd !== this.shellCwd) {
+            this.shellCwd = update.cwd
+            this.onShellCwdChange(update.cwd)
+          }
+          if (update.user && update.user !== this.shellUser) {
+            this.handleShellUserChange(update.user)
+          }
+        }
+        this.trackSudoPromptFromTerminal(visibleText)
+        this.onData(visibleText)
+      }
+    } finally {
+      this.flushPendingShellInput(stream)
+    }
+  }
+
+  private flushPendingShellInput(stream: { write(data: string): void }) {
+    if (
+      !this.connected ||
+      this.shellStream !== stream ||
+      !this.cwdSetupInjected ||
+      this.shellPlatformProbe ||
+      this.suppressEcho ||
+      this.pendingShellInput.length === 0
+    ) {
+      return
+    }
+
+    const pendingInput = this.pendingShellInput
+    this.pendingShellInput = []
+    for (let index = 0; index < pendingInput.length; index += 1) {
+      const data = pendingInput[index]
+      try {
+        stream.write(data)
+        this.captureSudoPasswordInput(data)
+      } catch (error) {
+        this.sshDebug.log('main', `排队的终端输入写入失败: ${error instanceof Error ? error.message : String(error)}`)
         return
       }
-
-      this.transcript.append(bufferedText)
-      for (const update of this.shellCwdTracker.feed(bufferedText)) {
-        if (update.cwd && update.cwd !== this.shellCwd) {
-          this.shellCwd = update.cwd
-          this.onShellCwdChange(update.cwd)
-        }
-        if (update.user && update.user !== this.shellUser) {
-          this.handleShellUserChange(update.user)
-        }
-      }
-      this.trackSudoPromptFromTerminal(bufferedText)
-      this.onData(bufferedText)
-    }, 1500)
+    }
   }
 
   private clearShellSetupSuppression() {
@@ -437,8 +563,13 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
       clearTimeout(this.shellSetupReleaseTimer)
       this.shellSetupReleaseTimer = undefined
     }
+    if (this.shellSetupSettleTimer) {
+      clearTimeout(this.shellSetupSettleTimer)
+      this.shellSetupSettleTimer = undefined
+    }
     this.suppressEcho = false
     this.echoBuf = ''
+    this.shellSetupVisiblePrefixLength = undefined
   }
 
   private async verifyHostFingerprint(profile: SshProfile, key: Buffer | string): Promise<boolean> {
@@ -481,9 +612,15 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   override async disconnect(): Promise<void> {
+    this.connectionGeneration += 1
     this.clearShellSetupSuppression()
     const shellStream = this.shellStream
     this.shellStream = undefined
+    this.pendingShellInput = []
+    this.shellPlatform = 'unknown'
+    this.shellSetupCanceled = false
+    this.platformProbePromise = undefined
+    this.metricsRefreshPromise = undefined
     shellStream?.end()
     this.closeExecSession()
     this.closeSftpSession()
@@ -560,8 +697,30 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   async write(data: string): Promise<void> {
+    const shellStream = this.shellStream
+    if (!shellStream) {
+      return
+    }
+
+    if (!this.cwdSetupInjected && !this.suppressEcho) {
+      this.shellSetupCanceled = true
+      this.cwdSetupInjected = true
+    }
+    if (this.suppressEcho) {
+      if (/\u0003|\u001a|\u001b/.test(data)) {
+        this.pendingShellInput = []
+        this.shellSetupCanceled = true
+        this.clearShellSetupSuppression()
+        this.captureSudoPasswordInput(data)
+        shellStream.write(data)
+        return
+      }
+      this.pendingShellInput.push(data)
+      return
+    }
+
     this.captureSudoPasswordInput(data)
-    this.shellStream?.write(data)
+    shellStream.write(data)
   }
 
   async resize(cols: number, rows: number, width: number, height: number): Promise<void> {
@@ -1147,19 +1306,53 @@ fi
       return this.metrics
     }
 
+    if (this.metricsRefreshPromise) {
+      return this.metricsRefreshPromise
+    }
+
+    const refresh = this.collectSystemMetrics()
+    this.metricsRefreshPromise = refresh
     try {
+      return await refresh
+    } finally {
+      if (this.metricsRefreshPromise === refresh) {
+        this.metricsRefreshPromise = undefined
+      }
+    }
+  }
+
+  private async collectSystemMetrics(): Promise<SystemMetrics | undefined> {
+    const startedAt = Date.now()
+    const generation = this.connectionGeneration
+    try {
+      const platform = await this.resolveRemoteSystemPlatform()
+      if (platform === 'unknown') {
+        throw new Error('无法识别远端系统平台')
+      }
       const result = await collectSshSystemMetrics(
         {
           exec: (command, options, stdinPayload) => this.execCommand(command, options, false, stdinPayload)
         },
-        this.metricsPlatform
+        platform
       )
+      if (!this.connected || this.connectionGeneration !== generation) {
+        return undefined
+      }
       this.metricsPlatform = result.platform
       this.metrics = result.metrics
       return this.metrics
     } catch (error) {
-      this.sshDebug.log('exec', `系统信息采集失败: ${error instanceof Error ? error.message : String(error)}`)
-      return this.metrics
+      const message = error instanceof Error ? error.message : String(error)
+      this.sshDebug.log('exec', `系统信息采集失败: ${message}`)
+      const now = Date.now()
+      if (now - this.lastMetricsWarningAt >= LiveSshSessionController.METRICS_WARNING_INTERVAL_MS) {
+        this.lastMetricsWarningAt = now
+        appWarn(
+          `[FileTerm][Metrics] Collection failed after ${now - startedAt}ms (platform=${this.metricsPlatform ?? 'unknown'})`,
+          error
+        )
+      }
+      return undefined
     }
   }
 
@@ -1340,8 +1533,14 @@ fi
     }
 
     this.clearShellSetupSuppression()
+    this.connectionGeneration += 1
+    this.pendingShellInput = []
+    this.shellPlatform = 'unknown'
+    this.shellSetupCanceled = false
     this.shellStream = undefined
     this.shellPlatformProbe = undefined
+    this.platformProbePromise = undefined
+    this.metricsRefreshPromise = undefined
     this.resetPrivilegedFileAccess()
     this.connected = false
     this.closeExecSession()
@@ -2550,7 +2749,7 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
 
   private async execCommand(
     command: string,
-    options?: { allowNonZeroWithStdout?: boolean },
+    options?: SystemMetricsCommandOptions,
     privileged = false,
     stdinPayload?: string
   ): Promise<string> {
@@ -2575,18 +2774,23 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
         }
       }
 
-      const timeoutId = setTimeout(() => {
-        if (!settled) {
-          if (streamInstance) {
-            try {
-              streamInstance.destroy()
-            } catch {
-              // ignore
+      const timeoutId = setTimeout(
+        () => {
+          if (!settled) {
+            if (streamInstance) {
+              try {
+                streamInstance.destroy()
+              } catch {
+                // ignore
+              }
             }
+            const timeoutError = new Error('命令执行超时')
+            timeoutError.name = 'TimeoutError'
+            safeReject(timeoutError)
           }
-          safeReject(new Error('命令执行超时'))
-        }
-      }, 15000)
+        },
+        Math.max(250, options?.timeoutMs ?? 15000)
+      )
 
       const handleExec = (error: Error | undefined, stream: ClientChannel) => {
         if (error) {
@@ -2595,6 +2799,9 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
         }
 
         streamInstance = stream
+        stream.on('error', (streamError: Error) => {
+          safeReject(streamError)
+        })
 
         let stdout = ''
         let stderr = ''

@@ -93,6 +93,20 @@ export function registerAppHandlers(options: IpcWindowOptions) {
     BrowserWindow.fromWebContents(event.sender)?.close()
   })
 
+  ipcMain.handle('app:confirmCloseCurrentFileEditor', (event) => {
+    const senderWindow = BrowserWindow.fromWebContents(event.sender)
+    if (senderWindow) {
+      options.confirmCloseFileEditorWindow(senderWindow)
+    }
+  })
+
+  ipcMain.handle('app:cancelCloseCurrentFileEditor', (event) => {
+    const senderWindow = BrowserWindow.fromWebContents(event.sender)
+    if (senderWindow) {
+      options.cancelCloseFileEditorWindow(senderWindow)
+    }
+  })
+
   ipcMain.handle('app:showWindowMenu', (event, menuType: 'app' | 'file' | 'view' | 'window', x: number, y: number) => {
     const senderWindow = BrowserWindow.fromWebContents(event.sender)
     if (!senderWindow) {

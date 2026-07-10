@@ -78,9 +78,6 @@ export function ModalPortalManager({
 }: ModalPortalManagerProps) {
   return (
     <>
-      {rootAccess ? <RootAccessModal {...rootAccess} /> : null}
-      {sshCredentials ? <SshCredentialsModal {...sshCredentials} /> : null}
-      {sshHostVerification ? <SshHostVerificationModal {...sshHostVerification} /> : null}
       {tabContextMenu ? <TabContextMenu {...tabContextMenu} /> : null}
       {connectionManager ? <ConnectionManagerModal {...connectionManager} standalone={false} /> : null}
       {commandManager ? <CommandManagerModal {...commandManager} standalone={false} /> : null}
@@ -97,6 +94,9 @@ export function ModalPortalManager({
         <FileActionModal {...fileAction.props} />
       ) : null}
       {filePermission ? <FilePermissionModal {...filePermission} /> : null}
+      {rootAccess ? <RootAccessModal {...rootAccess} /> : null}
+      {sshCredentials ? <SshCredentialsModal {...sshCredentials} /> : null}
+      {sshHostVerification ? <SshHostVerificationModal {...sshHostVerification} /> : null}
       {shortcutCloseConfirm ? <ConfirmActionDialog {...shortcutCloseConfirm} /> : null}
       {windowCloseConfirm ? <ConfirmActionDialog {...windowCloseConfirm} /> : null}
     </>

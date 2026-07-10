@@ -1,4 +1,4 @@
-# 质量门禁与技术债清理计划 (Active)
+# 质量门禁与技术债清理计划 (Completed)
 
 ## 背景
 
@@ -259,7 +259,7 @@
 
 ### P2-1. workspace-service.ts 1697 行
 
-已是 façade 薄委托（委托给 `WorkspaceTabsState` / `WorkspaceTransfersState` / `WorkspaceTabLifecycleService` / `WorkspaceSessionRuntime` / `TransferJournal` / `ProfileRepository`），多数方法 3-10 行。风险可控，非上帝对象。进一步抽 `TransferService` 的工作见 `fileterm-core-decoupling-plan.md`，不在此重复。
+已是 façade 薄委托（委托给 `WorkspaceTabsState` / `WorkspaceTransfersState` / `WorkspaceTabLifecycleService` / `WorkspaceSessionRuntime` / `TransferJournal` / `ProfileRepository`），多数方法 3-10 行。风险可控，非上帝对象。`TransferService` 的抽取记录见 `docs/plans/completed/fileterm-core-decoupling-plan.md`，不在此重复。
 
 ### P2-2. 根目录散落文档归档
 
@@ -268,17 +268,17 @@
 
 ### P2-3. 无 store 的状态管理
 
-`architecture.md` 已明确"等 App.tsx 拆分后再评估 Zustand"，属于有意为之的债。当前靠 React state + snapshot + IPC 广播，短期可持续。应与 `fileterm-core-decoupling-plan.md` 的 App.tsx hook 化拆分同步决策，**不单独推进**。
+`architecture.md` 已明确“等 App.tsx 拆分后再评估 Zustand”，属于有意为之的债。当前靠 React state + snapshot + IPC 广播，短期可持续。App.tsx hook 化拆分已完成，后续是否引入 store 仍按真实复杂度单独评估，不因重构完成而自动推进。
 
 ---
 
 ## 与现有 plan 的关系
 
-本计划**不重复**以下已有 active plan 的工作，仅做交叉引用：
+本计划**不重复**以下已有计划的工作，仅做交叉引用：
 
-- `docs/plans/active/structural-boundaries.md`：IPC 拆分、协议控制器物理隔离、tab lifecycle 剥离、transfer runtime 外移、App.tsx shell host 拆分（均已完成）。其剩余 TODO（useWorkspaceTabs / useWorkspaceModals / useFileOperations / useSshInteractions / useFileEditor / ModalPortalManager / useWorkspaceIpcSync）与本计划 P1-2 的 prop 类型修复有协同关系——hook 化时顺带修 prop 类型。
-- `docs/plans/active/fileterm-core-decoupling-plan.md`：TransferService 抽取、会话 runtime 事件转发器重构、App.tsx 状态托管 hook 化。本计划 P0 质量门禁应**先于**该计划落地——有了 lint + 测试 + 门禁，解耦重构才有安全网。
-- `docs/plans/active/multiplatform-system-observability.md`：多平台系统信息采集，与本计划无重叠。
+- `docs/plans/completed/structural-boundaries.md`：IPC 拆分、协议控制器物理隔离、tab lifecycle、transfer runtime 与 App.tsx hooks 拆分均已完成。
+- `docs/plans/completed/fileterm-core-decoupling-plan.md`：TransferService 抽取、会话 runtime 事件转发器重构、App.tsx 状态托管 hook 化均已完成；本计划建立的质量门禁为这些重构提供了安全网。
+- `docs/plans/completed/multiplatform-system-observability.md`：多平台系统信息采集，与本计划无重叠。
 
 ---
 

@@ -54,6 +54,8 @@ const api: FileTermDesktopApi = {
   isCurrentWindowMaximized: (): Promise<boolean> => ipcRenderer.invoke('app:isCurrentWindowMaximized'),
   toggleMaximizeCurrentWindow: (): Promise<void> => ipcRenderer.invoke('app:toggleMaximizeCurrentWindow'),
   closeCurrentWindow: (): Promise<void> => ipcRenderer.invoke('app:closeCurrentWindow'),
+  confirmCloseCurrentFileEditor: (): Promise<void> => ipcRenderer.invoke('app:confirmCloseCurrentFileEditor'),
+  cancelCloseCurrentFileEditor: (): Promise<void> => ipcRenderer.invoke('app:cancelCloseCurrentFileEditor'),
   showWindowMenu: (menuType: 'app' | 'file' | 'view' | 'window', x: number, y: number): Promise<void> =>
     ipcRenderer.invoke('app:showWindowMenu', menuType, x, y),
   onWindowMaximizedChange: (listener: (isMaximized: boolean) => void) => {
@@ -70,6 +72,11 @@ const api: FileTermDesktopApi = {
     ) => listener(preferences)
     ipcRenderer.on('app:ui-preferences-changed', wrapped)
     return () => ipcRenderer.off('app:ui-preferences-changed', wrapped)
+  },
+  onFileEditorCloseRequest: (listener: () => void) => {
+    const wrapped = () => listener()
+    ipcRenderer.on('app:file-editor-close-request', wrapped)
+    return () => ipcRenderer.off('app:file-editor-close-request', wrapped)
   },
 
   requestQuitApp: (): Promise<void> => ipcRenderer.invoke('app:requestQuitApp'),

@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useMemo, useState, type CSSProperties, type FormEvent } from 'react'
+import { Suspense, lazy, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import {
   type CommandExecutionOptions,
   type ConnectionFormMode,
@@ -19,6 +19,7 @@ const FileEditorModal = lazy(() =>
   import('./features/files/FileEditorModal').then((m) => ({ default: m.FileEditorModal }))
 )
 import { CloseButton } from './features/common/CloseButton'
+import { ConfirmActionDialog } from './features/common/ConfirmActionDialog'
 import type { SendScope } from './features/common/session-send-targets'
 import { resolveSelectedTabIds } from './features/common/session-send-targets'
 import { TabBar, type TabBarProps, type TabContextTarget } from './features/layout/TabBar'
@@ -93,6 +94,7 @@ export function App() {
   const [isBusy, setIsBusy] = useState(false)
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readInitialTheme(searchParams))
   const [locale, setLocaleState] = useState<AppLocale>(() => readInitialLocale(searchParams))
+  const [isFileEditorDiscardConfirmOpen, setIsFileEditorDiscardConfirmOpen] = useState(false)
 
   const [sidebarWidth, setSidebarWidth] = useState(214)
   const [isWorkspaceFocusMode, setIsWorkspaceFocusMode] = useState(false)
@@ -267,6 +269,60 @@ export function App() {
     onStatusMessage: (msg) => setError(msg),
     windowInput: fileEditorWindowInput
   })
+  const fileEditorDirtyRef = useRef(isFileEditorDirty)
+  fileEditorDirtyRef.current = isFileEditorDirty
+
+  const requestFileEditorClose = () => {
+    if (isFileEditorDirty) {
+      setIsFileEditorDiscardConfirmOpen(true)
+      return
+    }
+    if (!desktopApi) {
+      closeCurrentWindow()
+      return
+    }
+    void desktopApi.confirmCloseCurrentFileEditor().catch((err: unknown) => {
+      reportError(setError, '关闭文件编辑器', err)
+    })
+  }
+
+  const confirmFileEditorDiscard = () => {
+    setIsFileEditorDiscardConfirmOpen(false)
+    if (!desktopApi) {
+      closeCurrentWindow()
+      return
+    }
+    void desktopApi.confirmCloseCurrentFileEditor().catch((err: unknown) => {
+      reportError(setError, '关闭文件编辑器', err)
+    })
+  }
+
+  const cancelFileEditorDiscard = () => {
+    setIsFileEditorDiscardConfirmOpen(false)
+    if (!desktopApi || !isFileEditorWindow) {
+      return
+    }
+    void desktopApi.cancelCloseCurrentFileEditor().catch((err: unknown) => {
+      reportError(setError, '取消关闭文件编辑器', err)
+    })
+  }
+
+  useEffect(() => {
+    if (!desktopApi || !isFileEditorWindow) {
+      setIsFileEditorDiscardConfirmOpen(false)
+      return
+    }
+
+    return desktopApi.onFileEditorCloseRequest(() => {
+      if (fileEditorDirtyRef.current) {
+        setIsFileEditorDiscardConfirmOpen(true)
+        return
+      }
+      void desktopApi.confirmCloseCurrentFileEditor().catch((err: unknown) => {
+        reportError(setError, '关闭文件编辑器', err)
+      })
+    })
+  }, [desktopApi, isFileEditorWindow])
 
   // 5. File Operations Hook
   const {
@@ -825,7 +881,7 @@ export function App() {
             isBusy={isFileEditorBusy}
             isDirty={isFileEditorDirty}
             isSaving={isFileEditorSaving}
-            onClose={closeCurrentWindow}
+            onClose={requestFileEditorClose}
             onDraftChange={checkFileEditorDirty}
             onReloadWithEncoding={(encoding) => {
               void reloadFileEditorWithEncoding(encoding)
@@ -835,6 +891,15 @@ export function App() {
             themeMode={themeMode}
           />
         </Suspense>
+        {isFileEditorDiscardConfirmOpen ? (
+          <ConfirmActionDialog
+            confirmLabel={t.fileEditorDiscardChanges}
+            description={t.fileEditorDiscardChangesDescription}
+            onClose={cancelFileEditorDiscard}
+            onConfirm={confirmFileEditorDiscard}
+            title={t.fileEditorDiscardChangesTitle}
+          />
+        ) : null}
       </StandaloneWindowFrame>
     )
   }
@@ -1057,218 +1122,216 @@ export function App() {
           transfers={workspace.transfers}
           visible={!isHomeWorkspaceVisible}
         />
-
-        <ModalPortalManager
-          commandManager={
-            showCommandManager
-              ? {
-                  commandFolders: workspace.commandFolders || [],
-                  commandTemplates: workspace.commandTemplates || [],
-                  onClose: () => setShowCommandManager(false),
-                  onCreateFolder: (name) => {
-                    void createCommandFolder(name)
-                  },
-                  onDeleteFolder: (folderId) => {
-                    void deleteCommandFolder(folderId)
-                  },
-                  onUpdateFolder: (folderId, updates) => {
-                    void updateCommandFolder(folderId, updates)
-                  },
-                  onUpdateOrder: (id, parentId, order) => {
-                    void updateCommandOrder(id, parentId, order)
-                  },
-                  onCreateCommand: (input) => {
-                    void saveCommandTemplate(null, input)
-                  },
-                  onUpdateCommand: (commandId, input) => {
-                    void saveCommandTemplate(commandId, input)
-                  },
-                  onDeleteCommand: (commandId) => {
-                    void deleteCommandTemplate(commandId)
-                  }
-                }
-              : null
-          }
-          connectionForm={
-            showConnectionForm
-              ? {
-                  editingProfileId,
-                  errorMessage: formError,
-                  groupOptions: connectionGroupOptions,
-                  mode: editingProfileId ? 'edit' : 'create',
-                  form,
-                  profiles: workspace.profiles,
-                  setForm: updateForm,
-                  onClearHostFingerprint: (profile) => {
-                    void handleClearHostFingerprint(profile)
-                  },
-                  onSubmit: handleSaveProfile,
-                  onClose: closeConnectionForm
-                }
-              : null
-          }
-          connectionManager={
-            showConnectionManager
-              ? {
-                  profiles: workspace.profiles,
-                  folders: workspace.folders || [],
-                  onClose: () => setShowConnectionManager(false),
-                  onCreate: () => {
-                    setShowConnectionManager(false)
-                    openCreateConnection()
-                  },
-                  onDeleteProfile: handleDeleteProfile,
-                  onEditProfile: (profile) => {
-                    setShowConnectionManager(false)
-                    openEditConnection(profile)
-                  },
-                  onOpenProfile: (profileId) => {
-                    setShowConnectionManager(false)
-                    void openProfile(profileId)
-                  },
-                  onCreateFolder: (name) => desktopApi?.createFolder(name),
-                  onDeleteFolder: (id) => desktopApi?.deleteFolder(id),
-                  onUpdateFolder: (id, updates) => desktopApi?.updateFolder(id, updates),
-                  onUpdateOrder: (id, parentId, order) => desktopApi?.updateEntityOrder(id, parentId, order)
-                }
-              : null
-          }
-          fileAction={fileActionProps}
-          fileEditor={
-            fileEditor
-              ? {
-                  errorMessage: fileEditorError,
-                  file: fileEditor,
-                  isBusy: isFileEditorBusy,
-                  isDirty: isFileEditorDirty,
-                  isSaving: isFileEditorSaving,
-                  onClose: closeFileEditor,
-                  onDraftChange: checkFileEditorDirty,
-                  onReloadWithEncoding: (encoding) => {
-                    void reloadFileEditorWithEncoding(encoding)
-                  },
-                  onSave: saveFileEditor,
-                  themeMode
-                }
-              : null
-          }
-          filePermission={
-            permissionDialog
-              ? {
-                  errorMessage: permissionDialogError,
-                  fileName: permissionDialog.target.name,
-                  fileType: permissionDialog.target.type,
-                  initialPermission: permissionDialog.target.permission,
-                  onClose: dismissPermissionDialog,
-                  onSubmit: (options) => {
-                    void handleSubmitPermissions(options)
-                  },
-                  ownerGroup: permissionDialog.target.ownerGroup,
-                  supportsRecursive: permissionDialog.supportsRecursive,
-                  targetPath: permissionDialog.target.path
-                }
-              : null
-          }
-          rootAccess={
-            rootAccessDialog
-              ? {
-                  defaultSshUser: rootAccessDialog.sshUser,
-                  defaultSudoUser: rootAccessDialog.sudoUser,
-                  errorMessage: rootAccessDialogError,
-                  isSubmitting: isRootAccessSubmitting,
-                  onClose: dismissRootAccessDialog,
-                  onSubmit: handleConfirmRootAccess
-                }
-              : null
-          }
-          settings={
-            showSettings
-              ? {
-                  theme: themeMode,
-                  onSetTheme: setThemeMode,
-                  locale,
-                  onSetLocale: (nextLocale) => {
-                    setLocale(nextLocale)
-                    setLocaleState(nextLocale)
-                  },
-                  onOpenCommandManager: openCommandManagerFromSettings,
-                  onOpenConnectionManager: openConnectionManagerFromSettings,
-                  onOpenLogsDirectory: () => {
-                    openLogsDirectory()
-                  },
-                  onClose: () => setShowSettings(false)
-                }
-              : null
-          }
-          shortcutCloseConfirm={
-            shortcutCloseConfirm
-              ? {
-                  confirmLabel: t.closeShortcutCloseTab,
-                  description: (shortcutCloseConfirm.variant === 'connecting'
-                    ? t.closeShortcutConnectingDescription
-                    : shortcutCloseConfirm.variant === 'active-session'
-                      ? t.closeShortcutActiveDescription
-                      : t.closeShortcutLastActiveDescription
-                  ).replace('{name}', shortcutCloseConfirm.title),
-                  isSubmitting: isBusy,
-                  onClose: dismissShortcutCloseConfirm,
-                  onConfirm: () => {
-                    void confirmShortcutClose()
-                  },
-                  title:
-                    shortcutCloseConfirm.variant === 'connecting'
-                      ? t.closeShortcutConnectingTitle
-                      : shortcutCloseConfirm.variant === 'active-session'
-                        ? t.closeShortcutActiveTitle
-                        : t.closeShortcutLastActiveTitle
-                }
-              : null
-          }
-          sshCredentials={
-            credentialsRequest
-              ? {
-                  errorMessage: sshInteractionError,
-                  request: credentialsRequest,
-                  onCancel: cancelCredentials,
-                  onSubmit: submitCredentials
-                }
-              : null
-          }
-          sshHostVerification={
-            hostVerificationRequest
-              ? {
-                  request: hostVerificationRequest,
-                  onReject: rejectHost,
-                  onAcceptOnce: acceptHostOnce,
-                  onAcceptAndSave: acceptHostAndSave
-                }
-              : null
-          }
-          tabContextMenu={
-            tabContextMenu
-              ? {
-                  canConnectAll: visibleWorkspaceTabs.some(
-                    (tab) => tab.status !== 'connected' && tab.status !== 'connecting'
-                  ),
-                  canCloseAll: localTabs.length + visibleWorkspaceTabs.length > 0,
-                  canCloseCurrent:
-                    tabContextMenu.target.kind === 'session'
-                      ? true
-                      : localTabs.length + visibleWorkspaceTabs.length > 1,
-                  canCloseOthers: localTabs.length + visibleWorkspaceTabs.length > 1,
-                  isSessionTab: tabContextMenu.target.kind === 'session',
-                  onAction: (action) => {
-                    void handleTabContextAction(action)
-                  },
-                  onClose: closeTabContextMenu,
-                  position: { x: tabContextMenu.x, y: tabContextMenu.y },
-                  tabStatus: tabContextMenu.target.kind === 'session' ? tabContextMenu.target.status : null
-                }
-              : null
-          }
-          windowCloseConfirm={windowCloseConfirmProps}
-        />
       </div>
+
+      <ModalPortalManager
+        commandManager={
+          showCommandManager
+            ? {
+                commandFolders: workspace.commandFolders || [],
+                commandTemplates: workspace.commandTemplates || [],
+                onClose: () => setShowCommandManager(false),
+                onCreateFolder: (name) => {
+                  void createCommandFolder(name)
+                },
+                onDeleteFolder: (folderId) => {
+                  void deleteCommandFolder(folderId)
+                },
+                onUpdateFolder: (folderId, updates) => {
+                  void updateCommandFolder(folderId, updates)
+                },
+                onUpdateOrder: (id, parentId, order) => {
+                  void updateCommandOrder(id, parentId, order)
+                },
+                onCreateCommand: (input) => {
+                  void saveCommandTemplate(null, input)
+                },
+                onUpdateCommand: (commandId, input) => {
+                  void saveCommandTemplate(commandId, input)
+                },
+                onDeleteCommand: (commandId) => {
+                  void deleteCommandTemplate(commandId)
+                }
+              }
+            : null
+        }
+        connectionForm={
+          showConnectionForm
+            ? {
+                editingProfileId,
+                errorMessage: formError,
+                groupOptions: connectionGroupOptions,
+                mode: editingProfileId ? 'edit' : 'create',
+                form,
+                profiles: workspace.profiles,
+                setForm: updateForm,
+                onClearHostFingerprint: (profile) => {
+                  void handleClearHostFingerprint(profile)
+                },
+                onSubmit: handleSaveProfile,
+                onClose: closeConnectionForm
+              }
+            : null
+        }
+        connectionManager={
+          showConnectionManager
+            ? {
+                profiles: workspace.profiles,
+                folders: workspace.folders || [],
+                onClose: () => setShowConnectionManager(false),
+                onCreate: () => {
+                  setShowConnectionManager(false)
+                  openCreateConnection()
+                },
+                onDeleteProfile: handleDeleteProfile,
+                onEditProfile: (profile) => {
+                  setShowConnectionManager(false)
+                  openEditConnection(profile)
+                },
+                onOpenProfile: (profileId) => {
+                  setShowConnectionManager(false)
+                  void openProfile(profileId)
+                },
+                onCreateFolder: (name) => desktopApi?.createFolder(name),
+                onDeleteFolder: (id) => desktopApi?.deleteFolder(id),
+                onUpdateFolder: (id, updates) => desktopApi?.updateFolder(id, updates),
+                onUpdateOrder: (id, parentId, order) => desktopApi?.updateEntityOrder(id, parentId, order)
+              }
+            : null
+        }
+        fileAction={fileActionProps}
+        fileEditor={
+          fileEditor
+            ? {
+                errorMessage: fileEditorError,
+                file: fileEditor,
+                isBusy: isFileEditorBusy,
+                isDirty: isFileEditorDirty,
+                isSaving: isFileEditorSaving,
+                onClose: closeFileEditor,
+                onDraftChange: checkFileEditorDirty,
+                onReloadWithEncoding: (encoding) => {
+                  void reloadFileEditorWithEncoding(encoding)
+                },
+                onSave: saveFileEditor,
+                themeMode
+              }
+            : null
+        }
+        filePermission={
+          permissionDialog
+            ? {
+                errorMessage: permissionDialogError,
+                fileName: permissionDialog.target.name,
+                fileType: permissionDialog.target.type,
+                initialPermission: permissionDialog.target.permission,
+                onClose: dismissPermissionDialog,
+                onSubmit: (options) => {
+                  void handleSubmitPermissions(options)
+                },
+                ownerGroup: permissionDialog.target.ownerGroup,
+                supportsRecursive: permissionDialog.supportsRecursive,
+                targetPath: permissionDialog.target.path
+              }
+            : null
+        }
+        rootAccess={
+          rootAccessDialog
+            ? {
+                defaultSshUser: rootAccessDialog.sshUser,
+                defaultSudoUser: rootAccessDialog.sudoUser,
+                errorMessage: rootAccessDialogError,
+                isSubmitting: isRootAccessSubmitting,
+                onClose: dismissRootAccessDialog,
+                onSubmit: handleConfirmRootAccess
+              }
+            : null
+        }
+        settings={
+          showSettings
+            ? {
+                theme: themeMode,
+                onSetTheme: setThemeMode,
+                locale,
+                onSetLocale: (nextLocale) => {
+                  setLocale(nextLocale)
+                  setLocaleState(nextLocale)
+                },
+                onOpenCommandManager: openCommandManagerFromSettings,
+                onOpenConnectionManager: openConnectionManagerFromSettings,
+                onOpenLogsDirectory: () => {
+                  openLogsDirectory()
+                },
+                onClose: () => setShowSettings(false)
+              }
+            : null
+        }
+        shortcutCloseConfirm={
+          shortcutCloseConfirm
+            ? {
+                confirmLabel: t.closeShortcutCloseTab,
+                description: (shortcutCloseConfirm.variant === 'connecting'
+                  ? t.closeShortcutConnectingDescription
+                  : shortcutCloseConfirm.variant === 'active-session'
+                    ? t.closeShortcutActiveDescription
+                    : t.closeShortcutLastActiveDescription
+                ).replace('{name}', shortcutCloseConfirm.title),
+                isSubmitting: isBusy,
+                onClose: dismissShortcutCloseConfirm,
+                onConfirm: () => {
+                  void confirmShortcutClose()
+                },
+                title:
+                  shortcutCloseConfirm.variant === 'connecting'
+                    ? t.closeShortcutConnectingTitle
+                    : shortcutCloseConfirm.variant === 'active-session'
+                      ? t.closeShortcutActiveTitle
+                      : t.closeShortcutLastActiveTitle
+              }
+            : null
+        }
+        sshCredentials={
+          credentialsRequest
+            ? {
+                errorMessage: sshInteractionError,
+                request: credentialsRequest,
+                onCancel: cancelCredentials,
+                onSubmit: submitCredentials
+              }
+            : null
+        }
+        sshHostVerification={
+          hostVerificationRequest
+            ? {
+                request: hostVerificationRequest,
+                onReject: rejectHost,
+                onAcceptOnce: acceptHostOnce,
+                onAcceptAndSave: acceptHostAndSave
+              }
+            : null
+        }
+        tabContextMenu={
+          tabContextMenu
+            ? {
+                canConnectAll: visibleWorkspaceTabs.some(
+                  (tab) => tab.status !== 'connected' && tab.status !== 'connecting'
+                ),
+                canCloseAll: localTabs.length + visibleWorkspaceTabs.length > 0,
+                canCloseCurrent:
+                  tabContextMenu.target.kind === 'session' ? true : localTabs.length + visibleWorkspaceTabs.length > 1,
+                canCloseOthers: localTabs.length + visibleWorkspaceTabs.length > 1,
+                isSessionTab: tabContextMenu.target.kind === 'session',
+                onAction: (action) => {
+                  void handleTabContextAction(action)
+                },
+                onClose: closeTabContextMenu,
+                position: { x: tabContextMenu.x, y: tabContextMenu.y },
+                tabStatus: tabContextMenu.target.kind === 'session' ? tabContextMenu.target.status : null
+              }
+            : null
+        }
+        windowCloseConfirm={windowCloseConfirmProps}
+      />
     </>
   )
 }

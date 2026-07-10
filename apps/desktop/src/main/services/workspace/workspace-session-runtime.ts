@@ -31,8 +31,11 @@ type WorkspaceSessionRuntimeEvents = {
 export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntimeEvents> {
   private readonly sessions = new Map<string, SessionSnapshot>()
   private readonly liveControllers = new Map<string, LiveSessionController>()
-  private readonly metricsPollers = new Map<string, ReturnType<typeof setInterval>>()
-  private readonly metricsRefreshInFlight = new Set<string>()
+  private readonly metricsPollers = new Map<
+    string,
+    { timer: ReturnType<typeof setInterval>; controller: LiveSshSessionController }
+  >()
+  private readonly metricsRefreshInFlight = new Map<string, { token: symbol; controller: LiveSshSessionController }>()
   private readonly tabSenders = new Map<string, WebContents>()
   private readonly invalidSenders = new WeakSet<WebContents>()
   private readonly senderLifecycleListeners = new WeakSet<WebContents>()
@@ -348,6 +351,10 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
       }
       await this.emitSnapshotForTab(tabId)
 
+      if (controller.type === 'ssh' && this.shouldPollMetrics(controller)) {
+        this.startMetricsPolling(tabId, controller)
+      }
+
       let remoteFilesError: string | null = null
       try {
         const files = await controller.listRemoteFiles()
@@ -400,23 +407,8 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
           await this.followShellCwd(tabId, shellCwd)
         }
 
-        const systemMetrics = await controller.refreshSystemMetrics()
-        const latest = this.sessions.get(tabId)
-        if (latest && systemMetrics) {
-          this.sessions.set(tabId, {
-            ...latest,
-            systemMetrics: mergeSystemMetricsHistory(undefined, systemMetrics)
-          })
-          await this.emitSnapshotForTab(tabId)
-        }
         if (remoteFilesError) {
           controller.pushClientNotice(`SFTP 初始化失败: ${remoteFilesError}`)
-        }
-      }
-
-      if (controller.type === 'ssh') {
-        if (this.shouldPollMetrics(controller)) {
-          this.startMetricsPolling(tabId, controller)
         }
       }
     } catch (error) {
@@ -809,21 +801,6 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
       }
     }
 
-    if (controller.type === 'ssh' && !nextSnapshot.systemMetrics) {
-      try {
-        const systemMetrics = await controller.refreshSystemMetrics()
-        if (systemMetrics) {
-          nextSnapshot = {
-            ...nextSnapshot,
-            systemMetrics: mergeSystemMetricsHistory(undefined, systemMetrics)
-          }
-          changed = true
-        }
-      } catch {
-        // Ignore restoration errors; polling will keep trying after the tab is rebound.
-      }
-    }
-
     if (changed) {
       this.sessions.set(tabId, nextSnapshot)
       if (nextSnapshot.remoteFiles !== current.remoteFiles) {
@@ -835,17 +812,22 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
   }
 
   private startMetricsPolling(tabId: string, controller: LiveSshSessionController) {
+    const existing = this.metricsPollers.get(tabId)
+    if (existing?.controller === controller) {
+      return
+    }
     this.stopMetricsPolling(tabId)
     const timer = setInterval(() => {
       void this.refreshMetricsForTab(tabId, controller)
     }, 1000)
-    this.metricsPollers.set(tabId, timer)
+    this.metricsPollers.set(tabId, { timer, controller })
+    void this.refreshMetricsForTab(tabId, controller)
   }
 
   private stopMetricsPolling(tabId: string) {
-    const timer = this.metricsPollers.get(tabId)
-    if (timer) {
-      clearInterval(timer)
+    const poller = this.metricsPollers.get(tabId)
+    if (poller) {
+      clearInterval(poller.timer)
       this.metricsPollers.delete(tabId)
     }
     this.metricsRefreshInFlight.delete(tabId)
@@ -871,16 +853,18 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
       return
     }
 
-    this.metricsRefreshInFlight.add(tabId)
+    const flight = { token: Symbol(tabId), controller }
+    this.metricsRefreshInFlight.set(tabId, flight)
     try {
       const systemMetrics = await controller.refreshSystemMetrics()
-      if (!systemMetrics) {
+      if (!systemMetrics || this.metricsRefreshInFlight.get(tabId) !== flight) {
         return
       }
 
       const latest = this.sessions.get(tabId)
       const liveController = this.liveControllers.get(tabId)
-      if (!latest || !latest.connected || liveController !== controller) {
+      const liveSender = this.tabSenders.get(tabId)
+      if (!latest || !latest.connected || liveController !== controller || liveSender !== sender) {
         return
       }
 
@@ -896,7 +880,9 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
 
       this.emitMetrics(sender, tabId, systemMetrics, 'append')
     } finally {
-      this.metricsRefreshInFlight.delete(tabId)
+      if (this.metricsRefreshInFlight.get(tabId) === flight) {
+        this.metricsRefreshInFlight.delete(tabId)
+      }
     }
   }
 

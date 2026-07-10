@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type {
   FileContentSnapshot,
   FileEditorWindowInput,
@@ -136,6 +136,12 @@ function createInitialFile(
   }
 }
 
+function useLatestRef<T>(value: T) {
+  const ref = useRef(value)
+  ref.current = value
+  return ref
+}
+
 export function useFileEditor({
   activeTabId,
   desktopApi,
@@ -151,6 +157,10 @@ export function useFileEditor({
   const [isLoading, setIsLoading] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
   const [isDirty, setIsDirty] = useState(false)
+  const formatErrorRef = useLatestRef(formatError)
+  const onApplySnapshotRef = useLatestRef(onApplySnapshot)
+  const onLocalFileSavedRef = useLatestRef(onLocalFileSaved)
+  const onStatusMessageRef = useLatestRef(onStatusMessage)
 
   useEffect(() => {
     if (!desktopApi || !isFileEditorWindow || !windowInput) {
@@ -180,7 +190,7 @@ export function useFileEditor({
       } catch (error) {
         if (!canceled) {
           console.error('[FileTerm] 打开文件编辑器', error)
-          setErrorMessage(formatError('打开文件编辑器', error))
+          setErrorMessage(formatErrorRef.current('打开文件编辑器', error))
         }
       } finally {
         if (!canceled) {
@@ -194,7 +204,6 @@ export function useFileEditor({
     }
   }, [
     desktopApi,
-    formatError,
     isFileEditorWindow,
     windowInput?.encoding,
     windowInput?.name,
@@ -227,7 +236,7 @@ export function useFileEditor({
 
       const blockReason = getRemoteFileEditorBlockReason(item, locale)
       if (blockReason) {
-        onStatusMessage(blockReason)
+        onStatusMessageRef.current(blockReason)
         return
       }
 
@@ -239,7 +248,7 @@ export function useFileEditor({
         encoding: 'utf-8'
       })
     },
-    [desktopApi, onStatusMessage]
+    [desktopApi]
   )
 
   const save = useCallback(
@@ -253,12 +262,12 @@ export function useFileEditor({
         if (file.source === 'local') {
           await desktopApi.writeLocalFile(file.path, content, encoding)
           if (!isFileEditorWindow) {
-            await onLocalFileSaved?.()
+            await onLocalFileSavedRef.current?.()
           }
         } else {
           const tabId = file.tabId ?? activeTabId
           if (tabId) {
-            onApplySnapshot(await desktopApi.writeRemoteFile(tabId, file.path, content, encoding))
+            onApplySnapshotRef.current(await desktopApi.writeRemoteFile(tabId, file.path, content, encoding))
           }
         }
 
@@ -267,12 +276,12 @@ export function useFileEditor({
         setIsDirty(false)
       } catch (error) {
         console.error('[FileTerm] 保存文件', error)
-        setErrorMessage(formatError('保存文件', error, { targetPath: file.path }))
+        setErrorMessage(formatErrorRef.current('保存文件', error, { targetPath: file.path }))
       } finally {
         setIsSaving(false)
       }
     },
-    [activeTabId, desktopApi, file, formatError, isFileEditorWindow, onApplySnapshot, onLocalFileSaved]
+    [activeTabId, desktopApi, file, isFileEditorWindow]
   )
 
   const reloadWithEncoding = useCallback(
@@ -295,12 +304,12 @@ export function useFileEditor({
         setIsDirty(false)
       } catch (error) {
         console.error('[FileTerm] 重新按编码打开文件', error)
-        setErrorMessage(formatError('重新按编码打开文件', error))
+        setErrorMessage(formatErrorRef.current('重新按编码打开文件', error))
       } finally {
         setIsLoading(false)
       }
     },
-    [activeTabId, desktopApi, file, formatError]
+    [activeTabId, desktopApi, file]
   )
 
   const close = useCallback(() => {

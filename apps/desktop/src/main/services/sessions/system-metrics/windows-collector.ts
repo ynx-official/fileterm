@@ -12,17 +12,33 @@ export async function runPowerShellMetricsScript(executor: SystemMetricsExecutor
 
   for (const command of commands) {
     try {
-      const raw = await executor.exec(command, undefined, script)
+      const raw = await executor.exec(command, { timeoutMs: 12000 }, script)
       if (!raw.includes(WINDOWS_METRICS_COMPLETE_MARKER)) {
         throw new Error(`Windows metrics script did not emit ${WINDOWS_METRICS_COMPLETE_MARKER}`)
       }
       return raw
     } catch (error) {
       lastError = error
+      if (isTimeoutError(error) || !isCommandUnavailable(error)) {
+        break
+      }
     }
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError))
+}
+
+function isCommandUnavailable(error: unknown) {
+  return (
+    error instanceof Error &&
+    /(not recognized|not found|command not found|cannot find|is not installed|不是内部或外部命令|无法将.+识别)/i.test(
+      error.message
+    )
+  )
+}
+
+function isTimeoutError(error: unknown) {
+  return error instanceof Error && (error.name === 'TimeoutError' || /timed?\s*out|超时/i.test(error.message))
 }
 
 function buildWindowsMetricsScript() {
@@ -38,6 +54,7 @@ try {
 $script:CimAvailable = [bool] (Get-Command Get-CimInstance -ErrorAction SilentlyContinue)
 $script:WmiAvailable = [bool] (Get-Command Get-WmiObject -ErrorAction SilentlyContinue)
 $script:WmicAvailable = [bool] (Get-Command wmic.exe -ErrorAction SilentlyContinue)
+$script:CollectionDeadline = (Get-Date).AddSeconds(8)
 
 function Write-Metric([string] $Name, [object] $Value) {
   if ($null -eq $Value) { $Value = "" }
@@ -53,11 +70,13 @@ function Format-Bytes([double] $Bytes) {
 }
 
 function Get-ManagementInstances([string] $ClassName, [string] $Filter = "") {
+  if ((Get-Date) -ge $script:CollectionDeadline) { return @() }
   if ($script:CimAvailable) {
     try {
       $parameters = @{ ClassName = $ClassName; ErrorAction = "Stop"; OperationTimeoutSec = 2 }
       if ($Filter) { $parameters.Filter = $Filter }
-      return @(Get-CimInstance @parameters)
+      $rows = @(Get-CimInstance @parameters)
+      if ($rows.Count -gt 0) { return $rows }
     } catch {
       $script:CimAvailable = $false
     }
@@ -73,7 +92,8 @@ function Get-ManagementInstances([string] $ClassName, [string] $Filter = "") {
       if (-not (Wait-Job -Job $job -Timeout 2 -ErrorAction Stop)) {
         throw "WMI query timed out: $ClassName"
       }
-      return @(Receive-Job -Job $job -ErrorAction Stop)
+      $rows = @(Receive-Job -Job $job -ErrorAction Stop)
+      if ($rows.Count -gt 0) { return $rows }
     } catch {
       $script:WmiAvailable = $false
     } finally {
@@ -87,7 +107,7 @@ function Get-ManagementInstances([string] $ClassName, [string] $Filter = "") {
 }
 
 function Invoke-WmicCsv([string[]] $Arguments) {
-  if (-not $script:WmicAvailable) { return @() }
+  if (-not $script:WmicAvailable -or (Get-Date) -ge $script:CollectionDeadline) { return @() }
   $process = $null
   try {
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -182,20 +202,13 @@ $swapPercent = if ($swapTotalBytes -gt 0) { [int] (($swapUsedBytes * 100) / $swa
 
 $addresses = @()
 try {
-  $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {
-    $_.IPAddress -and $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*"
-  } | Select-Object -ExpandProperty IPAddress)
+  $addresses = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | ForEach-Object {
+    $_.GetIPProperties().UnicastAddresses | ForEach-Object { $_.Address.IPAddressToString }
+  } | Where-Object { $_ -match "^[0-9]+\\." -and $_ -notlike "127.*" -and $_ -notlike "169.254.*" })
 } catch {}
 if (-not $addresses -or $addresses.Count -eq 0) {
   try {
     $addresses = @(Get-ManagementInstances "Win32_NetworkAdapterConfiguration" | Where-Object { $_.IPEnabled } | ForEach-Object { $_.IPAddress } | Where-Object { $_ -and $_ -match "^[0-9]+\\." -and $_ -notlike "127.*" })
-  } catch {}
-}
-if (-not $addresses -or $addresses.Count -eq 0) {
-  try {
-    $addresses = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | ForEach-Object {
-      $_.GetIPProperties().UnicastAddresses | ForEach-Object { $_.Address.IPAddressToString }
-    } | Where-Object { $_ -match "^[0-9]+\\." -and $_ -notlike "127.*" -and $_ -notlike "169.254.*" })
   } catch {}
 }
 if (-not $addresses -or $addresses.Count -eq 0) {
@@ -209,21 +222,14 @@ $ip = $addresses | Select-Object -First 1
 
 $netBefore = @{}
 try {
-  Get-NetAdapterStatistics -ErrorAction Stop | ForEach-Object {
-    $netBefore[$_.Name] = [pscustomobject]@{ Rx = [double] $_.ReceivedBytes; Tx = [double] $_.SentBytes }
+  [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
+    $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
+    $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback
+  } | ForEach-Object {
+    $stats = $_.GetIPv4Statistics()
+    $netBefore[$_.Name] = [pscustomobject]@{ Rx = [double] $stats.BytesReceived; Tx = [double] $stats.BytesSent }
   }
 } catch {}
-if ($netBefore.Count -eq 0) {
-  try {
-    [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
-      $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
-      $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback
-    } | ForEach-Object {
-      $stats = $_.GetIPv4Statistics()
-      $netBefore[$_.Name] = [pscustomobject]@{ Rx = [double] $stats.BytesReceived; Tx = [double] $stats.BytesSent }
-    }
-  } catch {}
-}
 $sampleStartedAt = Get-Date
 $processCpuBefore = $null
 if (-not $hasReportedCpuLoad) {
@@ -234,21 +240,14 @@ if (-not $hasReportedCpuLoad) {
 Start-Sleep -Milliseconds 250
 $netAfter = @()
 try {
-  $netAfter = @(Get-NetAdapterStatistics -ErrorAction Stop | ForEach-Object {
-    [pscustomobject]@{ Name = $_.Name; ReceivedBytes = [double] $_.ReceivedBytes; SentBytes = [double] $_.SentBytes }
+  $netAfter = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
+    $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
+    $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback
+  } | ForEach-Object {
+    $stats = $_.GetIPv4Statistics()
+    [pscustomobject]@{ Name = $_.Name; ReceivedBytes = [double] $stats.BytesReceived; SentBytes = [double] $stats.BytesSent }
   })
 } catch {}
-if (-not $netAfter -or $netAfter.Count -eq 0) {
-  try {
-    $netAfter = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
-      $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
-      $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback
-    } | ForEach-Object {
-      $stats = $_.GetIPv4Statistics()
-      [pscustomobject]@{ Name = $_.Name; ReceivedBytes = [double] $stats.BytesReceived; SentBytes = [double] $stats.BytesSent }
-    })
-  } catch {}
-}
 $sampleMs = [math]::Max(1, [int] ((Get-Date) - $sampleStartedAt).TotalMilliseconds)
 if (-not $hasReportedCpuLoad -and $null -ne $processCpuBefore) {
   try {
@@ -314,6 +313,7 @@ foreach ($processor in $processors) {
 
 $gpuRows = @()
 try {
+  if ((Get-Date) -ge $script:CollectionDeadline) { throw "Collection budget exhausted" }
   Get-ManagementInstances "Win32_VideoController" | ForEach-Object {
     $memory = if ($_.AdapterRAM) { Format-Bytes ([double] $_.AdapterRAM) } else { "-" }
     $gpuRows += ("{0}|{1}|{2}|{3}" -f ([string] $_.Name).Trim(), ([string] $_.AdapterCompatibility).Trim(), ([string] $_.DriverVersion).Trim(), $memory)
@@ -322,6 +322,7 @@ try {
 
 $processRows = @()
 try {
+  if ((Get-Date) -ge $script:CollectionDeadline) { throw "Collection budget exhausted" }
   Get-Process | Sort-Object -Property WorkingSet64 -Descending | Select-Object -First 80 | ForEach-Object {
     $elapsed = 0
     if ($_.StartTime) {

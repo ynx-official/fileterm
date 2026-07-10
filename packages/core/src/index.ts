@@ -569,11 +569,14 @@ export interface FileTermDesktopApi {
   isCurrentWindowMaximized(): Promise<boolean>
   toggleMaximizeCurrentWindow(): Promise<void>
   closeCurrentWindow(): Promise<void>
+  confirmCloseCurrentFileEditor(): Promise<void>
+  cancelCloseCurrentFileEditor(): Promise<void>
   showWindowMenu(menuType: 'app' | 'file' | 'view' | 'window', x: number, y: number): Promise<void>
   onWindowMaximizedChange(listener: (isMaximized: boolean) => void): () => void
   onUiPreferencesChanged(
     listener: (preferences: { theme: 'default-dark' | 'default-light'; locale: 'zhCN' | 'enUS' }) => void
   ): () => void
+  onFileEditorCloseRequest(listener: () => void): () => void
   requestQuitApp(): Promise<void>
   getSnapshot(): Promise<WorkspaceSnapshot>
   getConnectionLibrary(): Promise<ConnectionLibrarySnapshot>

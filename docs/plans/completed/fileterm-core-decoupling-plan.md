@@ -88,9 +88,9 @@
 - [transfer-service.ts](file:///Users/stoffel/CodeFile/fileterm/apps/desktop/src/main/services/transfers/transfer-service.ts) — 新建文件传输专职服务
 - [useWorkspaceTabs.ts](file:///Users/stoffel/CodeFile/fileterm/apps/desktop/src/renderer/hooks/useWorkspaceTabs.ts) — 标签生命周期自定义 Hook
 - [useWorkspaceModals.ts](file:///Users/stoffel/CodeFile/fileterm/apps/desktop/src/renderer/hooks/useWorkspaceModals.ts) — 模态管理器自定义 Hook
-- [useFileOperations.ts](file:///Users/stoffel/CodeFile/fileterm/apps/renderer/hooks/useFileOperations.ts) — 文件操作与剪贴板 Hook
-- [useSshInteractions.ts](file:///Users/stoffel/CodeFile/fileterm/apps/renderer/hooks/useSshInteractions.ts) — SSH 认证交互 Hook
-- [useFileEditor.ts](file:///Users/stoffel/CodeFile/fileterm/apps/renderer/hooks/useFileEditor.ts) — 文件在线编辑生命周期 Hook
+- [useFileOperations.ts](file:///Users/stoffel/CodeFile/fileterm/apps/desktop/src/renderer/hooks/useFileOperations.ts) — 文件操作与剪贴板 Hook
+- [useSshInteractions.ts](file:///Users/stoffel/CodeFile/fileterm/apps/desktop/src/renderer/hooks/useSshInteractions.ts) — SSH 认证交互 Hook
+- [useFileEditor.ts](file:///Users/stoffel/CodeFile/fileterm/apps/desktop/src/renderer/hooks/useFileEditor.ts) — 文件在线编辑生命周期 Hook
 - [useWorkspaceIpcSync.ts](file:///Users/stoffel/CodeFile/fileterm/apps/desktop/src/renderer/hooks/useWorkspaceIpcSync.ts) — 主进程数据单向同步 Hook
 - [ModalPortalManager.tsx](file:///Users/stoffel/CodeFile/fileterm/apps/desktop/src/renderer/features/layout/ModalPortalManager.tsx) — 全局弹窗挂载管理器组件
 

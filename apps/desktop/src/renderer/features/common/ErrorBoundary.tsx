@@ -37,11 +37,12 @@ export class ErrorBoundary extends Component<Props, State> {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          height: '100vh',
+          minHeight: '100vh',
+          boxSizing: 'border-box',
           padding: 24,
-          background: 'var(--color-background-tertiary, #f5f5f5)',
-          color: 'var(--color-text-primary, #1a1a1a)',
-          fontFamily: 'var(--font-sans, system-ui, sans-serif)',
+          background: 'var(--bg-main, #f5f5f5)',
+          color: 'var(--text-main, #1a1a1a)',
+          fontFamily: "'SF Pro Text', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif",
           overflow: 'auto'
         }}
       >
@@ -49,9 +50,9 @@ export class ErrorBoundary extends Component<Props, State> {
           style={{
             maxWidth: 480,
             padding: 32,
-            background: 'var(--color-background-primary, #fff)',
+            background: 'var(--bg-card, #fff)',
             borderRadius: 12,
-            border: '1px solid var(--color-border-tertiary, rgba(0, 0, 0, 0.1))'
+            border: '1px solid var(--border, rgba(0, 0, 0, 0.1))'
           }}
         >
           <h1 style={{ fontSize: 18, fontWeight: 600, margin: '0 0 12px' }}>
@@ -59,7 +60,7 @@ export class ErrorBoundary extends Component<Props, State> {
           </h1>
           <p style={{ fontSize: 14, lineHeight: 1.6, margin: '0 0 16px', opacity: 0.8 }}>
             {isZhCN
-              ? '发生了一个未处理的异常,请重新加载应用继续使用。'
+              ? '发生了一个未处理的异常，请重新加载应用继续使用。'
               : 'An unhandled exception occurred. Please reload the app to continue.'}
           </p>
           <pre
@@ -67,7 +68,7 @@ export class ErrorBoundary extends Component<Props, State> {
               fontSize: 12,
               padding: 12,
               margin: '0 0 16px',
-              background: 'var(--color-background-secondary, #f0f0f0)',
+              background: 'var(--bg-elevated, #f0f0f0)',
               borderRadius: 8,
               overflow: 'auto',
               fontFamily: 'var(--font-mono, monospace)',
@@ -86,7 +87,7 @@ export class ErrorBoundary extends Component<Props, State> {
               fontWeight: 500,
               border: 'none',
               borderRadius: 8,
-              background: 'var(--color-accent, #534AB7)',
+              background: 'var(--accent-primary, #534ab7)',
               color: '#fff',
               cursor: 'pointer'
             }}
