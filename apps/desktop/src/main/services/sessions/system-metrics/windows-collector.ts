@@ -1,18 +1,16 @@
+import { gzipSync } from 'node:zlib'
 import type { SystemMetricsExecutor } from './types.js'
 
 const WINDOWS_METRICS_COMPLETE_MARKER = '__FILETERM_METRICS_COMPLETE__'
 
 export async function runPowerShellMetricsScript(executor: SystemMetricsExecutor) {
   const script = buildWindowsMetricsScript()
-  const commands = [
-    'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -',
-    'pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -'
-  ]
+  const commands = [buildPowerShellMetricsCommand('powershell', script), buildPowerShellMetricsCommand('pwsh', script)]
   let lastError: unknown
 
   for (const command of commands) {
     try {
-      const raw = await executor.exec(command, { timeoutMs: 12000 }, script)
+      const raw = await executor.exec(command, { timeoutMs: 12000 })
       if (!raw.includes(WINDOWS_METRICS_COMPLETE_MARKER)) {
         throw new Error(`Windows metrics script did not emit ${WINDOWS_METRICS_COMPLETE_MARKER}`)
       }
@@ -28,6 +26,21 @@ export async function runPowerShellMetricsScript(executor: SystemMetricsExecutor
   throw lastError instanceof Error ? lastError : new Error(String(lastError))
 }
 
+export function buildPowerShellMetricsCommand(shell: 'powershell' | 'pwsh', script: string) {
+  const compressedScript = gzipSync(Buffer.from(script, 'utf8')).toString('base64')
+  const loader =
+    `$b=[Convert]::FromBase64String('${compressedScript}');` +
+    '$m=New-Object IO.MemoryStream(,$b);' +
+    '$g=New-Object IO.Compression.GzipStream($m,[IO.Compression.CompressionMode]::Decompress);' +
+    '$r=New-Object IO.StreamReader($g,[Text.Encoding]::UTF8);' +
+    '& ([scriptblock]::Create($r.ReadToEnd()))'
+  const command = `${shell} -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "${loader}"`
+  if (command.length >= 8000) {
+    throw new Error(`Windows metrics command exceeds the safe cmd.exe command-line budget (${command.length})`)
+  }
+  return command
+}
+
 function isCommandUnavailable(error: unknown) {
   return (
     error instanceof Error &&
@@ -41,7 +54,7 @@ function isTimeoutError(error: unknown) {
   return error instanceof Error && (error.name === 'TimeoutError' || /timed?\s*out|超时/i.test(error.message))
 }
 
-function buildWindowsMetricsScript() {
+export function buildWindowsMetricsScript() {
   return `
 & {
 $ErrorActionPreference = "SilentlyContinue"
@@ -188,7 +201,7 @@ if ($memoryTotalBytes -le 0) {
     $memoryAvailableBytes = [double] $computerInfo.AvailablePhysicalMemory
   } catch {}
 }
-$memoryUsedBytes = [math]::Max(0, $memoryTotalBytes - $memoryAvailableBytes)
+$memoryUsedBytes = [math]::Max([double] 0, $memoryTotalBytes - $memoryAvailableBytes)
 $memoryPercent = if ($memoryTotalBytes -gt 0) { [int] (($memoryUsedBytes * 100) / $memoryTotalBytes) } else { 0 }
 
 $pageFiles = @(Get-ManagementInstances "Win32_PageFileUsage")
@@ -197,7 +210,7 @@ if (-not $pageFiles -or $pageFiles.Count -eq 0) {
 }
 $swapTotalBytes = [double] (($pageFiles | Measure-Object -Property AllocatedBaseSize -Sum).Sum) * 1MB
 $swapUsedBytes = [double] (($pageFiles | Measure-Object -Property CurrentUsage -Sum).Sum) * 1MB
-$swapAvailableBytes = [math]::Max(0, $swapTotalBytes - $swapUsedBytes)
+$swapAvailableBytes = [math]::Max([double] 0, $swapTotalBytes - $swapUsedBytes)
 $swapPercent = if ($swapTotalBytes -gt 0) { [int] (($swapUsedBytes * 100) / $swapTotalBytes) } else { 0 }
 
 $addresses = @()
@@ -254,7 +267,7 @@ if (-not $hasReportedCpuLoad -and $null -ne $processCpuBefore) {
     $processCpuAfter = [double] ((Get-Process -ErrorAction Stop | Measure-Object -Property CPU -Sum).Sum)
     $processorCount = [math]::Max(1, [Environment]::ProcessorCount)
     $cpuPercent = [int] ([math]::Round(
-      ([math]::Max(0, $processCpuAfter - $processCpuBefore) * 100000) / ($sampleMs * $processorCount)
+      ([math]::Max([double] 0, $processCpuAfter - $processCpuBefore) * 100000) / ($sampleMs * $processorCount)
     ))
   } catch {}
 }
@@ -300,7 +313,7 @@ foreach ($disk in $disks) {
   $name = [string] $disk.DeviceID
   $size = [double] $disk.Size
   $free = [double] $disk.FreeSpace
-  $used = [math]::Max(0, $size - $free)
+  $used = [math]::Max([double] 0, $size - $free)
   $percent = if ($size -gt 0) { [int] (($used * 100) / $size) } else { 0 }
   $diskRows += ("{0}|{1}/{2}" -f $name, (Format-Bytes $free), (Format-Bytes $size))
   $fileSystemRows += ("{0}|{1}|{2}|{3}%|{4}|{5}" -f $name, (Format-Bytes $size), (Format-Bytes $used), $percent, (Format-Bytes $free), $name)

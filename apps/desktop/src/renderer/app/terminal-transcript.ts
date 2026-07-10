@@ -1,3 +1,21 @@
+export const CLINK_AUTOSUGGEST_HELP_URL = 'https://chrisant996.github.io/clink/clink.html#gettingstarted_autosuggest'
+
+const CLINK_AUTOSUGGEST_PROMPT_PATTERN = new RegExp(
+  '\\u001b\\[[0-9;]*m\\u001b\\[7m\\u001b\\[\\d+CF2\\u001b\\[27m[-=]' +
+    '\\u001b\\]8;[^\\u0007\\u001b]*;' +
+    escapeRegExp(CLINK_AUTOSUGGEST_HELP_URL) +
+    '(?:\\u0007|\\u001b\\\\)List Suggestions(?:\\u001b\\[\\d+;\\d+H|\\u001b\\[\\d+G)',
+  'g'
+)
+
+export function isClinkAutosuggestHelpUrl(uri: string) {
+  return uri.startsWith(CLINK_AUTOSUGGEST_HELP_URL)
+}
+
+export function stripClinkAutosuggestPrompt(value: string) {
+  return value.replace(CLINK_AUTOSUGGEST_PROMPT_PATTERN, '')
+}
+
 export function trimHydratedTerminalChunk(currentTranscript: string, chunk: string): string {
   if (!currentTranscript || !chunk) {
     return chunk
@@ -38,4 +56,8 @@ export function trimHydratedTerminalChunk(currentTranscript: string, chunk: stri
   // Full chunks are handled above; partial overlap must contain enough context
   // (normally a complete prompt) before it is safe to trim.
   return overlapLength >= 8 ? chunk.slice(overlapLength) : chunk
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }

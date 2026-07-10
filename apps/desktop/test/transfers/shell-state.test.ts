@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  BUSYBOX_SHELL_CWD_SETUP,
   findSetupEchoEnd,
   resolveShellFileAccess,
   SHELL_CWD_SETUP,
+  shellCwdSetupForPlatform,
   ShellCwdTracker,
   supportsPosixShellSetup
 } from '../../src/main/services/sessions/shell-cwd-integration.ts'
@@ -34,6 +36,11 @@ test('shell setup is injected only for confirmed POSIX platforms', () => {
   assert.match(SHELL_CWD_SETUP, /\$\{FISH_VERSION-\}/)
   assert.match(SHELL_CWD_SETUP, /\$\{BASH_VERSION-\}/)
   assert.doesNotMatch(SHELL_CWD_SETUP, /"\$FISH_VERSION"/)
+  assert.equal(shellCwdSetupForPlatform('linux'), SHELL_CWD_SETUP)
+  assert.equal(shellCwdSetupForPlatform('busybox'), BUSYBOX_SHELL_CWD_SETUP)
+  assert.equal(shellCwdSetupForPlatform('windows'), undefined)
+  assert.ok(BUSYBOX_SHELL_CWD_SETUP.length < 256)
+  assert.match(BUSYBOX_SHELL_CWD_SETUP, /PS1=/)
 })
 
 test('shell setup detection consumes repeated hook payloads before the replacement prompt', () => {

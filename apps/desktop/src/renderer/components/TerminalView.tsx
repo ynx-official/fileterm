@@ -6,7 +6,11 @@ import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 import { copyText } from '../app/app-utils'
-import { trimHydratedTerminalChunk } from '../app/terminal-transcript'
+import {
+  isClinkAutosuggestHelpUrl,
+  stripClinkAutosuggestPrompt,
+  trimHydratedTerminalChunk
+} from '../app/terminal-transcript'
 import { t } from '../i18n'
 import { ContextMenu } from '../features/common/ContextMenu'
 import { CloseButton } from '../features/common/CloseButton'
@@ -27,7 +31,7 @@ function localizeTerminalText(value: string) {
 
 function toDisplayTerminalText(value: string) {
   // Localize fixed FileTerm notices before preserving terminal control semantics later.
-  return localizeTerminalText(value)
+  return localizeTerminalText(stripClinkAutosuggestPrompt(value))
 }
 
 function splitOscPayload(payload: string) {
@@ -516,13 +520,22 @@ export const TerminalView = memo(function TerminalView({
       allowTransparency: true,
       reflowCursorLine: false,
       scrollback: 6000,
+      linkHandler: {
+        activate: (_event, uri) => {
+          if (!isClinkAutosuggestHelpUrl(uri)) {
+            void window.fileterm?.openExternalUrl(uri)
+          }
+        }
+      },
       theme: buildTerminalTheme()
     })
     const fitAddon = new FitAddon()
     const searchAddon = new SearchAddon({ highlightLimit: 2000 })
     const unicode11Addon = new Unicode11Addon()
     const webLinksAddon = new WebLinksAddon((_event, uri) => {
-      void window.fileterm?.openExternalUrl(uri)
+      if (!isClinkAutosuggestHelpUrl(uri)) {
+        void window.fileterm?.openExternalUrl(uri)
+      }
     })
     terminal.loadAddon(fitAddon)
     terminal.loadAddon(searchAddon)

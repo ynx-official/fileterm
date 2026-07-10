@@ -33,6 +33,15 @@ run_bounded() {
   fi
   return 124
 }
+has_bounded_runner() {
+  if command -v timeout >/dev/null 2>&1 && timeout 1 true >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v busybox >/dev/null 2>&1 && busybox timeout 1 true >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
 read_cpu_stat() {
   awk '/^cpu / {print $2, $3, $4, $5, $6, $7, $8, $9; exit}' /proc/stat 2>/dev/null
 }
@@ -322,11 +331,24 @@ rx_rate=$(awk -v before="$rx1" -v after="$rx2" -v ms="$sample_ms" 'BEGIN { if (m
 tx_rate=$(awk -v before="$tx1" -v after="$tx2" -v ms="$sample_ms" 'BEGIN { if (ms > 0) printf "%d", (after-before) * 1000 / ms; else print 0 }')
 df_flags="-kP"
 df -kPl / >/dev/null 2>&1 && df_flags="-kPl"
-df_output=$(run_bounded 2 df "$df_flags" 2>/dev/null)
+if has_bounded_runner; then
+  df_output=$(run_bounded 2 df "$df_flags" 2>/dev/null)
+else
+  local_mounts=$(awk '
+    $3 ~ /^(overlay|squashfs|tmpfs|ramfs|ext[234]|xfs|btrfs|f2fs|vfat|ubifs|jffs2|zfs)$/ && !seen[$2]++ { print $2 }
+  ' /proc/mounts 2>/dev/null | head -n 20)
+  [ -z "$local_mounts" ] && local_mounts="/"
+  df_output=$(df "$df_flags" $local_mounts 2>/dev/null)
+fi
 disk=$(printf "%s\\n" "$df_output" | awk 'NR>1 {printf "%s|%sK/%sK\\n", $6, $4, $2}' | head -n 12)
 filesystems=$(printf "%s\\n" "$df_output" | awk 'NR>1 {printf "%s|%sK|%sK|%s|%sK|%s\\n", $1, $2, $3, $5, $4, $6}' | head -n 20)
-procs=$(run_bounded 1 ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {printf "%.1fM|%s|%s|%s\\n", $1/1024, $2, $3, $4}')
-[ -z "$procs" ] && procs=$(run_bounded 1 ps 2>/dev/null | awk 'NR>1 && NF >= 4 {printf "0.0M|0|0|%s\\n", $NF}')
+if has_bounded_runner; then
+  procs=$(run_bounded 1 ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {printf "%.1fM|%s|%s|%s\\n", $1/1024, $2, $3, $4}')
+  [ -z "$procs" ] && procs=$(run_bounded 1 ps 2>/dev/null | awk 'NR>1 && NF >= 5 {proc_name=$5; sub(/^.*\\//, "", proc_name); printf "%.1fM|0|0|%s\\n", $3/1024, proc_name}')
+else
+  procs=$(ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {printf "%.1fM|%s|%s|%s\\n", $1/1024, $2, $3, $4}')
+  [ -z "$procs" ] && procs=$(ps 2>/dev/null | awk 'NR>1 && NF >= 5 {proc_name=$5; sub(/^.*\\//, "", proc_name); printf "%.1fM|0|0|%s\\n", $3/1024, proc_name}')
+fi
 echo "__PLATFORM__${platform}"
 echo "__OS__$os_name"
 echo "__KERNEL_NAME__$kernel_name"

@@ -64,8 +64,24 @@ export const SETUP_NEEDLE = 'test -z "${FISH_VERSION-}"'
 export const SHELL_CWD_SETUP =
   'test -z "${FISH_VERSION-}" && eval \'__tdcwd() { printf "\\033]7;file://%s\\007\\033]1337;RemoteUser=%s\\007" "$(pwd -P 2>/dev/null)" "$(id -un 2>/dev/null)"; }; if [ -n "${ZSH_VERSION-}" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook -D precmd __tdcwd 2>/dev/null; add-zsh-hook precmd __tdcwd 2>/dev/null; elif [ -n "${BASH_VERSION-}" ]; then case "${PROMPT_COMMAND-}" in *"__tdcwd"*) ;; *) PROMPT_COMMAND="__tdcwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;; esac; else case "${PS1-}" in *"__tdcwd"*) ;; *) PS1="\\$(__tdcwd)${PS1-}" ;; esac; fi; __tdcwd\''
 
+// BusyBox ash commonly uses a small interactive line-editing buffer. Keep its
+// setup well below 256 bytes so the command cannot be truncated into an open
+// quote/case statement and leave the terminal at a continuation prompt.
+export const BUSYBOX_SHELL_CWD_SETUP =
+  '__tdcwd(){ printf \'\\033]7;file://%s\\007\\033]1337;RemoteUser=%s\\007\' "$(pwd -P 2>/dev/null)" "$(id -un 2>/dev/null)";};PS1=\'$(__tdcwd)\'"${PS1-}";__tdcwd'
+
+export function shellCwdSetupForPlatform(platform?: RemoteSystemPlatform): string | undefined {
+  if (platform === 'busybox') {
+    return BUSYBOX_SHELL_CWD_SETUP
+  }
+  if (platform === 'linux') {
+    return SHELL_CWD_SETUP
+  }
+  return undefined
+}
+
 export function supportsPosixShellSetup(platform?: RemoteSystemPlatform): boolean {
-  return platform === 'linux' || platform === 'busybox'
+  return shellCwdSetupForPlatform(platform) !== undefined
 }
 
 export function findSetupEchoEnd(

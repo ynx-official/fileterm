@@ -25,7 +25,12 @@ import { parentRemotePath, toRemoteFileItem } from './session-file-utils.js'
 import { collectSshSystemMetrics, type RemoteSystemPlatform } from './system-metrics/index.js'
 import { probeRemoteSystemPlatform } from './system-metrics/platform-probe.js'
 import type { SystemMetricsCommandOptions } from './system-metrics/types.js'
-import { findSetupEchoEnd, SHELL_CWD_SETUP, ShellCwdTracker, supportsPosixShellSetup } from './shell-cwd-integration.js'
+import {
+  findSetupEchoEnd,
+  shellCwdSetupForPlatform,
+  ShellCwdTracker,
+  supportsPosixShellSetup
+} from './shell-cwd-integration.js'
 import { createSshDebugLogger, isSshDebugEnabled, singleLine } from './ssh-debug-logger.js'
 import { decodeBuffer, encodeText } from '../text-encoding.js'
 import { appLog, appWarn } from '../app-logger.js'
@@ -462,14 +467,15 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   private injectShellSetup(stream: { write(data: string): void }) {
-    if (!supportsPosixShellSetup(this.shellPlatform) || !this.connected || this.shellStream !== stream) {
+    const setup = shellCwdSetupForPlatform(this.shellPlatform)
+    if (!setup || !this.connected || this.shellStream !== stream) {
       return
     }
 
     this.clearShellSetupSuppression()
     this.suppressEcho = true
     try {
-      stream.write(` ${SHELL_CWD_SETUP}\r`)
+      stream.write(` ${setup}\r`)
     } catch (error) {
       this.clearShellSetupSuppression()
       throw error

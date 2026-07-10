@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { runPowerShellMetricsScript } from '../../src/main/services/sessions/system-metrics/windows-collector.ts'
+import {
+  buildWindowsMetricsScript,
+  runPowerShellMetricsScript
+} from '../../src/main/services/sessions/system-metrics/windows-collector.ts'
 
 const WINDOWS_METRICS_OUTPUT = [
   '__PLATFORM__windows',
@@ -9,28 +12,32 @@ const WINDOWS_METRICS_OUTPUT = [
   '__FILETERM_METRICS_COMPLETE__'
 ].join('\r\n')
 
-test('runs the bounded Windows fallback collector through PowerShell stdin', async () => {
-  let stdinPayload = ''
+test('runs the bounded Windows fallback collector as a compressed PowerShell command', async () => {
   const raw = await runPowerShellMetricsScript({
     async exec(command, options, stdin) {
       assert.match(command, /^powershell /)
+      assert.match(command, /FromBase64String/)
+      assert.match(command, /GzipStream/)
+      assert.ok(command.length < 8000)
       assert.deepEqual(options, { timeoutMs: 12000 })
-      stdinPayload = stdin ?? ''
+      assert.equal(stdin, undefined)
       return WINDOWS_METRICS_OUTPUT
     }
   })
 
   assert.equal(raw, WINDOWS_METRICS_OUTPUT)
-  assert.match(stdinPayload, /^\s*& \{/)
-  assert.match(stdinPayload, /Get-CimInstance/)
-  assert.match(stdinPayload, /Get-WmiObject/)
-  assert.match(stdinPayload, /CollectionDeadline = \(Get-Date\)\.AddSeconds\(8\)/)
-  assert.match(stdinPayload, /Wait-Job -Job \$job -Timeout 2/)
-  assert.match(stdinPayload, /wmic\.exe/)
-  assert.match(stdinPayload, /WaitForExit\(2000\)/)
-  assert.match(stdinPayload, /ipconfig\.exe/)
-  assert.match(stdinPayload, /tasklist\.exe/)
-  assert.match(stdinPayload, /__FILETERM_METRICS_COMPLETE__"\s*\n}/)
+  const script = buildWindowsMetricsScript()
+  assert.match(script, /^\s*& \{/)
+  assert.match(script, /Get-CimInstance/)
+  assert.match(script, /Get-WmiObject/)
+  assert.match(script, /CollectionDeadline = \(Get-Date\)\.AddSeconds\(8\)/)
+  assert.match(script, /Wait-Job -Job \$job -Timeout 2/)
+  assert.match(script, /wmic\.exe/)
+  assert.match(script, /WaitForExit\(2000\)/)
+  assert.match(script, /ipconfig\.exe/)
+  assert.match(script, /tasklist\.exe/)
+  assert.match(script, /memoryUsedBytes = \[math\]::Max\(\[double\] 0/)
+  assert.match(script, /__FILETERM_METRICS_COMPLETE__"\s*\n}/)
 })
 
 test('falls back to pwsh only when Windows PowerShell is unavailable', async () => {
