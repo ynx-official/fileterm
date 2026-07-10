@@ -51,3 +51,4 @@ FileTerm 当前已经有 SSH 会话的系统信息页，但实现明显偏向 `L
 - 2026-06-30：renderer 侧新增侧栏收起态资源摘要，CPU、内存、交换空间以细竖向监控柱展示；该变化只属于展示层，不改变采集链路。
 - 2026-07-09：整理 active plan，剥离已完成部分，聚焦于主进程平台采集逻辑的拆分工作。
 - 2026-07-09：完成主进程系统监控采集拆分；`session-file-utils.ts` 回归文件工具职责，SSH metrics 通过平台 probe 路由到 Linux、BusyBox/OpenWrt 或 Windows PowerShell collector。
+- 2026-07-10：Windows 兼容性加固——parser.ts 入口统一 `replace(/\r\n?/g, '\n')` 归一化 CRLF 污染；windows-collector 新增多级 fallback（CIM 2s → WMI Job 2s → WMIC 进程 2s → .NET API → cmd 工具）与完整性标记 `__FILETERM_METRICS_COMPLETE__` 防半截输出；ssh-session-controller 新增 `supportsPosixShellSetup()` fail-closed 双重门控，Windows/unknown 平台不再注入 POSIX CWD 脚本。新增 platform-probe / windows-collector / parser CRLF 回归测试。

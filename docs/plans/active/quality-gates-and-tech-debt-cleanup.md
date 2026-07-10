@@ -60,9 +60,9 @@
 
 **验收标准**：
 
-- [ ] `npm run lint` 在 main 上零 error（warning 可暂留，记录到本 plan 进度）。
-- [ ] `npm run format:check` 通过。
-- [ ] CI 中加入 lint step（见 P0-3）。
+- [x] `npm run lint` 在 main 上零 error（warning 可暂留，记录到本 plan 进度）。
+- [x] `npm run format:check` 通过。
+- [x] CI 中加入 lint step（见 P0-3）。
 
 **注意事项**：首次启用 eslint 可能暴露大量 warning，建议先以 `error` 只保留"会引发 bug"的规则（如 `no-unused-vars`、`@typescript-eslint/no-explicit-any`），风格类规则降为 `warn`，分批收敛。不要一上来全 error 导致无法提交。
 
@@ -105,9 +105,9 @@
 
 **验收标准**：
 
-- [ ] CI 在每次 push/PR 上执行 `test:transfers`。
-- [ ] 测试失败时 CI 标红阻断。
-- [ ] `test:transfers:protocol` 至少在 CI 中有占位 step（即使暂标注 `continue-on-error` 或单独 job）。
+- [x] CI 在每次 push/PR 上执行 `test:transfers`。
+- [x] 测试失败时 CI 标红阻断。
+- [x] `test:transfers:protocol` 至少在 CI 中有占位 step（即使暂标注 `continue-on-error` 或单独 job）。
 
 ---
 
@@ -145,10 +145,10 @@
 
 **验收标准**：
 
-- [ ] `git commit` 时自动对暂存文件执行 prettier + eslint --fix。
-- [ ] `git push` 时自动执行 typecheck，失败则阻断。
-- [ ] 现有 `prepare-commit-msg` 的 co-author 注入逻辑迁移到 `.husky/` 后仍正常工作。
-- [ ] `.githooks/` 已清理，不再有两套 hook 体系。
+- [x] `git commit` 时自动对暂存文件执行 prettier + eslint --fix。
+- [x] `git push` 时自动执行 typecheck，失败则阻断。
+- [x] 现有 `prepare-commit-msg` 的 co-author 注入逻辑迁移到 `.husky/` 后仍正常工作。
+- [x] `.githooks/` 已清理，不再有两套 hook 体系。
 
 **注意事项**：pre-push 跑全量 typecheck 可能耗时，若太慢可降级为只 typecheck 受影响 workspace。但首版建议先跑全量，确认基线。
 
@@ -189,9 +189,9 @@
 
 **验收标准**：
 
-- [ ] `grep -rn "as any" apps/desktop/src/main/services/sessions/ssh-session-controller.ts` 零命中。
-- [ ] 三个字段在类声明区有 `private` 类型化声明。
-- [ ] typecheck 通过。
+- [x] `grep -rn "as any" apps/desktop/src/main/services/sessions/ssh-session-controller.ts` 零命中。
+- [x] 三个字段在类声明区有 `private` 类型化声明。
+- [x] typecheck 通过。
 
 **进阶（可选，独立工作项）**：把 CWD 跟踪和 sudo 检测逻辑抽成独立 collaborator（类似已有的 `shell-cwd-integration.ts` 的 `ShellCwdTracker`），可让 controller 瘦身约 400 行。此项非紧急，可单独排期。
 
@@ -216,8 +216,8 @@
 
 **验收标准**：
 
-- [ ] `grep -rn ": any" apps/desktop/src/renderer` 在 props/参数位置零命中（局部 `any` 如事件对象可酌情保留并加注释）。
-- [ ] typecheck 通过。
+- [x] `grep -rn ": any" apps/desktop/src/renderer` 在 props/参数位置零命中（局部 `any` 如事件对象可酌情保留并加注释）。
+- [x] typecheck 通过。
 
 ---
 
@@ -249,9 +249,9 @@
 
 **验收标准**：
 
-- [ ] 第一批两个测试文件创建并通过。
-- [ ] `test:transfers` 脚本扩展为 `test`（聚合 transfers + profiles + workspace），或在 CI 分别调用。
-- [ ] controller 层测试至少有占位 TODO。
+- [x] 第一批两个测试文件创建并通过。
+- [x] `test:transfers` 脚本扩展为 `test`（聚合 transfers + profiles + workspace），或在 CI 分别调用。
+- [x] controller 层测试至少有占位 TODO。
 
 ---
 
@@ -300,3 +300,4 @@
 ## 进度记录
 
 - 2026-07-09：基于质量评审建立本计划，收录 P0 三项质量门禁、P1 三项代码质量专项、P2 三项可接受债务。所有问题证据已核实（as any 7 处行号经 grep 确认，CI step 与测试脚本经读源确认）。
+- 2026-07-10：P0 质量门禁三件套全部落地——ESLint+Prettier 配置完成（`--max-warnings=0` 全绿）、CI 接入 `npm test` + `test:transfers:protocol`、husky pre-commit(lint-staged)/pre-push(typecheck) 门禁已建。P1 技术债清理全部完成——ssh-session-controller 7 处 `as any` 零命中、renderer 6 处 `: any` 零命中、profiles 自愈 + 终端 16ms 合并 + platform-probe + windows-collector 单测已补齐（31/31 通过）。四项门禁全绿验证通过。
