@@ -577,7 +577,7 @@
 
 .process-row {
   display: grid;
-  grid-template-columns: 70px 44px minmax(0, 1fr);
+  grid-template-columns: 64px 58px minmax(0, 1fr);
   align-items: center;
   min-height: 24px;
   border-bottom: none;
@@ -603,7 +603,7 @@
 
 .disk-head {
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
   height: 24px;
   border-bottom: 1px solid var(--border-light);
   font-size: 13px;
@@ -611,7 +611,7 @@
 
 .disk-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
   height: 24px;
   border-bottom: none;
   font-size: 13px;
@@ -630,6 +630,13 @@
   white-space: nowrap;
   display: flex;
   align-items: center;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.disk-head span:nth-child(2),
+.disk-row span:nth-child(2) {
+  font-variant-numeric: tabular-nums;
 }
 
 .fs-main {

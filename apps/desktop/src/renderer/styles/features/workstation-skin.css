@@ -554,7 +554,7 @@ textarea:focus-visible,
 
 .mini-tabs {
   display: grid;
-  grid-template-columns: 64px 44px minmax(0, 1fr);
+  grid-template-columns: 64px 58px minmax(0, 1fr);
   margin: 6px -12px 0;
   border-radius: 0;
   font-size: 11px;
@@ -581,19 +581,24 @@ textarea:focus-visible,
 }
 
 .process-row {
-  grid-template-columns: 64px 44px minmax(0, 1fr);
+  grid-template-columns: 64px 58px minmax(0, 1fr);
   min-height: 24px;
   font-family: 'SF Mono', Menlo, Consolas, monospace;
   font-size: 11px;
 }
 
 .process-row span {
-  padding: 2px 8px;
-  text-align: center;
+  padding: 2px 6px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .process-row span:nth-child(2) {
   font-weight: 700;
+}
+
+.process-row span:nth-child(3) {
+  text-align: left;
 }
 
 .network-panel {
@@ -657,7 +662,7 @@ textarea:focus-visible,
 
 .disk-head,
 .disk-row {
-  grid-template-columns: 1.25fr 1fr;
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
   height: 24px;
   font-family: 'SF Mono', Menlo, Consolas, monospace;
   font-size: 11px;

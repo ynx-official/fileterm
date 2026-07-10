@@ -213,25 +213,45 @@ $swapUsedBytes = [double] (($pageFiles | Measure-Object -Property CurrentUsage -
 $swapAvailableBytes = [math]::Max([double] 0, $swapTotalBytes - $swapUsedBytes)
 $swapPercent = if ($swapTotalBytes -gt 0) { [int] (($swapUsedBytes * 100) / $swapTotalBytes) } else { 0 }
 
-$addresses = @()
+$ip = ""
 try {
-  $addresses = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | ForEach-Object {
-    $_.GetIPProperties().UnicastAddresses | ForEach-Object { $_.Address.IPAddressToString }
-  } | Where-Object { $_ -match "^[0-9]+\\." -and $_ -notlike "127.*" -and $_ -notlike "169.254.*" })
+  $sshConnectionParts = @(([string] $env:SSH_CONNECTION).Trim() -split "\\s+")
+  if (
+    $sshConnectionParts.Count -ge 4 -and
+    $sshConnectionParts[2] -match "^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+$" -and
+    $sshConnectionParts[2] -notlike "127.*" -and
+    $sshConnectionParts[2] -notlike "169.254.*"
+  ) {
+    $ip = [string] $sshConnectionParts[2]
+  }
 } catch {}
-if (-not $addresses -or $addresses.Count -eq 0) {
+
+$addresses = @()
+if (-not $ip) {
+  try {
+    $addresses = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
+      $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
+      $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback
+    } | ForEach-Object {
+      $_.GetIPProperties().UnicastAddresses | ForEach-Object { $_.Address.IPAddressToString }
+    } | Where-Object { $_ -match "^[0-9]+\\." -and $_ -notlike "127.*" -and $_ -notlike "169.254.*" })
+  } catch {}
+}
+if (-not $ip -and (-not $addresses -or $addresses.Count -eq 0)) {
   try {
     $addresses = @(Get-ManagementInstances "Win32_NetworkAdapterConfiguration" | Where-Object { $_.IPEnabled } | ForEach-Object { $_.IPAddress } | Where-Object { $_ -and $_ -match "^[0-9]+\\." -and $_ -notlike "127.*" })
   } catch {}
 }
-if (-not $addresses -or $addresses.Count -eq 0) {
+if (-not $ip -and (-not $addresses -or $addresses.Count -eq 0)) {
   try {
     $ipconfigOutput = (& ipconfig.exe 2>$null) -join [Environment]::NewLine
     $ipMatch = [regex]::Match($ipconfigOutput, "IPv4[^:]*:\\s*([0-9.]+)")
     if ($ipMatch.Success) { $addresses = @($ipMatch.Groups[1].Value) }
   } catch {}
 }
-$ip = $addresses | Select-Object -First 1
+if (-not $ip) {
+  $ip = $addresses | Select-Object -First 1
+}
 
 $netBefore = @{}
 try {
@@ -274,6 +294,12 @@ if (-not $hasReportedCpuLoad -and $null -ne $processCpuBefore) {
 if ($cpuPercent -lt 0) { $cpuPercent = 0 }
 if ($cpuPercent -gt 100) { $cpuPercent = 100 }
 $idlePercent = [math]::Max(0, 100 - $cpuPercent)
+$logicalProcessorCount = [math]::Max(1, [Environment]::ProcessorCount)
+$systemLoad = [string]::Format(
+  [Globalization.CultureInfo]::InvariantCulture,
+  "{0:0.00}",
+  ($cpuPercent * $logicalProcessorCount) / 100
+)
 $rxRate = 0
 $txRate = 0
 $ifaces = @()
@@ -364,7 +390,7 @@ Write-Metric "HOSTNAME" $env:COMPUTERNAME
 Write-Metric "IP" $ip
 Write-Metric "UPTIME" ""
 Write-Metric "UPTIME_SECONDS" $uptimeSeconds
-Write-Metric "LOAD" "-"
+Write-Metric "LOAD" $systemLoad
 Write-Metric "CPU" $cpuPercent
 Write-Metric "CPU_USAGE" ("0|{0}|0|{1}|0|0|0|0" -f $cpuPercent, $idlePercent)
 Write-Metric "MEM" ("{0}|{1}|{2}|0|0|0" -f [int]($memoryUsedBytes / 1MB), [int]($memoryTotalBytes / 1MB), $memoryPercent)

@@ -38,3 +38,11 @@ test('removes the Clink F2 autosuggestion help prompt without removing typed inp
   assert.equal(isClinkAutosuggestHelpUrl(CLINK_AUTOSUGGEST_HELP_URL), true)
   assert.equal(isClinkAutosuggestHelpUrl('https://example.com'), false)
 })
+
+test('removes the Clink 1.9.25 right prompt emitted by the Windows host', () => {
+  const chunk =
+    '\u001b[m\u001b[90m\u001b[53X\u001b[7m\u001b[53CF2\u001b[27m=' +
+    `\u001b]8;id=35172-1;${CLINK_AUTOSUGGEST_HELP_URL}\u001b\\List Suggestions\u001b[15;48H`
+
+  assert.equal(stripClinkAutosuggestPrompt(chunk), '\u001b[m\u001b[53X')
+})
