@@ -462,7 +462,7 @@ export function App() {
     deleteConnectionFolder,
     updateConnectionOrder
   } = useWorkspaceDataOps({
-    desktopApi,
+    desktopApi: desktopApi ?? null,
     isCommandFormWindow,
     onApplySnapshot: applySnapshot,
     onBusyChange: setIsBusy,
