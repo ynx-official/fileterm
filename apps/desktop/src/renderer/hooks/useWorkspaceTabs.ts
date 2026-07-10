@@ -491,15 +491,23 @@ export function useWorkspaceTabs({
       : 'empty'
   const previousWorkspaceOrderKeyRef = useRef(activeWorkspaceOrderKey)
   const workspaceNavDirectionRef = useRef<WorkspaceNavigationDirection>('down')
-  let workspaceNavDirection = workspaceNavDirectionRef.current
 
-  if (previousWorkspaceOrderKeyRef.current !== activeWorkspaceOrderKey) {
-    const previousIndex = tabOrder.indexOf(previousWorkspaceOrderKeyRef.current)
+  const workspaceNavDirection = useMemo<WorkspaceNavigationDirection>(() => {
+    const previousKey = previousWorkspaceOrderKeyRef.current
+    if (previousKey === activeWorkspaceOrderKey) {
+      return workspaceNavDirectionRef.current
+    }
+    const previousIndex = tabOrder.indexOf(previousKey)
     const nextIndex = tabOrder.indexOf(activeWorkspaceOrderKey)
-    workspaceNavDirection = previousIndex >= 0 && nextIndex >= 0 && nextIndex < previousIndex ? 'up' : 'down'
-    workspaceNavDirectionRef.current = workspaceNavDirection
-    previousWorkspaceOrderKeyRef.current = activeWorkspaceOrderKey
-  }
+    return previousIndex >= 0 && nextIndex >= 0 && nextIndex < previousIndex ? 'up' : 'down'
+  }, [activeWorkspaceOrderKey, tabOrder])
+
+  useEffect(() => {
+    if (previousWorkspaceOrderKeyRef.current !== activeWorkspaceOrderKey) {
+      previousWorkspaceOrderKeyRef.current = activeWorkspaceOrderKey
+      workspaceNavDirectionRef.current = workspaceNavDirection
+    }
+  }, [activeWorkspaceOrderKey, workspaceNavDirection])
 
   const orderedTabs = useMemo<OrderedTabEntry[]>(
     () =>
