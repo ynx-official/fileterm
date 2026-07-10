@@ -1,25 +1,22 @@
-import { parseSystemMetrics } from './parser.js'
-import type { SystemMetricsCollector, SystemMetricsExecutor } from './types.js'
+import type { SystemMetricsExecutor } from './types.js'
 
-export const windowsCollector: SystemMetricsCollector = {
-  platform: 'windows',
-  async collect(executor) {
-    const raw = await runPowerShellMetricsScript(executor)
-    return parseSystemMetrics(raw, 'windows')
-  }
-}
+const WINDOWS_METRICS_COMPLETE_MARKER = '__FILETERM_METRICS_COMPLETE__'
 
-async function runPowerShellMetricsScript(executor: SystemMetricsExecutor) {
-  const encoded = Buffer.from(buildWindowsMetricsScript(), 'utf16le').toString('base64')
+export async function runPowerShellMetricsScript(executor: SystemMetricsExecutor) {
+  const script = buildWindowsMetricsScript()
   const commands = [
-    `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
-    `pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`
+    'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -',
+    'pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -'
   ]
   let lastError: unknown
 
   for (const command of commands) {
     try {
-      return await executor.exec(command, { allowNonZeroWithStdout: true })
+      const raw = await executor.exec(command, undefined, script)
+      if (!raw.includes(WINDOWS_METRICS_COMPLETE_MARKER)) {
+        throw new Error(`Windows metrics script did not emit ${WINDOWS_METRICS_COMPLETE_MARKER}`)
+      }
+      return raw
     } catch (error) {
       lastError = error
     }
@@ -30,7 +27,17 @@ async function runPowerShellMetricsScript(executor: SystemMetricsExecutor) {
 
 function buildWindowsMetricsScript() {
   return `
+& {
 $ErrorActionPreference = "SilentlyContinue"
+$ProgressPreference = "SilentlyContinue"
+try {
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  [Console]::OutputEncoding = $utf8
+  $OutputEncoding = $utf8
+} catch {}
+$script:CimAvailable = [bool] (Get-Command Get-CimInstance -ErrorAction SilentlyContinue)
+$script:WmiAvailable = [bool] (Get-Command Get-WmiObject -ErrorAction SilentlyContinue)
+$script:WmicAvailable = [bool] (Get-Command wmic.exe -ErrorAction SilentlyContinue)
 
 function Write-Metric([string] $Name, [object] $Value) {
   if ($null -eq $Value) { $Value = "" }
@@ -45,48 +52,216 @@ function Format-Bytes([double] $Bytes) {
   return ("{0:N0} B" -f $Bytes)
 }
 
-$os = Get-CimInstance Win32_OperatingSystem
-$processors = @(Get-CimInstance Win32_Processor)
-$cpuPercent = [int] (($processors | Measure-Object -Property LoadPercentage -Average).Average)
-if ($cpuPercent -lt 0) { $cpuPercent = 0 }
-if ($cpuPercent -gt 100) { $cpuPercent = 100 }
-$idlePercent = [math]::Max(0, 100 - $cpuPercent)
-$uptimeSeconds = 0
-if ($os.LastBootUpTime) {
-  $uptimeSeconds = [int] ((Get-Date) - $os.LastBootUpTime).TotalSeconds
+function Get-ManagementInstances([string] $ClassName, [string] $Filter = "") {
+  if ($script:CimAvailable) {
+    try {
+      $parameters = @{ ClassName = $ClassName; ErrorAction = "Stop"; OperationTimeoutSec = 2 }
+      if ($Filter) { $parameters.Filter = $Filter }
+      return @(Get-CimInstance @parameters)
+    } catch {
+      $script:CimAvailable = $false
+    }
+  }
+  if ($script:WmiAvailable) {
+    $job = $null
+    try {
+      $parameters = @{ Class = $ClassName; ErrorAction = "Stop"; AsJob = $true }
+      if ($Filter) {
+        $parameters.Filter = $Filter
+      }
+      $job = Get-WmiObject @parameters
+      if (-not (Wait-Job -Job $job -Timeout 2 -ErrorAction Stop)) {
+        throw "WMI query timed out: $ClassName"
+      }
+      return @(Receive-Job -Job $job -ErrorAction Stop)
+    } catch {
+      $script:WmiAvailable = $false
+    } finally {
+      if ($job) {
+        Stop-Job -Job $job -ErrorAction SilentlyContinue
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+  return @()
 }
 
-$memoryTotalBytes = [double] $os.TotalVisibleMemorySize * 1024
-$memoryAvailableBytes = [double] $os.FreePhysicalMemory * 1024
+function Invoke-WmicCsv([string[]] $Arguments) {
+  if (-not $script:WmicAvailable) { return @() }
+  $process = $null
+  try {
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = "wmic.exe"
+    $startInfo.Arguments = (($Arguments + "/format:csv") -join " ")
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (-not $process.Start()) { throw "Unable to start wmic.exe" }
+    if (-not $process.WaitForExit(2000)) {
+      try { $process.Kill() } catch {}
+      throw "WMIC query timed out"
+    }
+    $rows = @($process.StandardOutput.ReadToEnd() -split "\r?\n" | Where-Object { $_ -and $_.Trim() })
+    if (-not $rows) { return @() }
+    return @($rows | ConvertFrom-Csv)
+  } catch {
+    $script:WmicAvailable = $false
+    return @()
+  } finally {
+    if ($process) { $process.Dispose() }
+  }
+}
+
+function Convert-ManagementDate([object] $Value) {
+  if ($Value -is [datetime]) { return [datetime] $Value }
+  if (-not $Value) { return $null }
+  try { return [System.Management.ManagementDateTimeConverter]::ToDateTime([string] $Value) } catch {}
+  try { return [datetime] $Value } catch { return $null }
+}
+
+$os = @(Get-ManagementInstances "Win32_OperatingSystem") | Select-Object -First 1
+if (-not $os) {
+  $os = @(Invoke-WmicCsv @("os", "get", "Caption,Version,OSArchitecture,LastBootUpTime,TotalVisibleMemorySize,FreePhysicalMemory")) | Select-Object -First 1
+}
+
+$osCaption = if ($os -and $os.Caption) { [string] $os.Caption } else { [Environment]::OSVersion.VersionString }
+$osVersion = if ($os -and $os.Version) { [string] $os.Version } else { [Environment]::OSVersion.Version.ToString() }
+$osArchitecture = if ($os -and $os.OSArchitecture) { [string] $os.OSArchitecture } elseif ([Environment]::Is64BitOperatingSystem) { "64-bit" } else { "32-bit" }
+$lastBootUpTime = if ($os) { Convert-ManagementDate $os.LastBootUpTime } else { $null }
+if (-not $lastBootUpTime) {
+  $lastBootUpTime = (Get-Date).AddMilliseconds(-[Environment]::TickCount64)
+}
+
+$processors = @(Get-ManagementInstances "Win32_Processor")
+if (-not $processors -or $processors.Count -eq 0) {
+  $processors = @(Invoke-WmicCsv @("cpu", "get", "Name,NumberOfCores,MaxClockSpeed,LoadPercentage"))
+}
+$reportedCpuLoads = @()
+foreach ($processor in $processors) {
+  $load = 0.0
+  if ([double]::TryParse([string] $processor.LoadPercentage, [ref] $load)) {
+    $reportedCpuLoads += $load
+  }
+}
+$hasReportedCpuLoad = $reportedCpuLoads.Count -gt 0
+if (-not $processors -or $processors.Count -eq 0) {
+  $processors = @([pscustomobject]@{
+    Name = if ($env:PROCESSOR_IDENTIFIER) { $env:PROCESSOR_IDENTIFIER } else { "Windows Processor" }
+    NumberOfCores = [Environment]::ProcessorCount
+    MaxClockSpeed = 0
+    LoadPercentage = $null
+  })
+}
+$cpuPercent = if ($hasReportedCpuLoad) { [int] (($reportedCpuLoads | Measure-Object -Average).Average) } else { 0 }
+$uptimeSeconds = [math]::Max(0, [int] ((Get-Date) - $lastBootUpTime).TotalSeconds)
+
+$memoryTotalBytes = if ($os) { [double] $os.TotalVisibleMemorySize * 1024 } else { 0 }
+$memoryAvailableBytes = if ($os) { [double] $os.FreePhysicalMemory * 1024 } else { 0 }
+if ($memoryTotalBytes -le 0) {
+  try {
+    Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
+    $computerInfo = New-Object Microsoft.VisualBasic.Devices.ComputerInfo
+    $memoryTotalBytes = [double] $computerInfo.TotalPhysicalMemory
+    $memoryAvailableBytes = [double] $computerInfo.AvailablePhysicalMemory
+  } catch {}
+}
 $memoryUsedBytes = [math]::Max(0, $memoryTotalBytes - $memoryAvailableBytes)
 $memoryPercent = if ($memoryTotalBytes -gt 0) { [int] (($memoryUsedBytes * 100) / $memoryTotalBytes) } else { 0 }
 
-$pageFiles = @(Get-CimInstance Win32_PageFileUsage)
+$pageFiles = @(Get-ManagementInstances "Win32_PageFileUsage")
+if (-not $pageFiles -or $pageFiles.Count -eq 0) {
+  $pageFiles = @(Invoke-WmicCsv @("pagefile", "get", "AllocatedBaseSize,CurrentUsage"))
+}
 $swapTotalBytes = [double] (($pageFiles | Measure-Object -Property AllocatedBaseSize -Sum).Sum) * 1MB
 $swapUsedBytes = [double] (($pageFiles | Measure-Object -Property CurrentUsage -Sum).Sum) * 1MB
 $swapAvailableBytes = [math]::Max(0, $swapTotalBytes - $swapUsedBytes)
 $swapPercent = if ($swapTotalBytes -gt 0) { [int] (($swapUsedBytes * 100) / $swapTotalBytes) } else { 0 }
 
-$addresses = @(Get-NetIPAddress -AddressFamily IPv4 | Where-Object {
-  $_.IPAddress -and $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*"
-} | Select-Object -ExpandProperty IPAddress)
+$addresses = @()
+try {
+  $addresses = @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {
+    $_.IPAddress -and $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*"
+  } | Select-Object -ExpandProperty IPAddress)
+} catch {}
 if (-not $addresses -or $addresses.Count -eq 0) {
-  $addresses = @(Get-CimInstance Win32_NetworkAdapterConfiguration | Where-Object { $_.IPEnabled } | ForEach-Object { $_.IPAddress } | Where-Object { $_ -and $_ -match "^\\d+\\." -and $_ -notlike "127.*" })
+  try {
+    $addresses = @(Get-ManagementInstances "Win32_NetworkAdapterConfiguration" | Where-Object { $_.IPEnabled } | ForEach-Object { $_.IPAddress } | Where-Object { $_ -and $_ -match "^[0-9]+\\." -and $_ -notlike "127.*" })
+  } catch {}
+}
+if (-not $addresses -or $addresses.Count -eq 0) {
+  try {
+    $addresses = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | ForEach-Object {
+      $_.GetIPProperties().UnicastAddresses | ForEach-Object { $_.Address.IPAddressToString }
+    } | Where-Object { $_ -match "^[0-9]+\\." -and $_ -notlike "127.*" -and $_ -notlike "169.254.*" })
+  } catch {}
+}
+if (-not $addresses -or $addresses.Count -eq 0) {
+  try {
+    $ipconfigOutput = (& ipconfig.exe 2>$null) -join [Environment]::NewLine
+    $ipMatch = [regex]::Match($ipconfigOutput, "IPv4[^:]*:\\s*([0-9.]+)")
+    if ($ipMatch.Success) { $addresses = @($ipMatch.Groups[1].Value) }
+  } catch {}
 }
 $ip = $addresses | Select-Object -First 1
 
 $netBefore = @{}
 try {
-  Get-NetAdapterStatistics | ForEach-Object {
+  Get-NetAdapterStatistics -ErrorAction Stop | ForEach-Object {
     $netBefore[$_.Name] = [pscustomobject]@{ Rx = [double] $_.ReceivedBytes; Tx = [double] $_.SentBytes }
   }
 } catch {}
+if ($netBefore.Count -eq 0) {
+  try {
+    [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
+      $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
+      $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback
+    } | ForEach-Object {
+      $stats = $_.GetIPv4Statistics()
+      $netBefore[$_.Name] = [pscustomobject]@{ Rx = [double] $stats.BytesReceived; Tx = [double] $stats.BytesSent }
+    }
+  } catch {}
+}
+$sampleStartedAt = Get-Date
+$processCpuBefore = $null
+if (-not $hasReportedCpuLoad) {
+  try {
+    $processCpuBefore = [double] ((Get-Process -ErrorAction Stop | Measure-Object -Property CPU -Sum).Sum)
+  } catch {}
+}
 Start-Sleep -Milliseconds 250
 $netAfter = @()
 try {
-  $netAfter = @(Get-NetAdapterStatistics)
+  $netAfter = @(Get-NetAdapterStatistics -ErrorAction Stop | ForEach-Object {
+    [pscustomobject]@{ Name = $_.Name; ReceivedBytes = [double] $_.ReceivedBytes; SentBytes = [double] $_.SentBytes }
+  })
 } catch {}
-$sampleMs = 250
+if (-not $netAfter -or $netAfter.Count -eq 0) {
+  try {
+    $netAfter = @([System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object {
+      $_.OperationalStatus -eq [System.Net.NetworkInformation.OperationalStatus]::Up -and
+      $_.NetworkInterfaceType -ne [System.Net.NetworkInformation.NetworkInterfaceType]::Loopback
+    } | ForEach-Object {
+      $stats = $_.GetIPv4Statistics()
+      [pscustomobject]@{ Name = $_.Name; ReceivedBytes = [double] $stats.BytesReceived; SentBytes = [double] $stats.BytesSent }
+    })
+  } catch {}
+}
+$sampleMs = [math]::Max(1, [int] ((Get-Date) - $sampleStartedAt).TotalMilliseconds)
+if (-not $hasReportedCpuLoad -and $null -ne $processCpuBefore) {
+  try {
+    $processCpuAfter = [double] ((Get-Process -ErrorAction Stop | Measure-Object -Property CPU -Sum).Sum)
+    $processorCount = [math]::Max(1, [Environment]::ProcessorCount)
+    $cpuPercent = [int] ([math]::Round(
+      ([math]::Max(0, $processCpuAfter - $processCpuBefore) * 100000) / ($sampleMs * $processorCount)
+    ))
+  } catch {}
+}
+if ($cpuPercent -lt 0) { $cpuPercent = 0 }
+if ($cpuPercent -gt 100) { $cpuPercent = 100 }
+$idlePercent = [math]::Max(0, 100 - $cpuPercent)
 $rxRate = 0
 $txRate = 0
 $ifaces = @()
@@ -109,7 +284,17 @@ foreach ($item in $netAfter) {
   $ifaceRows += ("{0}|{1}|{2}|{3}|{4}" -f $name, [int64] $rxTotal, [int64] $txTotal, $rowRxRate, $rowTxRate)
 }
 
-$disks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3")
+$disks = @(Get-ManagementInstances "Win32_LogicalDisk" "DriveType=3")
+if (-not $disks -or $disks.Count -eq 0) {
+  $disks = @(Invoke-WmicCsv @("logicaldisk", "where", "DriveType=3", "get", "DeviceID,FreeSpace,Size"))
+}
+if (-not $disks -or $disks.Count -eq 0) {
+  try {
+    $disks = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady -and $_.DriveType -eq [System.IO.DriveType]::Fixed } | ForEach-Object {
+      [pscustomobject]@{ DeviceID = $_.Name.TrimEnd("\\"); Size = [double] $_.TotalSize; FreeSpace = [double] $_.AvailableFreeSpace }
+    })
+  } catch {}
+}
 $diskRows = @()
 $fileSystemRows = @()
 foreach ($disk in $disks) {
@@ -129,7 +314,7 @@ foreach ($processor in $processors) {
 
 $gpuRows = @()
 try {
-  Get-CimInstance Win32_VideoController | ForEach-Object {
+  Get-ManagementInstances "Win32_VideoController" | ForEach-Object {
     $memory = if ($_.AdapterRAM) { Format-Bytes ([double] $_.AdapterRAM) } else { "-" }
     $gpuRows += ("{0}|{1}|{2}|{3}" -f ([string] $_.Name).Trim(), ([string] $_.AdapterCompatibility).Trim(), ([string] $_.DriverVersion).Trim(), $memory)
   }
@@ -146,12 +331,21 @@ try {
     $processRows += ("{0:N1}M|{1:N1}|{2}|{3}" -f ($_.WorkingSet64 / 1MB), $cpu, $elapsed, $_.ProcessName)
   }
 } catch {}
+if ($processRows.Count -eq 0) {
+  try {
+    & tasklist.exe /FO CSV /NH 2>$null | ConvertFrom-Csv -Header ImageName,PID,SessionName,SessionNumber,MemUsage | Select-Object -First 80 | ForEach-Object {
+      $memoryKb = [double] (([string] $_.MemUsage) -replace "[^0-9]", "")
+      $command = [System.IO.Path]::GetFileNameWithoutExtension([string] $_.ImageName)
+      $processRows += ("{0:N1}M|0.0|0|{1}" -f ($memoryKb / 1024), $command)
+    }
+  } catch {}
+}
 
 Write-Metric "PLATFORM" "windows"
-Write-Metric "OS" $os.Caption
+Write-Metric "OS" $osCaption
 Write-Metric "KERNEL_NAME" "Windows"
-Write-Metric "KERNEL_VERSION" $os.Version
-Write-Metric "ARCH" $os.OSArchitecture
+Write-Metric "KERNEL_VERSION" $osVersion
+Write-Metric "ARCH" $osArchitecture
 Write-Metric "HOSTNAME" $env:COMPUTERNAME
 Write-Metric "IP" $ip
 Write-Metric "UPTIME" ""
@@ -184,5 +378,7 @@ Write-Output "__FILESYSTEMS_END__"
 Write-Output "__PROCS_START__"
 $processRows | ForEach-Object { Write-Output $_ }
 Write-Output "__PROCS_END__"
+Write-Output "${WINDOWS_METRICS_COMPLETE_MARKER}"
+}
 `
 }

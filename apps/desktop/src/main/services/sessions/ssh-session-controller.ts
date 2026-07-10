@@ -23,7 +23,8 @@ import type {
 import { BaseFileSessionController } from './base-file-session-controller.js'
 import { parentRemotePath, toRemoteFileItem } from './session-file-utils.js'
 import { collectSshSystemMetrics, type RemoteSystemPlatform } from './system-metrics/index.js'
-import { findSetupEchoEnd, SHELL_CWD_SETUP, ShellCwdTracker } from './shell-cwd-integration.js'
+import { probeRemoteSystemPlatform } from './system-metrics/platform-probe.js'
+import { findSetupEchoEnd, SHELL_CWD_SETUP, ShellCwdTracker, supportsPosixShellSetup } from './shell-cwd-integration.js'
 import { createSshDebugLogger, isSshDebugEnabled, singleLine } from './ssh-debug-logger.js'
 import { decodeBuffer, encodeText } from '../text-encoding.js'
 import { appLog, appWarn } from '../app-logger.js'
@@ -63,6 +64,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private shellCwd?: string
   private readonly shellCwdTracker = new ShellCwdTracker()
   private cwdSetupInjected = false
+  private shellPlatformProbe?: Promise<void>
   private suppressEcho = false
   private echoBuf = ''
   private shellSetupReleaseTimer?: ReturnType<typeof setTimeout>
@@ -97,6 +99,12 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   }
 
   override async connect(): Promise<void> {
+    this.cwdSetupInjected = false
+    this.shellPlatformProbe = undefined
+    this.metricsPlatform = undefined
+    this.lastInjectTime = 0
+    this.clearShellSetupSuppression()
+
     const profile = await this.resolveConnectionProfile(this.profile as SshProfile)
     const authConfig = await resolveSshAuthConfig(profile)
     const shouldTryKeyboard = profile.authType === 'password' && Boolean(profile.password)
@@ -170,9 +178,8 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
               stream.on('data', (chunk: Buffer) => {
                 let text = chunk.toString('utf8')
 
-                if (!this.cwdSetupInjected && text.trim().length > 0) {
-                  this.cwdSetupInjected = true
-                  this.injectShellSetup(stream)
+                if (text.trim().length > 0) {
+                  this.scheduleShellSetup(stream)
                 }
 
                 if (this.suppressEcho) {
@@ -221,7 +228,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                 // We inject the setup script silently to query the actual user.
                 const strippedText = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').trimEnd()
                 const now = Date.now()
-                if (strippedText.endsWith('#') && !this.suppressEcho) {
+                if (supportsPosixShellSetup(this.metricsPlatform) && strippedText.endsWith('#') && !this.suppressEcho) {
                   // Only inject if we think we aren't root AND it's been a while since the last injection
                   // to prevent infinite loops (because the injected script itself triggers a new prompt)
                   if (this.shellUser !== 'root' && now - this.lastInjectTime > 2000) {
@@ -233,7 +240,7 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                 this.onData(text)
               })
               stream.on('close', () => {
-                this.handlePrimaryDisconnect()
+                this.handlePrimaryDisconnect(stream)
                 this.onStateChange('Shell closed', this.transcript.toString(), false)
               })
 
@@ -334,10 +341,71 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
     this.onShellUserChange(user)
   }
 
+  private scheduleShellSetup(stream: { write(data: string): void }) {
+    if (this.cwdSetupInjected || this.shellPlatformProbe) {
+      return
+    }
+
+    const profile = this.profile as SshProfile
+    if (profile.enableExecChannel === false) {
+      this.cwdSetupInjected = true
+      this.sshDebug.log('main', 'Exec Channel 已禁用，跳过 shell CWD 注入')
+      return
+    }
+
+    const probe = this.detectPlatformAndSetupShell(stream)
+    this.shellPlatformProbe = probe
+    const clearProbe = () => {
+      if (this.shellPlatformProbe === probe) {
+        this.shellPlatformProbe = undefined
+      }
+    }
+    void probe.then(clearProbe, (error) => {
+      clearProbe()
+      this.sshDebug.log('exec', `shell CWD 初始化失败: ${error instanceof Error ? error.message : String(error)}`)
+    })
+  }
+
+  private async detectPlatformAndSetupShell(stream: { write(data: string): void }) {
+    let platform: RemoteSystemPlatform = 'unknown'
+    try {
+      platform = await probeRemoteSystemPlatform({
+        exec: (command, options, stdinPayload) => this.execCommand(command, options, false, stdinPayload)
+      })
+    } catch (error) {
+      this.sshDebug.log(
+        'exec',
+        `shell 平台探测失败，已跳过 CWD 注入: ${error instanceof Error ? error.message : String(error)}`
+      )
+    }
+
+    if (!this.connected || this.shellStream !== stream || this.cwdSetupInjected) {
+      return
+    }
+
+    this.metricsPlatform = platform
+    this.cwdSetupInjected = true
+    if (!supportsPosixShellSetup(platform)) {
+      this.sshDebug.log('main', `远端平台为 ${platform}，跳过 POSIX shell CWD 注入`)
+      return
+    }
+
+    this.injectShellSetup(stream)
+  }
+
   private injectShellSetup(stream: { write(data: string): void }) {
+    if (!supportsPosixShellSetup(this.metricsPlatform) || !this.connected || this.shellStream !== stream) {
+      return
+    }
+
     this.clearShellSetupSuppression()
     this.suppressEcho = true
-    stream.write(` ${SHELL_CWD_SETUP}\r`)
+    try {
+      stream.write(` ${SHELL_CWD_SETUP}\r`)
+    } catch (error) {
+      this.clearShellSetupSuppression()
+      throw error
+    }
     this.shellSetupReleaseTimer = setTimeout(() => {
       if (!this.suppressEcho) {
         return
@@ -414,7 +482,9 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
 
   override async disconnect(): Promise<void> {
     this.clearShellSetupSuppression()
-    this.shellStream?.end()
+    const shellStream = this.shellStream
+    this.shellStream = undefined
+    shellStream?.end()
     this.closeExecSession()
     this.closeSftpSession()
     this.closeTransferSftpSession()
@@ -1264,8 +1334,14 @@ fi
     })
   }
 
-  private handlePrimaryDisconnect() {
+  private handlePrimaryDisconnect(stream?: { write(data: string): void }) {
+    if (stream && this.shellStream !== stream) {
+      return
+    }
+
     this.clearShellSetupSuppression()
+    this.shellStream = undefined
+    this.shellPlatformProbe = undefined
     this.resetPrivilegedFileAccess()
     this.connected = false
     this.closeExecSession()

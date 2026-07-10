@@ -7,7 +7,7 @@ import type {
   SystemMetricsCollector,
   SystemMetricsExecutor
 } from './types.js'
-import { windowsCollector } from './windows-collector.js'
+import { windowsCollector } from './windows-metrics-collector.js'
 
 const collectors: Record<Exclude<RemoteSystemPlatform, 'unknown'>, SystemMetricsCollector> = {
   linux: linuxCollector,

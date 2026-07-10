@@ -34,8 +34,8 @@ async function probePosixPlatform(executor: SystemMetricsExecutor): Promise<Remo
 
 async function probeWindowsPlatform(executor: SystemMetricsExecutor): Promise<RemoteSystemPlatform> {
   const commands = [
-    'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[Environment]::OSVersion.Platform; if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) { (Get-CimInstance Win32_OperatingSystem).Caption }"',
-    'pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[Environment]::OSVersion.Platform; if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) { (Get-CimInstance Win32_OperatingSystem).Caption }"',
+    'powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[Environment]::OSVersion.Platform"',
+    'pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "[Environment]::OSVersion.Platform"',
     'cmd /c ver'
   ]
 

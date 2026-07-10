@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { resolveShellFileAccess, ShellCwdTracker } from '../../src/main/services/sessions/shell-cwd-integration.ts'
+import {
+  resolveShellFileAccess,
+  ShellCwdTracker,
+  supportsPosixShellSetup
+} from '../../src/main/services/sessions/shell-cwd-integration.ts'
 
 test('shell state tracker parses chunked cwd and user reports', () => {
   const tracker = new ShellCwdTracker()
@@ -17,4 +21,12 @@ test('shell user changes map to one-way file access targets', () => {
   assert.deepEqual(resolveShellFileAccess('stoffel', 'stoffel'), { mode: 'user' })
   assert.deepEqual(resolveShellFileAccess('stoffel', 'root'), { mode: 'root', sudoUser: 'root' })
   assert.deepEqual(resolveShellFileAccess('stoffel', 'postgres'), { mode: 'root', sudoUser: 'postgres' })
+})
+
+test('shell setup is injected only for confirmed POSIX platforms', () => {
+  assert.equal(supportsPosixShellSetup('linux'), true)
+  assert.equal(supportsPosixShellSetup('busybox'), true)
+  assert.equal(supportsPosixShellSetup('windows'), false)
+  assert.equal(supportsPosixShellSetup('unknown'), false)
+  assert.equal(supportsPosixShellSetup(undefined), false)
 })

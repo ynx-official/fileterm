@@ -1,4 +1,5 @@
 import path from 'node:path'
+import type { RemoteSystemPlatform } from '@fileterm/core'
 
 const OSC_7_PREFIX = '\u001b]7;'
 const OSC_7_PATTERN = /\u001b]7;file:\/\/([^\u0007\u001b]*)(?:\u0007|\u001b\\)/g
@@ -62,6 +63,10 @@ export const SETUP_NEEDLE = 'test -z "$FISH_VERSION"'
 
 export const SHELL_CWD_SETUP =
   'test -z "$FISH_VERSION" && eval \'__tdcwd() { printf "\\033]7;file://%s\\007\\033]1337;RemoteUser=%s\\007" "$(pwd -P 2>/dev/null)" "$(id -un 2>/dev/null)"; }; if [ -n "$ZSH_VERSION" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook -D precmd __tdcwd 2>/dev/null; add-zsh-hook precmd __tdcwd 2>/dev/null; elif [ -n "$BASH_VERSION" ]; then case "$PROMPT_COMMAND" in *"__tdcwd"*) ;; *) PROMPT_COMMAND="__tdcwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;; esac; else case "$PS1" in *"__tdcwd"*) ;; *) PS1="\\$(__tdcwd)$PS1" ;; esac; fi; __tdcwd\''
+
+export function supportsPosixShellSetup(platform?: RemoteSystemPlatform): boolean {
+  return platform === 'linux' || platform === 'busybox'
+}
 
 export function findSetupEchoEnd(
   text: string

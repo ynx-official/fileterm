@@ -1,21 +1,24 @@
 import type { RawNetworkInterfaceMetrics, RemoteSystemPlatform, SystemMetrics } from '@fileterm/core'
 
 export function parseSystemMetrics(raw: string, fallbackPlatform: RemoteSystemPlatform = 'unknown'): SystemMetrics {
+  const normalizedRaw = raw.replace(/\r\n?/g, '\n')
   const readLine = (key: string) =>
-    raw
+    normalizedRaw
       .split('\n')
       .find((line) => line.startsWith(key))
-      ?.slice(key.length) ?? ''
+      ?.slice(key.length)
+      .trim() ?? ''
   const readBlock = (start: string, end: string) => {
-    const startIndex = raw.indexOf(start)
-    const endIndex = raw.indexOf(end)
+    const startIndex = normalizedRaw.indexOf(start)
+    const endIndex = normalizedRaw.indexOf(end, startIndex + start.length)
     if (startIndex === -1 || endIndex === -1 || endIndex <= startIndex) {
       return []
     }
-    return raw
+    return normalizedRaw
       .slice(startIndex + start.length, endIndex)
       .trim()
       .split('\n')
+      .map((line) => line.trim())
       .filter(Boolean)
   }
 
@@ -281,8 +284,9 @@ export function parseSystemMetrics(raw: string, fallbackPlatform: RemoteSystemPl
 }
 
 function normalizePlatform(value: string, fallback: RemoteSystemPlatform): RemoteSystemPlatform {
-  if (value === 'linux' || value === 'busybox' || value === 'windows' || value === 'unknown') {
-    return value
+  const normalized = value.trim().toLowerCase()
+  if (normalized === 'linux' || normalized === 'busybox' || normalized === 'windows' || normalized === 'unknown') {
+    return normalized
   }
   return fallback
 }

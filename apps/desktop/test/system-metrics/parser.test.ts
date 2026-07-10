@@ -143,3 +143,52 @@ test('parses Windows metrics from PowerShell collector markers', () => {
   assert.equal(metrics.swapRaw?.totalBytes, 0)
   assert.equal(metrics.networkRawByInterface?.Ethernet?.txBytes, 2000)
 })
+
+test('normalizes CRLF Windows metrics before parsing marker lines and blocks', () => {
+  const metrics = parseSystemMetrics(
+    [
+      '__PLATFORM__windows',
+      '__OS__Microsoft Windows Server 2022 ',
+      '__KERNEL_NAME__Windows',
+      '__KERNEL_VERSION__10.0.20348',
+      '__ARCH__64-bit',
+      '__HOSTNAME__WIN-CRLF',
+      '__IP__10.0.0.21',
+      '__UPTIME_SECONDS__7200',
+      '__CPU__18',
+      '__CPU_USAGE__0|18|0|82|0|0|0|0',
+      '__MEM__1024|4096|25|0|0|0',
+      '__MEM_BYTES__1073741824|4294967296|3221225472|25|0|0|0',
+      '__SWAP__0|0|0',
+      '__SWAP_BYTES__0|0|0|0',
+      '__CPUINFO_START__',
+      ' Intel Xeon|8|2800|-|- ',
+      '__CPUINFO_END__',
+      '__GPUINFO_START__',
+      '__GPUINFO_END__',
+      '__IFACES__Ethernet',
+      '__RATES__128|64',
+      '__IFACE_RATES_START__',
+      ' Ethernet|1000|2000|128|64 ',
+      '__IFACE_RATES_END__',
+      '__DISK_START__',
+      ' C:|20 GB/60 GB ',
+      '__DISK_END__',
+      '__FILESYSTEMS_START__',
+      ' C:|60 GB|40 GB|66%|20 GB|C: ',
+      '__FILESYSTEMS_END__',
+      '__PROCS_START__',
+      ' 50.0M|0.0|30|sshd ',
+      '__PROCS_END__'
+    ].join('\r\n'),
+    'linux'
+  )
+
+  assert.equal(metrics.platform, 'windows')
+  assert.equal(metrics.identity.osName, 'Microsoft Windows Server 2022')
+  assert.equal(metrics.identity.hostname, 'WIN-CRLF')
+  assert.equal(metrics.cpuInfoRows[0]?.model, 'Intel Xeon')
+  assert.equal(metrics.networkRawByInterface?.Ethernet?.rxBytesPerSecond, 128)
+  assert.equal(metrics.diskRows[0]?.path, 'C:')
+  assert.equal(metrics.topProcesses[0]?.command, 'sshd')
+})
