@@ -17,6 +17,7 @@
     "sync:version": "node ./scripts/sync-version-from-root.mjs",
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test -w @fileterm/desktop",
     "prepare": "husky",
     "version:bump": "node ./scripts/bump-version.mjs",
     "release:mac": "npm run release:mac -w @fileterm/desktop",

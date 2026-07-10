@@ -45,8 +45,8 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
-      - name: Run transfer unit tests
-        run: npm run test:transfers -w @fileterm/desktop
+      - name: Run unit tests
+        run: npm test
 
       - name: Build
         run: npm run build

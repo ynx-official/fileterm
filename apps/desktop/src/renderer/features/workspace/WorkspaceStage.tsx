@@ -2,6 +2,7 @@ import type {
   CommandExecutionOptions,
   CommandFolder,
   CommandTemplate,
+  CommandTemplateInput,
   ConnectionFolder,
   ConnectionProfile,
   LocalFileItem,
@@ -11,6 +12,7 @@ import type {
 } from '@fileterm/core'
 import type { DragEvent } from 'react'
 import type { SendScope, SessionSendTarget } from '../common/session-send-targets'
+import type { TabBarProps } from '../layout/TabBar'
 import { SystemInfoWorkspace } from '../system/SystemInfoWorkspace'
 import { HomeWorkspace } from './HomeWorkspace'
 import { SessionWorkspace } from './SessionWorkspace'
@@ -159,8 +161,8 @@ export function WorkspaceStage({
   onDeleteConnectionFolder(folderId: string): void
   onUpdateConnectionFolder(folderId: string, updates: Partial<ConnectionFolder>): void
   onUpdateConnectionOrder(id: string, newParentId: string | undefined, newOrder: number): void
-  onCreateCommand(input: any): void
-  onUpdateCommand(commandId: string, input: any): void
+  onCreateCommand(input: CommandTemplateInput): void
+  onUpdateCommand(commandId: string, input: CommandTemplateInput): void
   onDeleteCommand(commandId: string): void
   onCreateCommandFolder(name: string): void
   onDeleteCommandFolder(folderId: string): void
@@ -171,7 +173,7 @@ export function WorkspaceStage({
   onOpenLogsDirectory(): void
   isSidebarCollapsed: boolean
   isWorkspaceFocusMode: boolean
-  tabBarProps: any
+  tabBarProps: Omit<TabBarProps, 'homeBrandContent'>
   isResizingSidebar: boolean
   onResizeStart(): void
 }) {

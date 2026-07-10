@@ -57,7 +57,7 @@ import { CloseButton } from './features/common/CloseButton'
 import { ConfirmActionDialog } from './features/common/ConfirmActionDialog'
 import type { SendScope, SessionSendTarget } from './features/common/session-send-targets'
 import { resolveSelectedTabIds } from './features/common/session-send-targets'
-import { TabBar, type OrderedTabEntry, type TabContextTarget } from './features/layout/TabBar'
+import { TabBar, type OrderedTabEntry, type TabBarProps, type TabContextTarget } from './features/layout/TabBar'
 import { TabContextMenu } from './features/layout/TabContextMenu'
 import { WindowMenubar } from './features/layout/WindowMenubar'
 import { SystemSidebarShell } from './features/system/SystemSidebarShell'
@@ -3291,11 +3291,10 @@ export function App() {
     )
   }
 
-  const tabBarProps = {
+  const tabBarProps: Omit<TabBarProps, 'homeBrandContent'> = {
     activeHomeTabId: effectiveActiveLocalTabId,
     activeSessionTabId: visibleActiveSessionTabId,
     isWorkspaceFocusMode,
-    locale,
     onAddHomeTab: handleAddHomeTab,
     onActivateHome: handleActivateHome,
     onActivateSession: (tabId: string) => {
@@ -3310,9 +3309,6 @@ export function App() {
       setTabOrder((prev) => reorderTabKeys(prev, draggingTabKey, targetKey))
     },
     onDragStart: setDraggingTabKey,
-    onOpenCommandManager: openCommandManager,
-    onOpenConnectionManager: openConnectionManager,
-    onOpenLogsDirectory: openLogsDirectory,
     onOpenSettings: () => setShowSettings(true),
     onOpenTabContext: (event: React.MouseEvent<HTMLDivElement>, target: TabContextTarget) => {
       setTabContextMenu({ x: event.clientX, y: event.clientY, target })
@@ -3325,13 +3321,7 @@ export function App() {
         setSidebarWidth(214)
       }
     },
-    onSetLocale: (nextLocale: AppLocale) => {
-      setLocale(nextLocale)
-      setLocaleState(nextLocale)
-    },
-    onSetTheme: setThemeMode,
-    orderedTabs,
-    theme: themeMode
+    orderedTabs
   }
 
   return (

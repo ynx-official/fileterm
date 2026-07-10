@@ -16,13 +16,13 @@ import {
 import { LiveFtpSessionController, LiveSshSessionController } from '../session-controllers.js'
 import { appWarn } from '../app-logger.js'
 import { resolveShellFileAccess } from '../sessions/shell-cwd-integration.js'
+import { TerminalOutputBatcher } from './terminal-output-batcher.js'
 
 export type LiveSessionController = LiveSshSessionController | LiveFtpSessionController
 
 export const REMOTE_SESSION_DISCONNECTED_MESSAGE = '会话已断开，请先重连。'
 
 export class WorkspaceSessionRuntime {
-  private static readonly TERMINAL_OUTPUT_FLUSH_INTERVAL_MS = 16
   private readonly sessions = new Map<string, SessionSnapshot>()
   private readonly liveControllers = new Map<string, LiveSessionController>()
   private readonly metricsPollers = new Map<string, ReturnType<typeof setInterval>>()
@@ -38,8 +38,7 @@ export class WorkspaceSessionRuntime {
     }
   >()
   private readonly remoteFileOperations = new Map<string, Promise<void>>()
-  private readonly terminalOutputBuffers = new Map<string, string[]>()
-  private readonly terminalOutputTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private readonly terminalOutputBatcher: TerminalOutputBatcher
   private readonly metricsPausedRemoteFileOperations = new Set<string>()
   private readonly shellLoginUsers = new Map<string, string>()
   private readonly pendingSshInteractions = new Map<
@@ -59,7 +58,11 @@ export class WorkspaceSessionRuntime {
       rememberTrustedHostFingerprint(profileId: string, fingerprint: string): Promise<void>
       onTabDisconnected?(tabId: string, summary: string): void | Promise<void>
     }
-  ) {}
+  ) {
+    this.terminalOutputBatcher = new TerminalOutputBatcher((tabId, chunk) => {
+      this.sendToTab(tabId, 'terminal:data', { tabId, chunk })
+    })
+  }
 
   list() {
     return Object.fromEntries(
@@ -99,9 +102,9 @@ export class WorkspaceSessionRuntime {
 
   async teardown(tabId: string) {
     this.stopMetricsPolling(tabId)
-    this.flushTerminalOutput(tabId)
+    this.terminalOutputBatcher.flush(tabId)
     await this.liveControllers.get(tabId)?.disconnect()
-    this.flushTerminalOutput(tabId)
+    this.terminalOutputBatcher.flush(tabId)
     this.liveControllers.delete(tabId)
     this.shellLoginUsers.delete(tabId)
     this.remoteFileOperations.delete(tabId)
@@ -111,10 +114,10 @@ export class WorkspaceSessionRuntime {
 
   async disconnect(tabId: string) {
     this.stopMetricsPolling(tabId)
-    this.flushTerminalOutput(tabId)
+    this.terminalOutputBatcher.flush(tabId)
     const controller = this.liveControllers.get(tabId)
     await controller?.disconnect()
-    this.flushTerminalOutput(tabId)
+    this.terminalOutputBatcher.flush(tabId)
     const current = this.sessions.get(tabId)
     if (current && controller?.type === 'ssh') {
       this.sessions.set(tabId, {
@@ -136,9 +139,7 @@ export class WorkspaceSessionRuntime {
       pending.reject(new Error('Workspace runtime is shutting down'))
     }
 
-    for (const tabId of this.terminalOutputBuffers.keys()) {
-      this.flushTerminalOutput(tabId)
-    }
+    this.terminalOutputBatcher.flushAll()
 
     const controllerEntries = [...this.liveControllers.entries()]
     this.liveControllers.clear()
@@ -153,11 +154,7 @@ export class WorkspaceSessionRuntime {
       })
     )
 
-    for (const timer of this.terminalOutputTimers.values()) {
-      clearTimeout(timer)
-    }
-    this.terminalOutputTimers.clear()
-    this.terminalOutputBuffers.clear()
+    this.terminalOutputBatcher.dispose()
     this.shellLoginUsers.clear()
   }
 
@@ -246,7 +243,7 @@ export class WorkspaceSessionRuntime {
         (request) => this.requestSshInteraction(tabId, profile, request),
         (fingerprint) => this.options.rememberTrustedHostFingerprint(profile.id, fingerprint),
         (chunk) => {
-          this.queueTerminalOutput(tabId, chunk)
+          this.terminalOutputBatcher.queue(tabId, chunk)
         },
         (cwd) => {
           void this.handleShellCwdChanged(tabId, cwd).catch(() => undefined)
@@ -260,7 +257,7 @@ export class WorkspaceSessionRuntime {
           })
         },
         (summary, transcript, connected) => {
-          this.flushTerminalOutput(tabId)
+          this.terminalOutputBatcher.flush(tabId)
           const current = this.sessions.get(tabId)
           if (!current) {
             return
@@ -404,7 +401,7 @@ export class WorkspaceSessionRuntime {
         }
       }
     } catch (error) {
-      this.flushTerminalOutput(tabId)
+      this.terminalOutputBatcher.flush(tabId)
       if (this.liveControllers.get(tabId) === controller) {
         this.liveControllers.delete(tabId)
       }
@@ -999,42 +996,6 @@ export class WorkspaceSessionRuntime {
       this.pendingSshInteractions.delete(requestId)
       pending.reject(error)
     }
-  }
-
-  private queueTerminalOutput(tabId: string, chunk: string) {
-    const chunks = this.terminalOutputBuffers.get(tabId)
-    if (chunks) {
-      chunks.push(chunk)
-    } else {
-      this.terminalOutputBuffers.set(tabId, [chunk])
-    }
-
-    if (this.terminalOutputTimers.has(tabId)) {
-      return
-    }
-
-    const timer = setTimeout(() => {
-      this.terminalOutputTimers.delete(tabId)
-      this.flushTerminalOutput(tabId)
-    }, WorkspaceSessionRuntime.TERMINAL_OUTPUT_FLUSH_INTERVAL_MS)
-    this.terminalOutputTimers.set(tabId, timer)
-  }
-
-  private flushTerminalOutput(tabId: string) {
-    const timer = this.terminalOutputTimers.get(tabId)
-    if (timer) {
-      clearTimeout(timer)
-      this.terminalOutputTimers.delete(tabId)
-    }
-
-    const chunks = this.terminalOutputBuffers.get(tabId)
-    if (!chunks?.length) {
-      return
-    }
-    this.terminalOutputBuffers.delete(tabId)
-
-    const chunk = chunks.length === 1 ? chunks[0]! : chunks.join('')
-    this.sendToTab(tabId, 'terminal:data', { tabId, chunk })
   }
 
   private withLiveTerminalTranscript(tabId: string, snapshot: SessionSnapshot) {

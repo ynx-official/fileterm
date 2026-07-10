@@ -1,4 +1,10 @@
-import type { ConnectionProfile, ConnectionFolder, CommandFolder, CommandTemplate } from '@fileterm/core'
+import type {
+  CommandFolder,
+  CommandTemplate,
+  CommandTemplateInput,
+  ConnectionFolder,
+  ConnectionProfile
+} from '@fileterm/core'
 import { useState } from 'react'
 import { t } from '../../i18n'
 import { OverviewPage } from './OverviewPage'
@@ -6,7 +12,7 @@ import { QuickLinksPage } from './QuickLinksPage'
 import { ConnectionManagerModal } from '../connections/ConnectionManagerModal'
 import { CommandManagerModal } from '../commands/CommandManagerModal'
 import { SettingsModal } from '../settings/SettingsModal'
-import { TabBar } from '../layout/TabBar'
+import { TabBar, type TabBarProps } from '../layout/TabBar'
 
 export function HomeWorkspace({
   profiles,
@@ -52,8 +58,8 @@ export function HomeWorkspace({
   onDeleteConnectionFolder(folderId: string): void
   onUpdateConnectionFolder(folderId: string, updates: Partial<ConnectionFolder>): void
   onUpdateConnectionOrder(id: string, newParentId: string | undefined, newOrder: number): void
-  onCreateCommand(input: any): void
-  onUpdateCommand(commandId: string, input: any): void
+  onCreateCommand(input: CommandTemplateInput): void
+  onUpdateCommand(commandId: string, input: CommandTemplateInput): void
   onDeleteCommand(commandId: string): void
   onCreateCommandFolder(name: string): void
   onDeleteCommandFolder(folderId: string): void
@@ -63,7 +69,7 @@ export function HomeWorkspace({
   onSetLocale(value: 'zhCN' | 'enUS'): void
   onOpenLogsDirectory(): void
   isSidebarCollapsed: boolean
-  tabBarProps: any
+  tabBarProps: Omit<TabBarProps, 'homeBrandContent'>
   isResizingSidebar: boolean
   onResizeStart(): void
 }) {

@@ -66,12 +66,15 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
   private suppressEcho = false
   private echoBuf = ''
   private shellSetupReleaseTimer?: ReturnType<typeof setTimeout>
+  private lastInjectTime = 0
   private fileAccessMode: 'user' | 'root' = 'user'
   private shellUser?: string
   private sudoUser = 'root'
   private sudoPassword?: string
+  private sudoPromptWindow = ''
   private awaitingSudoPasswordInput = false
   private pendingSudoPasswordInput = ''
+  private recentKeystrokes = ''
   private metrics?: SystemMetrics
   private metricsPlatform?: RemoteSystemPlatform
   private readonly acceptedHostFingerprints = new Set<string>()
@@ -218,12 +221,11 @@ export class LiveSshSessionController extends BaseFileSessionController implemen
                 // We inject the setup script silently to query the actual user.
                 const strippedText = text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').trimEnd()
                 const now = Date.now()
-                const lastInjectTime = (this as any)._lastInjectTime || 0
                 if (strippedText.endsWith('#') && !this.suppressEcho) {
                   // Only inject if we think we aren't root AND it's been a while since the last injection
                   // to prevent infinite loops (because the injected script itself triggers a new prompt)
-                  if (this.shellUser !== 'root' && now - lastInjectTime > 2000) {
-                    ;(this as any)._lastInjectTime = now
+                  if (this.shellUser !== 'root' && now - this.lastInjectTime > 2000) {
+                    this.lastInjectTime = now
                     this.injectShellSetup(stream)
                   }
                 }
@@ -2268,12 +2270,11 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
           void handlePrivilegeError(stderr)
         })
 
-        readStream.on('data', (chunk: any) => {
-          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
-          transferredBytes += buffer.byteLength
+        readStream.on('data', (chunk: Buffer) => {
+          transferredBytes += chunk.byteLength
           onProgress?.(transferredBytes)
           try {
-            if (!stream.write(buffer)) {
+            if (!stream.write(chunk)) {
               readStream.pause()
             }
           } catch (writeError) {
@@ -2380,9 +2381,8 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
   }
 
   private trackSudoPromptFromTerminal(text: string) {
-    const window = (this as any)._sudoWindow || ''
-    const newWindow = (window + text).slice(-200)
-    ;(this as any)._sudoWindow = newWindow
+    const newWindow = (this.sudoPromptWindow + text).slice(-200)
+    this.sudoPromptWindow = newWindow
     const normalized = newWindow.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '')
 
     // Only test the newly appended part + a little overlap, OR just check if the pattern appears
@@ -2393,7 +2393,7 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
       this.pendingSudoPasswordInput = ''
 
       // Attempt to recover blind-typed password from recent keystrokes
-      const recentKeys = (this as any)._recentKeystrokes || ''
+      const recentKeys = this.recentKeystrokes
       // recentKeys might look like "sudo -i\rmypassword\r" or "sudo -i\rmypassword"
       // If it contains a \r after the command, the text between the last \r and the second to last \r might be the password.
       const parts = recentKeys.split(/[\r\n]/)
@@ -2432,12 +2432,12 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
 
   private captureSudoPasswordInput(data: string) {
     // Keep a buffer of recent keystrokes to support blind typing recovery
-    let recentKeys = (this as any)._recentKeystrokes || ''
+    let recentKeys = this.recentKeystrokes
     recentKeys += data
     if (recentKeys.length > 200) {
       recentKeys = recentKeys.slice(-200)
     }
-    ;(this as any)._recentKeystrokes = recentKeys
+    this.recentKeystrokes = recentKeys
 
     if (!this.awaitingSudoPasswordInput) {
       return
@@ -2625,8 +2625,11 @@ printf "%s\\n" ${shellQuote(outputEndMarker)}
   private resetPrivilegedFileAccess() {
     this.fileAccessMode = 'user'
     this.sudoPassword = undefined
+    this.sudoPromptWindow = ''
     this.awaitingSudoPasswordInput = false
     this.pendingSudoPasswordInput = ''
+    this.recentKeystrokes = ''
+    this.lastInjectTime = 0
   }
 }
 

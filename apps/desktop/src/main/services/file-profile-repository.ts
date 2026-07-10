@@ -515,7 +515,7 @@ export class FileProfileRepository implements ProfileRepository {
     })
 
     if (modified) {
-      void this.writeProfiles(healedProfiles).catch(() => undefined)
+      await this.writeProfiles(healedProfiles)
     }
 
     return healedProfiles
