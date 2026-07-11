@@ -19,6 +19,7 @@
   <p>
     SSH terminal, SFTP files, FTP files, multi-tab workspace, and transfer center all in one focused desktop client.
   </p>
+<img width="1392" height="932" alt="c45504d7110d704a09f65e62864a6145" src="https://github.com/user-attachments/assets/06f14b5d-d722-456f-ac90-342a19b6915c" />
 
   <p>
     <kbd><a href="#中文">中文</a></kbd>
