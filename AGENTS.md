@@ -180,22 +180,23 @@ CI（`.github/workflows/ci.yml`）：push/PR 时自动执行 typecheck → lint 
 ### 发版 SOP
 
 ```
-# 1. main 上开发完，CI 绿
-# 2. 改版本号
-vim package.json   # 只改 version 字段
-npm run sync:version
-git commit -am "chore: 版本号升级到 x.x.x"
-git push origin main
-
-# 3. 切 release 分支
+# 1. 在功能分支完成开发和版本号更新，提 PR 合入 main，确认 CI 全绿
+# 2. 从已合并的 main 创建仅用于打包发布的 release 分支
+git checkout main
+git pull origin main
 git checkout -b release/x.x.x
 git push origin release/x.x.x
 
-# 4. 打 tag → 自动触发 CI 构建 + 发布 Release
+# 3. 仅在 release 分支对应提交打 tag，自动触发构建和 GitHub Release
 git tag vx.x.x
 git push origin vx.x.x
+```
 
-# 5. 发完后提 PR 合回 main
+版本号更新必须在合入 `main` 前完成：
+
+```
+# 只改根 package.json 的 version 字段
+npm run sync:version
 ```
 
 **关键约束**：tag 必须指向 `release/*` 分支上的 commit，否则 `validate-release-tag` 步骤会拒绝构建。

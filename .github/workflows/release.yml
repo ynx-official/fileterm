@@ -181,7 +181,11 @@ jobs:
           fi
 
           echo "Creating release for ${TAG}..."
+          release_flags=()
+          if [[ "${TAG}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
           gh release create "${TAG}" -R "${REPO}" \
-            --prerelease \
+            "${release_flags[@]}" \
             --generate-notes \
             **/*.dmg **/*.zip **/*.exe
