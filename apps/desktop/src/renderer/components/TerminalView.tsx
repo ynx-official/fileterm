@@ -139,6 +139,11 @@ export const TerminalView = memo(function TerminalView({
   const lastTerminalOutputAtRef = useRef(0)
   const awaitingCommandCompletionRef = useRef(false)
   const pendingPromptResizeRef = useRef(false)
+  const tabIdRef = useRef(tabId)
+  const onStatusRef = useRef(onStatus)
+  const activeTerminalTabIdRef = useRef<string | null>(null)
+  tabIdRef.current = tabId
+  onStatusRef.current = onStatus
   const [hasSelection, setHasSelection] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [findOpen, setFindOpen] = useState(false)
@@ -503,7 +508,13 @@ export const TerminalView = memo(function TerminalView({
       return
     }
 
-    void window.fileterm?.resizeTerminal(tabId, nextSize.cols, nextSize.rows, nextSize.width, nextSize.height)
+    void window.fileterm?.resizeTerminal(
+      tabIdRef.current,
+      nextSize.cols,
+      nextSize.rows,
+      nextSize.width,
+      nextSize.height
+    )
   }
 
   useEffect(() => {
@@ -627,7 +638,7 @@ export const TerminalView = memo(function TerminalView({
           ? await window.fileterm.readClipboardText()
           : ((await navigator.clipboard?.readText?.()) ?? '')
         const encoded = encodeBase64Utf8(clipboardText)
-        await window.fileterm?.writeTerminal(tabId, `\u001b]52;${parsed.target || 'c'};${encoded}\u0007`)
+        await window.fileterm?.writeTerminal(tabIdRef.current, `\u001b]52;${parsed.target || 'c'};${encoded}\u0007`)
         return true
       }
 
@@ -646,9 +657,11 @@ export const TerminalView = memo(function TerminalView({
 
     syncTerminalSize(fitAddon, terminal)
 
-    if (bootTextRef.current) {
-      replaceTerminalWithTranscript(terminal, bootTextRef.current)
+    bootTextRef.current = bootText
+    if (bootText) {
+      replaceTerminalWithTranscript(terminal, bootText)
     }
+    activeTerminalTabIdRef.current = tabIdRef.current
 
     const resize = (force = false, freezeCols = false, preserveVisibleBuffer = false) => {
       syncTerminalSize(fitAddon, terminal, { force, freezeCols, preserveVisibleBuffer })
@@ -708,7 +721,7 @@ export const TerminalView = memo(function TerminalView({
       }
       clearEphemeralHighlight()
       setContextMenu(null)
-      void window.fileterm?.writeTerminal(tabId, data)
+      void window.fileterm?.writeTerminal(tabIdRef.current, data)
     })
 
     const onSelectionDispose = terminal.onSelectionChange(() => {
@@ -716,7 +729,7 @@ export const TerminalView = memo(function TerminalView({
     })
 
     const offData = window.fileterm?.onTerminalData(({ tabId: nextTabId, chunk }) => {
-      if (nextTabId === tabId) {
+      if (nextTabId === tabIdRef.current) {
         lastTerminalOutputAtRef.current = Date.now()
         const shouldTrimHydratedBacklog = Date.now() < suppressHydratedChunksUntilRef.current
         if (shouldTrimHydratedBacklog) {
@@ -741,8 +754,8 @@ export const TerminalView = memo(function TerminalView({
     })
 
     const offState = window.fileterm?.onTerminalState(({ tabId: nextTabId, summary, transcript, connected }) => {
-      if (nextTabId === tabId) {
-        onStatus?.(localizeTerminalText(summary))
+      if (nextTabId === tabIdRef.current) {
+        onStatusRef.current?.(localizeTerminalText(summary))
         const isDisconnecting = wasConnectedRef.current && !connected
         if (isDisconnecting) {
           preserveVisibleBufferRef.current = true
@@ -884,8 +897,8 @@ export const TerminalView = memo(function TerminalView({
     window.addEventListener('fileterm:terminal-find', handleTerminalFind)
 
     // Ask the main process for the actual PTY size once the terminal is mounted.
-    if (!bootedTabs.current.has(tabId)) {
-      bootedTabs.current.add(tabId)
+    if (!bootedTabs.current.has(tabIdRef.current)) {
+      bootedTabs.current.add(tabIdRef.current)
       resize()
     }
 
@@ -935,7 +948,33 @@ export const TerminalView = memo(function TerminalView({
       terminalRef.current = null
       terminal.dispose()
     }
-  }, [isMac, onStatus, tabId])
+  }, [isMac])
+
+  useEffect(() => {
+    bootTextRef.current = bootText
+    if (activeTerminalTabIdRef.current === tabId) {
+      return
+    }
+
+    activeTerminalTabIdRef.current = tabId
+    const terminal = terminalRef.current
+    const host = hostRef.current
+    if (!terminal || !host) {
+      return
+    }
+
+    wasConnectedRef.current = connected
+    preserveVisibleBufferRef.current = false
+    awaitingCommandCompletionRef.current = false
+    pendingPromptResizeRef.current = false
+    replaceTerminalWithTranscript(terminal, bootText)
+    lastSyncedSizeRef.current = null
+
+    const { width, height } = host.getBoundingClientRect()
+    if (width > 0 && height > 0) {
+      void window.fileterm?.resizeTerminal(tabId, terminal.cols, terminal.rows, Math.floor(width), Math.floor(height))
+    }
+  }, [bootText, connected, tabId])
 
   useEffect(() => {
     bootTextRef.current = bootText

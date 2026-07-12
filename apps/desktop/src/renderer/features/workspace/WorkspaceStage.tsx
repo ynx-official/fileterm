@@ -10,7 +10,7 @@ import type {
   SessionSnapshot,
   WorkspaceTab
 } from '@fileterm/core'
-import type { DragEvent } from 'react'
+import type { Dispatch, DragEvent, SetStateAction } from 'react'
 import type { SendScope, SessionSendTarget } from '../common/session-send-targets'
 import type { TabBarProps } from '../layout/TabBar'
 import { SystemInfoWorkspace } from '../system/SystemInfoWorkspace'
@@ -28,6 +28,9 @@ export function WorkspaceStage({
   activeProfile,
   activeSession,
   activeTab,
+  filePanelHeight,
+  onFilePanelHeightChange,
+  shouldAlignFilePanelOnMount,
   sendTargets,
   terminalDockSendScope,
   terminalDockSelectedTabIds,
@@ -102,6 +105,9 @@ export function WorkspaceStage({
   activeProfile: ConnectionProfile | null
   activeSession: SessionSnapshot | null
   activeTab: WorkspaceTab | null
+  filePanelHeight: number
+  onFilePanelHeightChange: Dispatch<SetStateAction<number>>
+  shouldAlignFilePanelOnMount: boolean
   sendTargets: SessionSendTarget[]
   terminalDockSendScope: SendScope
   terminalDockSelectedTabIds: string[]
@@ -184,9 +190,11 @@ export function WorkspaceStage({
   if (activeTab && activeSession && !activeLocalTab) {
     return (
       <SessionWorkspace
-        key={activeTab.id}
         activeSession={activeSession}
         activeTab={activeTab}
+        filePanelHeight={filePanelHeight}
+        onFilePanelHeightChange={onFilePanelHeightChange}
+        shouldAlignFilePanelOnMount={shouldAlignFilePanelOnMount}
         sendTargets={sendTargets}
         terminalDockSendScope={terminalDockSendScope}
         terminalDockSelectedTabIds={terminalDockSelectedTabIds}

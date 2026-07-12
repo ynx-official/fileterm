@@ -978,6 +978,9 @@
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
+}
+
+.workspace-stage-transition.is-transitioning > * {
   animation: workspace-stage-fade-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 

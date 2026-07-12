@@ -1,4 +1,15 @@
-import { Suspense, lazy, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+  type SetStateAction
+} from 'react'
 import {
   type CommandExecutionOptions,
   type ConnectionFormMode,
@@ -18,6 +29,15 @@ import { ConnectionModal } from './features/connections/ConnectionModal'
 const FileEditorModal = lazy(() =>
   import('./features/files/FileEditorModal').then((m) => ({ default: m.FileEditorModal }))
 )
+
+function retainOpenTabUiState<T>(state: Record<string, T>, openTabIds: Set<string>) {
+  const entries = Object.entries(state)
+  if (entries.every(([tabId]) => openTabIds.has(tabId))) {
+    return state
+  }
+
+  return Object.fromEntries(entries.filter(([tabId]) => openTabIds.has(tabId)))
+}
 import { CloseButton } from './features/common/CloseButton'
 import { ConfirmActionDialog } from './features/common/ConfirmActionDialog'
 import type { SendScope } from './features/common/session-send-targets'
@@ -92,12 +112,14 @@ export function App() {
 
   const [error, setError] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState(false)
+  const [isWorkspaceTransitionActive, setIsWorkspaceTransitionActive] = useState(true)
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readInitialTheme(searchParams))
   const [locale, setLocaleState] = useState<AppLocale>(() => readInitialLocale(searchParams))
   const [isFileEditorDiscardConfirmOpen, setIsFileEditorDiscardConfirmOpen] = useState(false)
 
   const [sidebarWidth, setSidebarWidth] = useState(214)
-  const [isWorkspaceFocusMode, setIsWorkspaceFocusMode] = useState(false)
+  const [filePanelHeights, setFilePanelHeights] = useState<Record<string, number>>({})
+  const [workspaceFocusModes, setWorkspaceFocusModes] = useState<Record<string, boolean>>({})
   const [isResizingSidebar, setIsResizingSidebar] = useState(false)
 
   const desktopApi = window.fileterm
@@ -189,6 +211,57 @@ export function App() {
     onCloseCurrentWindow: closeCurrentWindow,
     onRequestQuit: requestQuitApp
   })
+
+  const activeFilePanelHeight = activeTab ? (filePanelHeights[activeTab.id] ?? 218) : 218
+  const shouldAlignFilePanelOnMount = activeTab
+    ? !Object.prototype.hasOwnProperty.call(filePanelHeights, activeTab.id)
+    : false
+  const isWorkspaceFocusMode = activeTab ? (workspaceFocusModes[activeTab.id] ?? false) : false
+  const activeTabId = activeTab?.id ?? null
+  const setActiveFilePanelHeight = useCallback(
+    (next: SetStateAction<number>) => {
+      if (!activeTabId) {
+        return
+      }
+
+      const tabId = activeTabId
+      setFilePanelHeights((currentHeights) => {
+        const currentHeight = currentHeights[tabId] ?? 218
+        const nextHeight = typeof next === 'function' ? next(currentHeight) : next
+        if (currentHeight === nextHeight) {
+          return currentHeights
+        }
+        return { ...currentHeights, [tabId]: nextHeight }
+      })
+    },
+    [activeTabId]
+  )
+
+  useEffect(() => {
+    setIsWorkspaceTransitionActive(false)
+    const frame = window.requestAnimationFrame(() => {
+      setIsWorkspaceTransitionActive(true)
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeWorkspaceOrderKey])
+
+  useEffect(() => {
+    const openTabIds = new Set(visibleWorkspaceTabs.map((tab) => tab.id))
+    setFilePanelHeights((currentHeights) => retainOpenTabUiState(currentHeights, openTabIds))
+    setWorkspaceFocusModes((currentModes) => retainOpenTabUiState(currentModes, openTabIds))
+  }, [visibleWorkspaceTabs])
+
+  useEffect(() => {
+    if (!activeTabId || isHomeWorkspaceVisible) {
+      return
+    }
+
+    setIsSystemSidebarCollapsed(isWorkspaceFocusMode)
+    if (!isWorkspaceFocusMode) {
+      setSidebarWidth(214)
+    }
+  }, [activeTabId, isHomeWorkspaceVisible, isWorkspaceFocusMode, setIsSystemSidebarCollapsed])
 
   // 3. Workspace Modals Hook
   const {
@@ -969,7 +1042,9 @@ export function App() {
     },
     onToggleWorkspaceFocus: () => {
       const nextFocusMode = !isWorkspaceFocusMode
-      setIsWorkspaceFocusMode(nextFocusMode)
+      if (activeTab) {
+        setWorkspaceFocusModes((currentModes) => ({ ...currentModes, [activeTab.id]: nextFocusMode }))
+      }
       setIsSystemSidebarCollapsed(nextFocusMode)
       if (!nextFocusMode) {
         setSidebarWidth(214)
@@ -1019,8 +1094,8 @@ export function App() {
           ) : null}
           <div className="workspace-stage">
             <div
-              key={activeWorkspaceOrderKey}
-              className="workspace-stage-transition"
+              key={activeLocalTab ? activeWorkspaceOrderKey : 'session-workspace'}
+              className={`workspace-stage-transition ${isWorkspaceTransitionActive ? 'is-transitioning' : ''}`}
               data-nav-direction={workspaceNavDirection}
             >
               <WorkspaceStage
@@ -1029,6 +1104,9 @@ export function App() {
                 activeProfile={activeProfile}
                 activeSession={activeSession}
                 activeTab={activeTab}
+                filePanelHeight={activeFilePanelHeight}
+                onFilePanelHeightChange={setActiveFilePanelHeight}
+                shouldAlignFilePanelOnMount={shouldAlignFilePanelOnMount}
                 sendTargets={sessionSendTargets}
                 terminalDockSendScope={activeTerminalDockSendState.scope}
                 terminalDockSelectedTabIds={activeTerminalDockSendState.selectedTabIds}

@@ -12,6 +12,10 @@
   grid-template-rows: 1fr;
 }
 
+.session-workspace.is-file-panel-dragging {
+  transition: none;
+}
+
 .terminal-area {
   position: relative;
   min-height: 0;
