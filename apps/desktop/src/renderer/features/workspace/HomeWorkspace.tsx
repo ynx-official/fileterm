@@ -141,7 +141,11 @@ export function HomeWorkspace({
 
   const updateAction = () => {
     if (updateStatus?.state === 'available') {
-      void desktopApi?.downloadUpdate()
+      if (updateStatus.updateMode === 'release-page') {
+        void desktopApi?.openExternalUrl(updateStatus.releaseUrl ?? 'https://github.com/St0ff3l/fileterm/releases')
+      } else {
+        void desktopApi?.downloadUpdate()
+      }
     } else if (updateStatus?.state === 'downloaded') {
       void desktopApi?.installUpdate()
     } else if (updateStatus?.state === 'error') {
@@ -154,7 +158,7 @@ export function HomeWorkspace({
       ? {
           icon: 'system_update',
           label: t.updateAvailableShort.replace('{version}', updateStatus.availableVersion ?? '—'),
-          title: t.downloadUpdate
+          title: updateStatus.updateMode === 'release-page' ? t.openReleasePage : t.downloadUpdate
         }
       : updateStatus?.state === 'downloading'
         ? {

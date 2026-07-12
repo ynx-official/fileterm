@@ -244,10 +244,18 @@ export function SettingsModal({
                   {updateStatus?.state === 'available' ? (
                     <button
                       className="primary-button compact"
-                      onClick={() => void desktopApi?.downloadUpdate()}
+                      onClick={() => {
+                        if (updateStatus.updateMode === 'release-page') {
+                          void desktopApi?.openExternalUrl(
+                            updateStatus.releaseUrl ?? 'https://github.com/St0ff3l/fileterm/releases'
+                          )
+                        } else {
+                          void desktopApi?.downloadUpdate()
+                        }
+                      }}
                       type="button"
                     >
-                      {t.downloadUpdate}
+                      {updateStatus.updateMode === 'release-page' ? t.openReleasePage : t.downloadUpdate}
                     </button>
                   ) : null}
                   {updateStatus?.state === 'downloaded' ? (
@@ -333,7 +341,10 @@ export function SettingsModal({
 
 function getUpdateStatusLabel(status: AppUpdateStatus | null, labels: typeof t) {
   if (!status) return labels.updateStatusIdle
-  if (status.state === 'available') return labels.updateAvailable.replace('{version}', status.availableVersion ?? '—')
+  if (status.state === 'available') {
+    const label = status.updateMode === 'release-page' ? labels.updateAvailableManual : labels.updateAvailable
+    return label.replace('{version}', status.availableVersion ?? '—')
+  }
   if (status.state === 'downloaded') return labels.updateDownloaded.replace('{version}', status.availableVersion ?? '—')
   if (status.state === 'downloading')
     return labels.updateDownloading.replace('{progress}', String(status.progress ?? 0))
