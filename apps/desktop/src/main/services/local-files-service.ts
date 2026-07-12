@@ -3,6 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import type { LocalFileItem, PermissionChangeOptions } from '@fileterm/core'
 import { decodeBuffer, encodeText } from './text-encoding.js'
+import { appError, appLog, appWarn } from './app-logger.js'
 
 function formatSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -29,22 +30,43 @@ export class LocalFilesService {
   readonly initialPath = os.homedir()
 
   async listDirectory(dirPath = this.initialPath): Promise<{ path: string; items: LocalFileItem[] }> {
-    const entries = await readdir(dirPath, { withFileTypes: true })
-    const rows = await Promise.all(
-      entries.map(async (entry) => {
-        const fullPath = path.join(dirPath, entry.name)
-        const info = await stat(fullPath)
-        return {
-          path: fullPath,
-          name: entry.name,
-          type: entry.isDirectory() ? 'folder' : 'file',
-          modified: formatDate(info.mtime),
-          size: entry.isDirectory() ? '-' : formatSize(info.size),
-          permission: formatPermissionBits(info.mode, entry.isDirectory()),
-          ownerGroup: typeof info.uid === 'number' && typeof info.gid === 'number' ? `${info.uid}/${info.gid}` : ''
-        } satisfies LocalFileItem
-      })
-    )
+    appLog('[FileTerm][Local] Listing directory', { path: dirPath, home: this.initialPath, platform: process.platform })
+
+    let entries
+    try {
+      entries = await readdir(dirPath, { withFileTypes: true })
+    } catch (error) {
+      appError('[FileTerm][Local] Failed to read directory', { path: dirPath, error: describeFsError(error) })
+      throw error
+    }
+
+    const rows: LocalFileItem[] = (
+      (await Promise.all(
+        entries.map(async (entry) => {
+          const fullPath = path.join(dirPath, entry.name)
+          try {
+            const info = await stat(fullPath)
+            return {
+              path: fullPath,
+              name: entry.name,
+              type: entry.isDirectory() ? 'folder' : 'file',
+              modified: formatDate(info.mtime),
+              size: entry.isDirectory() ? '-' : formatSize(info.size),
+              permission: formatPermissionBits(info.mode, entry.isDirectory()),
+              ownerGroup: typeof info.uid === 'number' && typeof info.gid === 'number' ? `${info.uid}/${info.gid}` : ''
+            } satisfies LocalFileItem
+          } catch (error) {
+            appWarn('[FileTerm][Local] Skipped inaccessible directory entry', {
+              directory: dirPath,
+              path: fullPath,
+              name: entry.name,
+              error: describeFsError(error)
+            })
+            return null
+          }
+        })
+      )) as Array<LocalFileItem | null>
+    ).filter((item): item is LocalFileItem => item !== null)
 
     rows.sort((a, b) => {
       if (a.type !== b.type) {
@@ -60,75 +82,107 @@ export class LocalFilesService {
   }
 
   async readFile(filePath: string, encoding = 'utf-8'): Promise<string> {
-    const buffer = await readFile(filePath)
-    return decodeBuffer(buffer, encoding)
+    return this.withLocalLog('Read file', { path: filePath, encoding }, async () => {
+      const buffer = await readFile(filePath)
+      return decodeBuffer(buffer, encoding)
+    })
   }
 
   async writeFile(filePath: string, content: string, encoding = 'utf-8'): Promise<void> {
-    await writeFile(filePath, encodeText(content, encoding))
+    await this.withLocalLog('Write file', { path: filePath, encoding, bytes: Buffer.byteLength(content) }, () =>
+      writeFile(filePath, encodeText(content, encoding))
+    )
   }
 
   async createDirectory(dirPath: string, name: string): Promise<void> {
-    await mkdir(path.join(dirPath, name), { recursive: true })
+    const targetPath = path.join(dirPath, name)
+    await this.withLocalLog('Create directory', { directory: dirPath, name, path: targetPath }, async () => {
+      await mkdir(targetPath, { recursive: true })
+    })
   }
 
   async createFile(dirPath: string, name: string): Promise<void> {
     const targetPath = path.join(dirPath, name)
-    await mkdir(path.dirname(targetPath), { recursive: true })
-    await writeFile(targetPath, '', 'utf8')
+    return this.withLocalLog('Create file', { directory: dirPath, name, path: targetPath }, async () => {
+      await mkdir(path.dirname(targetPath), { recursive: true })
+      await writeFile(targetPath, '', 'utf8')
+    })
   }
 
   async copyPath(sourcePath: string, destinationPath: string): Promise<void> {
-    if (sourcePath === destinationPath) {
-      return
-    }
-    await mkdir(path.dirname(destinationPath), { recursive: true })
-    await cp(sourcePath, destinationPath, {
-      recursive: true,
-      errorOnExist: true,
-      force: false,
-      preserveTimestamps: true
+    return this.withLocalLog('Copy path', { sourcePath, destinationPath }, async () => {
+      if (sourcePath === destinationPath) {
+        return
+      }
+      await mkdir(path.dirname(destinationPath), { recursive: true })
+      await cp(sourcePath, destinationPath, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+        preserveTimestamps: true
+      })
     })
   }
 
   async movePath(sourcePath: string, destinationPath: string): Promise<void> {
-    if (sourcePath === destinationPath) {
-      return
-    }
-    await mkdir(path.dirname(destinationPath), { recursive: true })
-    try {
-      await rename(sourcePath, destinationPath)
-    } catch (error) {
-      if (!isCrossDeviceRenameError(error)) {
-        throw error
+    return this.withLocalLog('Move path', { sourcePath, destinationPath }, async () => {
+      if (sourcePath === destinationPath) {
+        return
       }
-      await this.copyPath(sourcePath, destinationPath)
-      await rm(sourcePath, { recursive: true, force: true })
-    }
+      await mkdir(path.dirname(destinationPath), { recursive: true })
+      try {
+        await rename(sourcePath, destinationPath)
+      } catch (error) {
+        if (!isCrossDeviceRenameError(error)) {
+          throw error
+        }
+        await this.copyPath(sourcePath, destinationPath)
+        await rm(sourcePath, { recursive: true, force: true })
+      }
+    })
   }
 
   async renamePath(targetPath: string, newName: string): Promise<void> {
-    await rename(targetPath, path.join(path.dirname(targetPath), newName))
+    const destinationPath = path.join(path.dirname(targetPath), newName)
+    return this.withLocalLog('Rename path', { path: targetPath, newName, destinationPath }, () =>
+      rename(targetPath, destinationPath)
+    )
   }
 
   async deletePath(targetPath: string): Promise<void> {
-    await rm(targetPath, { recursive: true, force: true })
+    return this.withLocalLog('Delete path', { path: targetPath }, () =>
+      rm(targetPath, { recursive: true, force: true })
+    )
   }
 
   async changePermissions(targetPath: string, options: PermissionChangeOptions): Promise<void> {
-    const parsedMode = parseMode(options.mode)
-    await chmod(targetPath, parsedMode)
+    return this.withLocalLog('Change permissions', { path: targetPath, options }, async () => {
+      const parsedMode = parseMode(options.mode)
+      await chmod(targetPath, parsedMode)
 
-    if (!options.recursive) {
-      return
+      if (!options.recursive) {
+        return
+      }
+
+      const targetInfo = await stat(targetPath)
+      if (!targetInfo.isDirectory()) {
+        return
+      }
+
+      await this.applyPermissionsRecursively(targetPath, parsedMode, options.applyTo ?? 'all')
+    })
+  }
+
+  private async withLocalLog<T>(operation: string, details: Record<string, unknown>, action: () => Promise<T>) {
+    appLog(`[FileTerm][Local] ${operation} started`, details)
+    try {
+      const result = await action()
+      appLog(`[FileTerm][Local] ${operation} completed`, details)
+      return result
+    } catch (error) {
+      appError(`[FileTerm][Local] ${operation} failed`, { ...details, error: describeFsError(error) })
+      throw error
     }
-
-    const targetInfo = await stat(targetPath)
-    if (!targetInfo.isDirectory()) {
-      return
-    }
-
-    await this.applyPermissionsRecursively(targetPath, parsedMode, options.applyTo ?? 'all')
   }
 
   private async applyPermissionsRecursively(
@@ -151,6 +205,23 @@ export class LocalFilesService {
         await this.applyPermissionsRecursively(fullPath, mode, applyTo)
       }
     }
+  }
+}
+
+function describeFsError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return error
+  }
+
+  const filesystemError = error as NodeJS.ErrnoException
+  return {
+    name: error.name,
+    message: error.message,
+    code: filesystemError.code,
+    errno: filesystemError.errno,
+    syscall: filesystemError.syscall,
+    path: filesystemError.path,
+    stack: error.stack
   }
 }
 

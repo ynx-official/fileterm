@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import type { OpenDialogOptions } from 'electron'
 import type { PermissionChangeOptions } from '@fileterm/core'
+import { appError, appLog } from '../services/app-logger.js'
 import type { IpcServices } from './types.js'
 
 export function registerLocalFilesHandlers(services: IpcServices) {
@@ -48,8 +49,18 @@ export function registerLocalFilesHandlers(services: IpcServices) {
       defaultPath,
       properties: ['openFile', 'openDirectory', 'multiSelections', 'createDirectory']
     }
-    const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options)
-    return result.canceled ? [] : result.filePaths
+    try {
+      const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options)
+      appLog('[FileTerm][Local] Select files completed', {
+        defaultPath,
+        canceled: result.canceled,
+        count: result.filePaths.length
+      })
+      return result.canceled ? [] : result.filePaths
+    } catch (error) {
+      appError('[FileTerm][Local] Select files failed', { defaultPath, error: describeLocalError(error) })
+      throw error
+    }
   })
 
   ipcMain.handle('localFiles:selectDirectory', async (event, defaultPath?: string) => {
@@ -58,7 +69,37 @@ export function registerLocalFilesHandlers(services: IpcServices) {
       defaultPath: defaultPath || app.getPath('downloads'),
       properties: ['openDirectory', 'createDirectory']
     }
-    const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options)
-    return result.canceled ? null : (result.filePaths[0] ?? null)
+    try {
+      const result = window ? await dialog.showOpenDialog(window, options) : await dialog.showOpenDialog(options)
+      appLog('[FileTerm][Local] Select directory completed', {
+        defaultPath: options.defaultPath,
+        canceled: result.canceled,
+        selectedPath: result.filePaths[0] ?? null
+      })
+      return result.canceled ? null : (result.filePaths[0] ?? null)
+    } catch (error) {
+      appError('[FileTerm][Local] Select directory failed', {
+        defaultPath: options.defaultPath,
+        error: describeLocalError(error)
+      })
+      throw error
+    }
   })
+}
+
+function describeLocalError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return error
+  }
+
+  const filesystemError = error as NodeJS.ErrnoException
+  return {
+    name: error.name,
+    message: error.message,
+    code: filesystemError.code,
+    errno: filesystemError.errno,
+    syscall: filesystemError.syscall,
+    path: filesystemError.path,
+    stack: error.stack
+  }
 }

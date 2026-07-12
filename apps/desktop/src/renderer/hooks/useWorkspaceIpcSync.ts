@@ -343,9 +343,9 @@ export function useWorkspaceIpcSync({
           setLocalPath(path)
           setLocalItems(withParentRow(path, items))
         })
-        .catch(() => {
+        .catch((error: unknown) => {
           if (!canceled) {
-            onStatusMessageRef.current(t.localLoadFailed)
+            onErrorRef.current('读取本机目录', error)
           }
         })
     }

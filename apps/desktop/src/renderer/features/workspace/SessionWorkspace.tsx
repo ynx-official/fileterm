@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type CSSProperties, type DragEvent } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type Dispatch,
+  type DragEvent,
+  type SetStateAction
+} from 'react'
 import type {
   CommandExecutionOptions,
   CommandFolder,
@@ -20,6 +28,9 @@ const DEFAULT_FILE_PANEL_HEIGHT = 218
 export function SessionWorkspace({
   activeTab,
   activeSession,
+  filePanelHeight,
+  onFilePanelHeightChange,
+  shouldAlignFilePanelOnMount,
   sendTargets,
   terminalDockSendScope,
   terminalDockSelectedTabIds,
@@ -65,6 +76,9 @@ export function SessionWorkspace({
 }: {
   activeTab: WorkspaceTab
   activeSession: SessionSnapshot
+  filePanelHeight: number
+  onFilePanelHeightChange: Dispatch<SetStateAction<number>>
+  shouldAlignFilePanelOnMount: boolean
   sendTargets: SessionSendTarget[]
   terminalDockSendScope: SendScope
   terminalDockSelectedTabIds: string[]
@@ -115,15 +129,14 @@ export function SessionWorkspace({
   isWorkspaceFocusMode: boolean
 }) {
   const isFileOnly = activeTab.layout === 'file-only'
-  const [filePanelHeight, setFilePanelHeight] = useState(DEFAULT_FILE_PANEL_HEIGHT)
+  const setFilePanelHeight = onFilePanelHeightChange
   const [isFilePanelCollapsed, setIsFilePanelCollapsed] = useState(false)
+  const [isFilePanelDragging, setIsFilePanelDragging] = useState(false)
   const workspaceRef = useRef<HTMLElement | null>(null)
   const isResizingFilePanel = useRef(false)
-  const hasUserResizedFilePanel = useRef(false)
-  const isSnappedToDiskHead = useRef(false)
   const dragStateRef = useRef<{ bottom: number; height: number; snapHeight: number | null } | null>(null)
   const layoutFrameRef = useRef<number | null>(null)
-  const lastExpandedFilePanelHeight = useRef(DEFAULT_FILE_PANEL_HEIGHT)
+  const lastExpandedFilePanelHeight = useRef(filePanelHeight)
   const appliedWorkspaceFocusMode = useRef<boolean | null>(null)
   const isFilePanelEffectivelyCollapsed = isFilePanelCollapsed && !isFileOnly
   const effectiveFilePanelHeight = isFilePanelEffectivelyCollapsed ? 0 : filePanelHeight
@@ -134,7 +147,7 @@ export function SessionWorkspace({
     return Math.min(maxHeight, Math.max(minHeight, nextHeight))
   }
 
-  const syncFilePanelHeight = (mode: 'align' | 'clamp') => {
+  const syncFilePanelHeight = (mode: 'align' | 'clamp' = 'clamp') => {
     if (isFileOnly || isFilePanelCollapsed || !workspaceRef.current || isResizingFilePanel.current) {
       return
     }
@@ -149,9 +162,7 @@ export function SessionWorkspace({
       if (diskHeadRect) {
         const nextHeight = workspaceRect.bottom - diskHeadRect.top
         const clampedHeight = clampFilePanelHeight(workspaceRect.height, nextHeight)
-
         setFilePanelHeight((prev) => (prev === clampedHeight ? prev : clampedHeight))
-        isSnappedToDiskHead.current = true
         return
       }
     }
@@ -182,6 +193,7 @@ export function SessionWorkspace({
         lastExpandedFilePanelHeight.current = filePanelHeight
       }
       isResizingFilePanel.current = false
+      setIsFilePanelDragging(false)
       dragStateRef.current = null
       setIsFilePanelCollapsed(true)
       return
@@ -192,11 +204,31 @@ export function SessionWorkspace({
   }, [isFileOnly, isWorkspaceFocusMode])
 
   useEffect(() => {
+    isResizingFilePanel.current = false
+    dragStateRef.current = null
+    setIsFilePanelDragging(false)
+    document.body.style.cursor = ''
+    document.body.style.userSelect = ''
+  }, [activeTab.id])
+
+  useEffect(() => {
     if (isFileOnly) {
       return
     }
 
     let dragFrame: number | null = null
+
+    const stopFilePanelDragging = () => {
+      isResizingFilePanel.current = false
+      dragStateRef.current = null
+      if (dragFrame) {
+        window.cancelAnimationFrame(dragFrame)
+        dragFrame = null
+      }
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+      setIsFilePanelDragging(false)
+    }
 
     const onMouseMove = (event: globalThis.MouseEvent) => {
       if (!isResizingFilePanel.current || !dragStateRef.current) {
@@ -206,12 +238,9 @@ export function SessionWorkspace({
       const { bottom, height, snapHeight } = dragStateRef.current
       let nextHeight = bottom - event.clientY
 
-      let isSnapped = false
       if (snapHeight !== null && Math.abs(nextHeight - snapHeight) <= 10) {
         nextHeight = snapHeight
-        isSnapped = true
       }
-      isSnappedToDiskHead.current = isSnapped
 
       if (dragFrame) {
         window.cancelAnimationFrame(dragFrame)
@@ -226,47 +255,39 @@ export function SessionWorkspace({
     }
 
     const onMouseUp = () => {
-      isResizingFilePanel.current = false
-      dragStateRef.current = null
-      if (dragFrame) {
-        window.cancelAnimationFrame(dragFrame)
-        dragFrame = null
-      }
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
+      stopFilePanelDragging()
     }
 
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
+    window.addEventListener('blur', onMouseUp)
+    document.addEventListener('mouseup', onMouseUp)
 
     return () => {
       window.removeEventListener('mousemove', onMouseMove)
       window.removeEventListener('mouseup', onMouseUp)
+      window.removeEventListener('blur', onMouseUp)
+      document.removeEventListener('mouseup', onMouseUp)
       if (dragFrame) {
         window.cancelAnimationFrame(dragFrame)
       }
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
+      setIsFilePanelDragging(false)
     }
-  }, [isFileOnly])
+  }, [isFileOnly, setFilePanelHeight])
 
   useEffect(() => {
-    hasUserResizedFilePanel.current = false
-  }, [activeTab.id])
-
-  useEffect(() => {
-    if (isFileOnly || isFilePanelCollapsed) {
+    if (!shouldAlignFilePanelOnMount || isFileOnly || isFilePanelCollapsed) {
       return
     }
 
     const frame = window.requestAnimationFrame(() => {
-      if (!hasUserResizedFilePanel.current || isSnappedToDiskHead.current) {
-        syncFilePanelHeight('align')
-      }
+      syncFilePanelHeight('align')
     })
 
     return () => window.cancelAnimationFrame(frame)
-  }, [isFileOnly, isFilePanelCollapsed, activeTab.id])
+  }, [activeTab.id, isFileOnly, isFilePanelCollapsed, shouldAlignFilePanelOnMount])
 
   useEffect(() => {
     if (isFileOnly || isFilePanelCollapsed || !workspaceRef.current) {
@@ -280,8 +301,7 @@ export function SessionWorkspace({
 
       layoutFrameRef.current = window.requestAnimationFrame(() => {
         layoutFrameRef.current = null
-        const mode = !hasUserResizedFilePanel.current || isSnappedToDiskHead.current ? 'align' : 'clamp'
-        syncFilePanelHeight(mode)
+        syncFilePanelHeight()
       })
     }
 
@@ -300,7 +320,7 @@ export function SessionWorkspace({
       resizeObserver.disconnect()
       window.removeEventListener('resize', syncAfterLayout)
     }
-  }, [isFileOnly, isFilePanelCollapsed, activeTab.id])
+  }, [isFileOnly, isFilePanelCollapsed, setFilePanelHeight])
 
   const handleToggleFilePanelCollapsed = () => {
     if (isFilePanelCollapsed) {
@@ -319,7 +339,7 @@ export function SessionWorkspace({
 
   return (
     <section
-      className={`session-workspace ${isFileOnly ? 'file-only' : ''} ${isFilePanelEffectivelyCollapsed ? 'file-panel-collapsed' : ''}`}
+      className={`session-workspace ${isFileOnly ? 'file-only' : ''} ${isFilePanelEffectivelyCollapsed ? 'file-panel-collapsed' : ''} ${isFilePanelDragging ? 'is-file-panel-dragging' : ''}`}
       ref={workspaceRef}
       style={{ '--file-panel-height': `${effectiveFilePanelHeight}px` } as CSSProperties}
     >
@@ -357,9 +377,10 @@ export function SessionWorkspace({
       {!isFileOnly && !isFilePanelCollapsed ? (
         <div
           className="session-split-resizer"
-          onMouseDown={() => {
+          onMouseDown={(event) => {
+            event.preventDefault()
             isResizingFilePanel.current = true
-            hasUserResizedFilePanel.current = true
+            setIsFilePanelDragging(true)
 
             if (workspaceRef.current) {
               const rect = workspaceRef.current.getBoundingClientRect()
