@@ -698,10 +698,14 @@ export interface FileTermDesktopApi {
 export type AppUpdateState =
   'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'not-available' | 'error' | 'unsupported'
 
+export type AppUpdateMode = 'in-app' | 'release-page'
+
 export interface AppUpdateStatus {
   state: AppUpdateState
   currentVersion: string
+  updateMode?: AppUpdateMode
   availableVersion?: string
+  releaseUrl?: string
   progress?: number
   message?: string
 }
