@@ -207,4 +207,4 @@ jobs:
           gh release create "${TAG}" -R "${REPO}" \
             "${release_flags[@]}" \
             --generate-notes \
-            **/*.dmg **/*.zip **/*.exe **/*.yml
+            **/*.dmg **/*.zip **/*.exe **/latest.yml **/latest-mac.yml
