@@ -80,6 +80,9 @@ jobs:
 
       - name: Package macOS universal
         run: |
+          if [[ -z "${CSC_LINK:-}" ]]; then
+            unset CSC_LINK CSC_KEY_PASSWORD
+          fi
           cd apps/desktop
           npx electron-builder --mac --universal --publish never
 
