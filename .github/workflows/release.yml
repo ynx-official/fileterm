@@ -77,10 +77,10 @@ jobs:
       - name: Build renderer + main
         run: npm run build -w @fileterm/desktop
 
-      - name: Package macOS universal
+      - name: Package macOS arm64
         run: |
           cd apps/desktop
-          npx electron-builder --mac --universal
+          npx electron-builder --mac --arm64 --publish never
 
       - name: Validate macOS update metadata
         shell: bash
@@ -93,7 +93,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: FileTerm-macOS-universal
+          name: FileTerm-macOS-arm64
           path: |
             apps/desktop/release/*.dmg
             apps/desktop/release/*.zip
@@ -136,7 +136,7 @@ jobs:
       - name: Package Windows (${{ matrix.arch }})
         run: |
           cd apps/desktop
-          npx electron-builder --win --${{ matrix.arch }}
+          npx electron-builder --win --${{ matrix.arch }} --publish never
 
       - name: Validate Windows update metadata
         shell: bash
