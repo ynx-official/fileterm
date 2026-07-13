@@ -209,15 +209,11 @@ You can also join the QQ group: `534418986`.
 
 ![FileTerm WeChat community QR code](./docs/assets/fileterm-wechat-group-qr.jpg)
 
-> This QR code is valid through July 19, 2026. Please obtain the latest code after it expires.
-
 ## Support the Project
 
 If FileTerm helps you, please consider starring the project on [GitHub](https://github.com/St0ff3l/fileterm):
 
 <a href="https://github.com/St0ff3l/fileterm/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/St0ff3l/fileterm?style=for-the-badge&logo=github&label=Star%20FileTerm"></a>
-
-> GitHub now restricts access to public star timestamp data, so the README intentionally does not embed a third-party Star History chart that can render blank.
 
 ## License
 
