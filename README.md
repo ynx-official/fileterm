@@ -207,8 +207,6 @@ fileterm/
 
 ![FileTerm 微信交流群二维码](./docs/assets/fileterm-wechat-group-qr.jpg)
 
-> 二维码有效期至 2026 年 7 月 19 日；失效后请获取最新二维码。
-
 ## 支持项目
 
 如果 FileTerm 对你有帮助，欢迎到 [GitHub](https://github.com/St0ff3l/fileterm) 点亮 Star：
