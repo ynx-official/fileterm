@@ -1098,6 +1098,9 @@ textarea:focus-visible,
 .standalone-window-frame {
   width: 100vw;
   min-height: 100vh;
+  overflow: hidden;
+  border-radius: 14px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.38);
 }
 
 .standalone-window-frame.has-standalone-titlebar {

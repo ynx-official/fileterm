@@ -256,7 +256,7 @@ export function FileEditorModal({
   const frameClassName = `modal-card file-editor-modal ${themeMode === 'default-dark' ? 'file-editor-modal--dark' : ''} ${standalone ? 'standalone' : ''}`
   const contentNode = (
     <div className={frameClassName} onClick={handleShellClick} onKeyDown={handleKeyDown} ref={shellRef}>
-      <div className="modal-header">
+      <div className="modal-header" data-tauri-drag-region={standalone ? 'deep' : undefined}>
         <div className="file-editor-title">
           <span>{file.source === 'remote' ? t.editRemoteFile : t.editLocalFile}</span>
           <strong>{file.name}</strong>

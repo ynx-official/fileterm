@@ -1,0 +1,310 @@
+import { invoke } from '@tauri-apps/api/core'
+import type {
+  AppUpdateStatus,
+  FileTermDesktopApi,
+  WorkspaceSnapshot,
+  PermissionChangeOptions,
+  SshInteractionResponse,
+  RemoteFileAccessOptions,
+  TerminalDataPayload,
+  TerminalStatePayload,
+  TransferTask,
+  SessionMetricsUpdate,
+  SshInteractionRequest,
+  LocalFileItem
+} from '@fileterm/core'
+
+const unsupported = (name: string, ..._args: unknown[]) =>
+  Promise.reject(new Error(`Tauri command not implemented yet: ${name}`))
+
+const unsupportedUpdate: AppUpdateStatus = {
+  state: 'unsupported',
+  currentVersion: '0.0.0',
+  message: 'Tauri updater is not implemented yet'
+}
+
+function subscribe<T>(eventName: string, listener: (payload: T) => void) {
+  // Tauri's `listen()` is async — under React strict mode (dev double-mount)
+  // the first listener's `listen()` promise may still be pending when the
+  // second mount registers another listener. If the first promise resolves
+  // after the cleanup, the underlying Tauri callback stays registered until
+  // `unlisten` IPC completes, and in that window the same event can be
+  // delivered to both the stale and the live listener — surfacing as
+  // duplicated terminal echo ("clear" → "clearclear") and double newlines.
+  //
+  // To close that window we register the callback id synchronously via
+  // `transformCallback`, so the cleanup path can revoke it immediately
+  // (without waiting on IPC), then drive `plugin:event|listen` /
+  // `plugin:event|unlisten` in the background.
+  const internals = (
+    window as unknown as {
+      __TAURI_INTERNALS__?: {
+        transformCallback?: (cb: (payload: unknown) => void) => number
+        unregisterCallback?: (id: number) => void
+      }
+    }
+  ).__TAURI_INTERNALS__
+
+  let revoked = false
+  let eventId: number | undefined
+  let pendingUnlisten = false
+
+  const cleanup = () => {
+    revoked = true
+    // Revoke the JS-side callback first so any in-flight event delivery
+    // (between `listen` resolving and `unlisten` completing) becomes a
+    // no-op even if the backend still has the listener registered.
+    if (callbackId !== undefined && internals?.unregisterCallback) {
+      internals.unregisterCallback(callbackId)
+    }
+    if (eventId !== undefined && !pendingUnlisten) {
+      pendingUnlisten = true
+      void invoke('plugin:event|unlisten', { event: eventName, eventId }).catch(() => undefined)
+    }
+  }
+
+  if (!internals?.transformCallback) {
+    // Fallback: no Tauri internals available yet — no-op subscription.
+    return () => undefined
+  }
+
+  const callbackId = internals.transformCallback((event) => {
+    if (revoked) return
+    const payload = (event as { payload?: T })?.payload
+    if (payload !== undefined) listener(payload)
+  })
+
+  void invoke<number>('plugin:event|listen', {
+    event: eventName,
+    target: { kind: 'Any' },
+    handler: callbackId
+  })
+    .then((id) => {
+      if (revoked) {
+        // Already cleaned up — tell the backend to drop the listener.
+        eventId = id
+        pendingUnlisten = true
+        void invoke('plugin:event|unlisten', { event: eventName, eventId: id }).catch(() => undefined)
+      } else {
+        eventId = id
+      }
+    })
+    .catch(() => {
+      // If listen failed, revoke the callback so it doesn't leak.
+      if (callbackId !== undefined && internals.unregisterCallback) {
+        internals.unregisterCallback(callbackId)
+      }
+    })
+
+  return cleanup
+}
+
+export function createTauriApi(): FileTermDesktopApi {
+  const userAgent = navigator.userAgent.toLowerCase()
+  const platform = userAgent.includes('mac') ? 'darwin' : userAgent.includes('win') ? 'win32' : 'linux'
+  const arch = 'unknown'
+  const api = {
+    platform,
+    arch,
+    appVersion: '0.0.0',
+    appName: 'FileTerm',
+    isDesktop: true,
+    getUpdateStatus: async () => unsupportedUpdate,
+    checkForUpdates: async () => unsupportedUpdate,
+    downloadUpdate: async () => undefined,
+    installUpdate: async () => undefined,
+    onUpdateStatus: () => () => undefined,
+    readClipboardText: () => invoke<string>('app_read_clipboard_text'),
+    writeClipboardText: (text: string) => invoke<void>('app_write_clipboard_text', { text }),
+    getUiPreferences: () =>
+      invoke<{ theme: 'default-dark' | 'default-light'; locale: 'zhCN' | 'enUS' }>('app_get_ui_preferences'),
+    setUiPreferences: (input: { theme?: 'default-dark' | 'default-light'; locale?: 'zhCN' | 'enUS' }) =>
+      invoke<{ theme: 'default-dark' | 'default-light'; locale: 'zhCN' | 'enUS' }>('app_set_ui_preferences', { input }),
+    getUiStateItem: (key: string) => invoke<string | null>('app_get_ui_state_item', { key }),
+    setUiStateItem: (key: string, value: string) => invoke<void>('app_set_ui_state_item', { key, value }),
+    removeUiStateItem: (key: string) => invoke<void>('app_remove_ui_state_item', { key }),
+    openConnectionManagerWindow: () => invoke<void>('app_open_window', { input: { kind: 'connection-manager' } }),
+    openCommandManagerWindow: () => invoke<void>('app_open_window', { input: { kind: 'command-manager' } }),
+    openConnectionFormWindow: (mode: 'create' | 'edit', profileId?: string) =>
+      invoke<void>('app_open_window', { input: { kind: 'connection-form', mode, profile_id: profileId } }),
+    openCommandFormWindow: (mode: 'create' | 'edit', commandId?: string, folderId?: string) =>
+      invoke<void>('app_open_window', {
+        input: { kind: 'command-form', mode, command_id: commandId, folder_id: folderId }
+      }),
+    openFileEditorWindow: (input: {
+      source: 'local' | 'remote'
+      path: string
+      name: string
+      tabId?: string
+      encoding?: string
+    }) =>
+      invoke<void>('app_open_window', {
+        input: {
+          kind: 'file-editor',
+          source: input.source,
+          path: input.path,
+          name: input.name,
+          tab_id: input.tabId,
+          encoding: input.encoding
+        }
+      }),
+    openExternalUrl: (url: string) => invoke<void>('app_open_external_url', { url }),
+    openLogsDirectory: async () => undefined,
+    minimizeCurrentWindow: () => invoke<void>('app_window_action', { action: 'minimize' }),
+    isCurrentWindowMaximized: () => invoke<boolean>('app_is_window_maximized'),
+    toggleMaximizeCurrentWindow: () => invoke<void>('app_window_action', { action: 'toggle-maximize' }),
+    closeCurrentWindow: () => invoke<void>('app_window_action', { action: 'close' }),
+    confirmCloseCurrentFileEditor: () => invoke<void>('app_window_action', { action: 'close' }),
+    cancelCloseCurrentFileEditor: async () => undefined,
+    showWindowMenu: async () => undefined,
+    requestQuitApp: () => invoke<void>('app_window_action', { action: 'close' }),
+    listLocalDirectory: (dirPath?: string) =>
+      invoke<{ path: string; items: LocalFileItem[] }>('app_list_local_directory', {
+        dirPath: dirPath ?? null
+      }),
+    readLocalFile: (filePath: string, encoding?: string) =>
+      invoke<string>('app_read_local_file', { filePath, encoding: encoding ?? null }),
+    writeLocalFile: (filePath: string, content: string, encoding?: string) =>
+      invoke<void>('app_write_local_file', { filePath, content, encoding: encoding ?? null }),
+    createLocalDirectory: (dirPath: string, name: string) =>
+      invoke<void>('app_create_local_directory', { dirPath, name }),
+    createLocalFile: (dirPath: string, name: string) => invoke<void>('app_create_local_file', { dirPath, name }),
+    copyLocalPath: (sourcePath: string, destinationPath: string) =>
+      invoke<void>('app_copy_local_path', { sourcePath, destinationPath }),
+    moveLocalPath: (sourcePath: string, destinationPath: string) =>
+      invoke<void>('app_move_local_path', { sourcePath, destinationPath }),
+    renameLocalPath: (targetPath: string, newName: string) =>
+      invoke<void>('app_rename_local_path', { targetPath, newName }),
+    deleteLocalPath: (targetPath: string) => invoke<void>('app_delete_local_path', { targetPath }),
+    changeLocalPermissions: (targetPath: string, options: PermissionChangeOptions) =>
+      invoke<void>('app_change_local_permissions', { targetPath, options }),
+    selectLocalFiles: (defaultPath?: string) =>
+      invoke<string[]>('app_select_local_files', { defaultPath: defaultPath ?? null }),
+    selectLocalDirectory: (defaultPath?: string) =>
+      invoke<string | null>('app_select_local_directory', { defaultPath: defaultPath ?? null }),
+    getSnapshot: () => invoke<WorkspaceSnapshot>('app_get_snapshot'),
+    getConnectionLibrary: () =>
+      invoke<{ profiles: WorkspaceSnapshot['profiles']; folders: WorkspaceSnapshot['folders'] }>(
+        'app_get_connection_library'
+      ),
+    getWebDavSyncConfig: () => invoke('app_get_webdav_sync_config'),
+    saveWebDavSyncConfig: (input: {
+      enabled: boolean
+      url: string
+      username?: string
+      remotePath: string
+      allowInsecureTls?: boolean
+      password?: string
+    }) => invoke('app_set_webdav_sync_config', { input }),
+    uploadWebDavSync: async () => ({ action: 'upload' as const, message: 'Tauri WebDAV 同步尚未接入。' }),
+    downloadWebDavSync: async () => ({ action: 'download' as const, message: 'Tauri WebDAV 同步尚未接入。' }),
+    createProfile: (input: unknown) => invoke<WorkspaceSnapshot>('app_create_profile', { input }),
+    createFolder: (name: string, parentId?: string) =>
+      invoke<WorkspaceSnapshot>('app_workspace_mutation', { operation: 'create-folder', payload: { name, parentId } }),
+    createCommandFolder: (name: string, parentId?: string) =>
+      invoke<WorkspaceSnapshot>('app_workspace_mutation', {
+        operation: 'create-command-folder',
+        payload: { name, parentId }
+      }),
+    createCommandTemplate: (input: unknown) =>
+      invoke<WorkspaceSnapshot>('app_workspace_mutation', { operation: 'create-command', payload: { input } }),
+    updateProfile: (profileId: string, input: unknown) =>
+      invoke<WorkspaceSnapshot>('app_update_profile', { profileId, input }),
+    deleteProfile: (profileId: string) => invoke<WorkspaceSnapshot>('app_delete_profile', { profileId }),
+    updateFolder: (folderId: string, updates: unknown) =>
+      invoke<WorkspaceSnapshot>('app_update_folder', { folderId, updates }),
+    deleteFolder: (folderId: string) => invoke<WorkspaceSnapshot>('app_delete_folder', { folderId }),
+    updateEntityOrder: (id: string, newParentId: string | undefined, newOrder: number) =>
+      invoke<WorkspaceSnapshot>('app_update_entity_order', {
+        id,
+        newParentId: newParentId ?? null,
+        newOrder
+      }),
+    updateCommandFolder: (folderId: string, updates: unknown) =>
+      invoke<WorkspaceSnapshot>('app_update_command_folder', { folderId, updates }),
+    deleteCommandFolder: (folderId: string) => invoke<WorkspaceSnapshot>('app_delete_command_folder', { folderId }),
+    updateCommandOrder: (id: string, newParentId: string | undefined, newOrder: number) =>
+      invoke<WorkspaceSnapshot>('app_update_command_order', {
+        id,
+        newParentId: newParentId ?? null,
+        newOrder
+      }),
+    updateCommandTemplate: (commandId: string, input: unknown) =>
+      invoke<WorkspaceSnapshot>('app_update_command_template', { commandId, input }),
+    deleteCommandTemplate: (commandId: string) =>
+      invoke<WorkspaceSnapshot>('app_delete_command_template', { commandId }),
+    openProfile: (profileId: string) => invoke<WorkspaceSnapshot>('app_open_profile', { profileId }),
+    openProfileFromManager: (profileId: string) => invoke<WorkspaceSnapshot>('app_open_profile', { profileId }),
+    activateTab: (tabId: string) => invoke<WorkspaceSnapshot>('app_activate_tab', { tabId }),
+    reconnectTab: (tabId: string) => invoke<WorkspaceSnapshot>('app_reconnect_tab', { tabId }),
+    disconnectTab: (tabId: string) => invoke<WorkspaceSnapshot>('app_disconnect_tab', { tabId }),
+    closeTab: (tabId: string) => invoke<WorkspaceSnapshot>('app_close_tab', { tabId }),
+
+    writeTerminal: (tabId: string, data: string) => invoke<void>('app_write_terminal', { tabId, data }),
+    resizeTerminal: (tabId: string, cols: number, rows: number, width: number, height: number) =>
+      invoke<void>('app_resize_terminal', { tabId, cols, rows, width, height }),
+    openRemotePath: (tabId: string, targetPath: string) =>
+      invoke<WorkspaceSnapshot>('app_open_remote_path', { tabId, targetPath }),
+    setFollowShellCwd: (tabId: string, enabled: boolean) =>
+      invoke<WorkspaceSnapshot>('app_set_follow_shell_cwd', { tabId, enabled }),
+    readRemoteFile: (tabId: string, targetPath: string, encoding?: string) =>
+      invoke<string>('app_read_remote_file', { tabId, targetPath, encoding }),
+    writeRemoteFile: (tabId: string, targetPath: string, content: string, encoding?: string) =>
+      invoke<WorkspaceSnapshot>('app_write_remote_file', { tabId, targetPath, content, encoding }),
+    createRemoteDirectory: (tabId: string, parentPath: string, name: string) =>
+      invoke<WorkspaceSnapshot>('app_create_remote_directory', { tabId, parentPath, name }),
+    createRemoteFile: (tabId: string, parentPath: string, name: string) =>
+      invoke<WorkspaceSnapshot>('app_create_remote_file', { tabId, parentPath, name }),
+    copyRemotePath: (tabId: string, targetPath: string, destinationPath: string, targetType: 'file' | 'folder') =>
+      invoke<WorkspaceSnapshot>('app_copy_remote_path', { tabId, targetPath, destinationPath, targetType }),
+    moveRemotePath: (tabId: string, targetPath: string, destinationPath: string) =>
+      invoke<WorkspaceSnapshot>('app_move_remote_path', { tabId, targetPath, destinationPath }),
+    renameRemotePath: (tabId: string, targetPath: string, newName: string) =>
+      invoke<WorkspaceSnapshot>('app_rename_remote_path', { tabId, targetPath, newName }),
+    deleteRemotePath: (tabId: string, targetPath: string, targetType: 'file' | 'folder') =>
+      invoke<WorkspaceSnapshot>('app_delete_remote_path', { tabId, targetPath, targetType }),
+    changeRemotePermissions: (tabId: string, targetPath: string, options: PermissionChangeOptions) =>
+      invoke<WorkspaceSnapshot>('app_change_remote_permissions', { tabId, targetPath, options }),
+    resolveSshInteraction: (requestId: string, response: SshInteractionResponse) =>
+      invoke<void>('app_resolve_ssh_interaction', { requestId, response }),
+    setRemoteFileAccessMode: (tabId: string, mode: 'user' | 'root', options?: RemoteFileAccessOptions) =>
+      invoke<WorkspaceSnapshot>('app_set_remote_file_access_mode', { tabId, mode, options }),
+
+    getDroppedFilePaths: (files: File[]) => files.map((file) => file.name),
+    onUiPreferencesChanged: (
+      listener: (preferences: { theme: 'default-dark' | 'default-light'; locale: 'zhCN' | 'enUS' }) => void
+    ) => subscribe('app:ui-preferences-changed', listener),
+    onWindowMaximizedChange: (listener: (isMaximized: boolean) => void) =>
+      subscribe('app:window-maximized-change', listener),
+    onFileEditorCloseRequest: () => () => undefined,
+    onTerminalData: (listener: (payload: TerminalDataPayload) => void) => subscribe('terminal:data', listener),
+    onTerminalState: (listener: (payload: TerminalStatePayload) => void) => subscribe('terminal:state', listener),
+    onTransferUpdate: (listener: (transfer: TransferTask) => void) => subscribe('transfer:update', listener),
+    onWorkspaceSnapshot: (listener: (snapshot: WorkspaceSnapshot) => void) => subscribe('workspace:snapshot', listener),
+    onSessionMetrics: (listener: (payload: SessionMetricsUpdate) => void) =>
+      subscribe('workspace:sessionMetrics', listener),
+    onSshInteraction: (listener: (request: SshInteractionRequest) => void) => subscribe('ssh:interaction', listener),
+    onWindowCloseRequest: (listener: (event: { isQuit: boolean }) => void) =>
+      subscribe('app:window-close-request', listener),
+    onRequestCloseActiveWorkspaceItem: (listener: () => void) =>
+      subscribe('app:close-active-workspace-item-request', listener),
+    confirmCloseWindow: (action: 'quit' | 'hide' | 'cancel') => {
+      if (action === 'cancel') return Promise.resolve()
+      if (action === 'quit') {
+        // 'quit' calls app.exit(0) on the Rust side, bypassing the
+        // CloseRequested guard so Cmd+Q / tray-quit actually terminates
+        // the app instead of looping back through the confirmation dialog.
+        return invoke<void>('app_window_action', { action: 'quit' })
+      }
+      return invoke<void>('app_window_action', { action: 'minimize' })
+    }
+  } as unknown as FileTermDesktopApi
+
+  return new Proxy(api as FileTermDesktopApi, {
+    get(target, property, receiver) {
+      if (property in target) return Reflect.get(target, property, receiver)
+      if (typeof property !== 'string') return undefined
+      return (...args: unknown[]) => unsupported(property, ...args)
+    }
+  })
+}

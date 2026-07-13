@@ -11,7 +11,15 @@ const sourceFiles = ['**/*.{js,cjs,mjs,ts,tsx,cts,mts}']
 
 module.exports = [
   {
-    ignores: ['**/node_modules/**', '**/dist/**', '**/dist-electron/**', '**/release/**', '**/coverage/**']
+    ignores: [
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/dist-electron/**',
+      '**/release/**',
+      '**/coverage/**',
+      'apps/desktop/src-tauri/target/**',
+      'apps/desktop/src-tauri/gen/**'
+    ]
   },
   {
     files: ['**/*.{js,cjs,mjs}'],

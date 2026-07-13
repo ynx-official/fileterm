@@ -54,8 +54,11 @@ export function TabBar({
   const focusModeLabel = isWorkspaceFocusMode ? t.exitWorkspaceFocusMode : t.enterWorkspaceFocusMode
 
   return (
-    <header className="fs-tabbar">
-      <div className={`titlebar-brand ${homeBrandContent ? 'has-home-brand-content' : ''}`}>
+    <header className="fs-tabbar" data-tauri-drag-region="deep">
+      <div
+        className={`titlebar-brand ${homeBrandContent ? 'has-home-brand-content' : ''}`}
+        data-tauri-drag-region="deep"
+      >
         <div className="window-controls-decorator" aria-hidden="true">
           <span className="dot dot-close" />
           <span className="dot dot-minimize" />

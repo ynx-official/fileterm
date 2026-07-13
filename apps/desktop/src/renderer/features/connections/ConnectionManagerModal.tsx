@@ -479,7 +479,7 @@ export function ConnectionManagerModal({
     <div
       className={`modal-card manager-modal connection-manager-modal ${standalone ? 'standalone' : ''} ${inline ? 'manager-inline' : ''}`}
     >
-      <div className="connection-manager-header">
+      <div className="connection-manager-header" data-tauri-drag-region={standalone ? 'deep' : undefined}>
         <span className="connection-manager-title">
           <span className="material-symbols-outlined">settings_ethernet</span>
           <span>{t.connectionManager}</span>

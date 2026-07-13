@@ -8,7 +8,7 @@ export function WindowMenubar({ desktopApi, isMaximized }: { desktopApi?: FileTe
   }
 
   return (
-    <div className="window-menubar">
+    <div className="window-menubar" data-tauri-drag-region="deep">
       <div className="window-menu-items">
         <button type="button" onClick={(event) => openWindowMenu('file', event.currentTarget)}>
           File

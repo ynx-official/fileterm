@@ -220,7 +220,7 @@ export function CommandEditorModal({
     return (
       <div className="connection-form-window">
         <div className="modal-card command-form-standalone">
-          <div className="connection-manager-header">
+          <div className="connection-manager-header" data-tauri-drag-region="deep">
             <span className="connection-manager-title">
               <span className="material-symbols-outlined">terminal</span>
               <span>{title}</span>

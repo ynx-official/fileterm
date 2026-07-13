@@ -38,7 +38,7 @@ export function ConnectionModal({
 
   const content = (
     <div className={`modal-card ssh-modal ${standalone ? 'standalone' : ''}`}>
-      <div className="connection-manager-header">
+      <div className="connection-manager-header" data-tauri-drag-region={standalone ? 'deep' : undefined}>
         <span className="connection-manager-title">
           <span className="material-symbols-outlined">settings_ethernet</span>
           <span>{mode === 'edit' ? t.editConnection : t.newConnection}</span>

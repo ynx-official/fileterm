@@ -18,6 +18,17 @@ body,
   -webkit-user-select: none;
 }
 
+html.tauri-standalone-window,
+html.tauri-standalone-window body,
+html.tauri-standalone-window #root {
+  background: transparent !important;
+}
+
+html.tauri-standalone-window #root {
+  overflow: hidden;
+  border-radius: 14px;
+}
+
 input,
 textarea,
 [contenteditable='true'],

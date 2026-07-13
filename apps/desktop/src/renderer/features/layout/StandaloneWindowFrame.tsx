@@ -41,7 +41,7 @@ export function StandaloneWindowTitlebar({ isWindows, title }: { isWindows: bool
   }
 
   return (
-    <div className="standalone-window-titlebar">
+    <div className="standalone-window-titlebar" data-tauri-drag-region="deep">
       <div className="window-brandmark">
         <AppIcon name="brand" size={18} />
         <strong>{t.appTitle}</strong>
