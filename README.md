@@ -215,8 +215,6 @@ fileterm/
 
 <a href="https://github.com/St0ff3l/fileterm/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/St0ff3l/fileterm?style=for-the-badge&logo=github&label=Star%20FileTerm"></a>
 
-> GitHub 已限制公开 Star 时间数据的访问，README 不再嵌入可能空白的第三方 Star History 图表。
-
 ## 开源协议
 
 FileTerm 使用 [MIT License](./LICENSE) 开源。
