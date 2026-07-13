@@ -233,7 +233,16 @@ export class WorkspaceService {
   }
 
   async updateProfile(profileId: string, input: CreateProfileInput): Promise<WorkspaceSnapshot> {
-    await this.profileRepository.update(profileId, input)
+    const profile = await this.profileRepository.update(profileId, input)
+    for (const [tabId, session] of Object.entries(this.sessionRuntime.list())) {
+      if (session.profileId !== profileId) {
+        continue
+      }
+      this.sessionRuntime.set(tabId, {
+        ...session,
+        reconnectMode: profile.type === 'ssh' ? (profile.reconnectMode ?? 'none') : undefined
+      })
+    }
     return this.getSnapshot()
   }
 
