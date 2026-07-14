@@ -157,10 +157,7 @@ function privateKeyDialogOptions(): OpenDialogOptions {
   return {
     title: '导入 SSH 私钥',
     properties: ['openFile'],
-    filters: [
-      { name: '所有文件', extensions: ['*'] },
-      { name: 'SSH 私钥', extensions: ['pem', 'key', 'ppk', 'openssh'] }
-    ]
+    filters: [{ name: '所有文件', extensions: ['*'] }]
   }
 }
 
