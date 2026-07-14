@@ -1,10 +1,14 @@
 import { useMemo, useState } from 'react'
 import { useSshKeyLibrary } from '../../hooks/useSshKeyLibrary'
+import { SshKeyNoteDialog } from './SshKeyNoteDialog'
 
 export function SshKeyManagerPage() {
-  const { keys, loading, error, importKey, updateNote, deleteKey } = useSshKeyLibrary()
+  const { keys, loading, error, clearError, importKey, updateNote, deleteKey } = useSshKeyLibrary()
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
+  const [noteDialog, setNoteDialog] = useState<
+    { mode: 'import' } | { mode: 'edit'; keyId: string; initialNote: string } | null
+  >(null)
 
   const visibleKeys = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase()
@@ -16,10 +20,11 @@ export function SshKeyManagerPage() {
     )
   }, [keys, query])
 
-  const handleImport = async () => {
+  const handleImport = async (note: string) => {
     setBusy(true)
     try {
-      await importKey('')
+      await importKey(note)
+      setNoteDialog(null)
     } catch {
       // useSshKeyLibrary 已将可展示错误写入 error 状态。
     } finally {
@@ -27,10 +32,16 @@ export function SshKeyManagerPage() {
     }
   }
 
-  const handleEditNote = async (keyId: string, currentNote = '') => {
-    const note = window.prompt('修改备注', currentNote)
-    if (note === null) return
-    await updateNote(keyId, note)
+  const handleEditNote = async (keyId: string, note: string) => {
+    setBusy(true)
+    try {
+      await updateNote(keyId, note)
+      setNoteDialog(null)
+    } catch {
+      // useSshKeyLibrary 已将可展示错误写入 error 状态。
+    } finally {
+      setBusy(false)
+    }
   }
 
   const handleDelete = async (keyId: string, name: string) => {
@@ -45,7 +56,15 @@ export function SshKeyManagerPage() {
           <h2>密钥管理</h2>
           <p>集中管理 SSH 私钥。私钥副本由 FileTerm 托管，连接只保存密钥引用。</p>
         </div>
-        <button className="primary-button" disabled={busy} onClick={() => void handleImport()} type="button">
+        <button
+          className="primary-button"
+          disabled={busy}
+          onClick={() => {
+            clearError()
+            setNoteDialog({ mode: 'import' })
+          }}
+          type="button"
+        >
           <span aria-hidden="true" className="material-symbols-outlined">
             key
           </span>
@@ -67,7 +86,7 @@ export function SshKeyManagerPage() {
         <span>{keys.length} 个密钥</span>
       </div>
 
-      {error ? <div className="modal-error ssh-key-manager-error">{error}</div> : null}
+      {error && !noteDialog ? <div className="modal-error ssh-key-manager-error">{error}</div> : null}
 
       <div className="ssh-key-table-shell">
         <table className="ssh-key-table">
@@ -102,7 +121,10 @@ export function SshKeyManagerPage() {
                 <td className="ssh-key-actions">
                   <button
                     className="flat-button compact"
-                    onClick={() => void handleEditNote(key.id, key.note)}
+                    onClick={() => {
+                      clearError()
+                      setNoteDialog({ mode: 'edit', keyId: key.id, initialNote: key.note ?? '' })
+                    }}
                     type="button"
                   >
                     修改备注
@@ -132,6 +154,24 @@ export function SshKeyManagerPage() {
         ) : null}
         {loading ? <div className="ssh-key-empty">正在加载密钥列表…</div> : null}
       </div>
+      {noteDialog ? (
+        <SshKeyNoteDialog
+          errorMessage={error}
+          initialNote={noteDialog.mode === 'edit' ? noteDialog.initialNote : ''}
+          isSubmitting={busy}
+          mode={noteDialog.mode}
+          onClose={() => {
+            if (!busy) setNoteDialog(null)
+          }}
+          onSubmit={(note) => {
+            if (noteDialog.mode === 'import') {
+              void handleImport(note)
+              return
+            }
+            void handleEditNote(noteDialog.keyId, note)
+          }}
+        />
+      ) : null}
     </section>
   )
 }

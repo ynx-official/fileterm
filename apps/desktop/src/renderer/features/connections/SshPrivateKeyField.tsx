@@ -1,6 +1,7 @@
 import type { CreateProfileInput } from '@fileterm/core'
 import { useState } from 'react'
 import { useSshKeyLibrary } from '../../hooks/useSshKeyLibrary'
+import { SshKeyNoteDialog } from '../ssh-keys/SshKeyNoteDialog'
 
 export function SshPrivateKeyField({
   form,
@@ -9,9 +10,10 @@ export function SshPrivateKeyField({
   form: CreateProfileInput
   setForm(value: CreateProfileInput | ((previous: CreateProfileInput) => CreateProfileInput)): void
 }) {
-  const { keys, error, importKey } = useSshKeyLibrary()
+  const { keys, error, clearError, importKey } = useSshKeyLibrary()
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+  const [pendingImport, setPendingImport] = useState<{ sourcePath?: string } | null>(null)
 
   const selectKey = (privateKeyId: string) => {
     setNotice(null)
@@ -22,17 +24,24 @@ export function SshPrivateKeyField({
     }))
   }
 
-  const importNewKey = async (sourcePath?: string) => {
+  const requestImport = (sourcePath?: string) => {
+    clearError()
+    setNotice(null)
+    setPendingImport({ sourcePath })
+  }
+
+  const importNewKey = async (note: string, sourcePath?: string) => {
     setBusy(true)
     setNotice(null)
     try {
-      const result = await importKey('', sourcePath)
+      const result = await importKey(note, sourcePath)
       if (result) {
         setForm((previous) => ({ ...previous, privateKeyId: result.key.id, privateKeyPath: undefined }))
         setNotice(
           result.duplicate ? `该密钥已存在，已选中“${result.key.name}”。` : `已导入并选中“${result.key.name}”。`
         )
       }
+      setPendingImport(null)
     } catch {
       // useSshKeyLibrary 已将可展示错误写入 error 状态。
     } finally {
@@ -49,8 +58,7 @@ export function SshPrivateKeyField({
             <option value="">请选择已导入的密钥</option>
             {keys.map((key) => (
               <option key={key.id} value={key.id}>
-                {key.name} · {shortFingerprint(key.fingerprint)}
-                {key.note ? ` · ${key.note}` : ''}
+                {key.note ? `${key.note} · ${key.name}` : key.name} · {shortFingerprint(key.fingerprint)}
               </option>
             ))}
           </select>
@@ -59,7 +67,7 @@ export function SshPrivateKeyField({
           </span>
         </span>
       </label>
-      <button className="flat-button compact" disabled={busy} onClick={() => void importNewKey()} type="button">
+      <button className="flat-button compact" disabled={busy} onClick={() => requestImport()} type="button">
         {busy ? '正在导入…' : '导入新密钥'}
       </button>
       {form.privateKeyPath && !form.privateKeyId ? (
@@ -68,7 +76,7 @@ export function SshPrivateKeyField({
           <button
             className="flat-button compact"
             disabled={busy}
-            onClick={() => void importNewKey(form.privateKeyPath)}
+            onClick={() => requestImport(form.privateKeyPath)}
             type="button"
           >
             导入到密钥管理
@@ -76,7 +84,18 @@ export function SshPrivateKeyField({
         </div>
       ) : null}
       {notice ? <div className="ssh-private-key-notice">{notice}</div> : null}
-      {error ? <div className="modal-error">{error}</div> : null}
+      {error && !pendingImport ? <div className="modal-error">{error}</div> : null}
+      {pendingImport ? (
+        <SshKeyNoteDialog
+          errorMessage={error}
+          isSubmitting={busy}
+          mode="import"
+          onClose={() => {
+            if (!busy) setPendingImport(null)
+          }}
+          onSubmit={(note) => void importNewKey(note, pendingImport.sourcePath)}
+        />
+      ) : null}
     </div>
   )
 }

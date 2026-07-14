@@ -76,7 +76,9 @@ export function useSshKeyLibrary() {
     [desktopApi]
   )
 
-  return { keys, loading, error, refresh, importKey, updateNote, deleteKey }
+  const clearError = useCallback(() => setError(null), [])
+
+  return { keys, loading, error, clearError, refresh, importKey, updateNote, deleteKey }
 }
 
 function errorMessage(error: unknown) {

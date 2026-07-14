@@ -177,6 +177,40 @@
   font-size: 12px;
 }
 
+.ssh-key-note-dialog__field {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ssh-key-note-dialog__field > span {
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.ssh-key-note-dialog__field input {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--bg-main);
+  color: var(--text-main);
+  box-sizing: border-box;
+}
+
+.ssh-key-note-dialog__field input:focus-visible {
+  outline: none;
+  border-color: var(--copy-link);
+  box-shadow: 0 0 0 3px var(--input-focus-ring);
+}
+
+.ssh-key-note-dialog__field small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 @media (max-width: 760px) {
   .ssh-key-manager-page {
     padding: 16px;

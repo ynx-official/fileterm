@@ -5,6 +5,7 @@ import { t } from '../../i18n'
 export function ConfirmActionDialog({
   cancelLabel = t.cancel,
   confirmLabel,
+  confirmDisabled = false,
   confirmVariant = 'danger',
   description,
   errorMessage,
@@ -16,6 +17,7 @@ export function ConfirmActionDialog({
 }: {
   cancelLabel?: string
   confirmLabel: string
+  confirmDisabled?: boolean
   confirmVariant?: 'danger' | 'primary'
   description: ReactNode
   errorMessage?: string | null
@@ -44,7 +46,12 @@ export function ConfirmActionDialog({
             {cancelLabel}
           </button>
           {extraActions}
-          <button className={confirmButtonClassName} disabled={isSubmitting} onClick={onConfirm} type="button">
+          <button
+            className={confirmButtonClassName}
+            disabled={isSubmitting || confirmDisabled}
+            onClick={onConfirm}
+            type="button"
+          >
             {isSubmitting ? <span aria-hidden="true" className="button-spinner" /> : null}
             <span>{confirmLabel}</span>
           </button>

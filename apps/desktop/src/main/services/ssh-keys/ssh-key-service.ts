@@ -33,6 +33,11 @@ export class SshKeyService {
   }
 
   async import(input: ImportSshKeyInput = {}, parent?: BrowserWindow): Promise<SshKeyImportResult | null> {
+    const note = input.note?.trim()
+    if (!note) {
+      throw new Error('请输入密钥备注。')
+    }
+
     const sourcePath = input.sourcePath ?? (await this.selectPrivateKey(parent))
     if (!sourcePath) {
       return null
@@ -59,7 +64,7 @@ export class SshKeyService {
     const key: StoredSshKey = {
       id: randomUUID(),
       name: path.basename(sourcePath),
-      note: input.note?.trim() || undefined,
+      note,
       algorithm: inspected.algorithm,
       fingerprint: inspected.fingerprint,
       encrypted: inspected.encrypted,
@@ -73,7 +78,11 @@ export class SshKeyService {
   }
 
   async updateNote(keyId: string, note: string): Promise<SshKeyMetadata> {
-    return this.toMetadata(await this.repository.updateNote(keyId, note))
+    const normalizedNote = note.trim()
+    if (!normalizedNote) {
+      throw new Error('密钥备注不能为空。')
+    }
+    return this.toMetadata(await this.repository.updateNote(keyId, normalizedNote))
   }
 
   async delete(keyId: string): Promise<void> {
