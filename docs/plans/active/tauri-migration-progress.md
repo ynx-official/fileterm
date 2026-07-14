@@ -56,7 +56,7 @@
 
 - ✅ M3.1 russh 0.62.2 锁定：password / privateKey / agent / keyboard-interactive 四种认证
 - ✅ M3.2 SSH shell + 终端：write/resize/data/state，16ms batcher
-- ✅ M3.3 SFTP 文件操作：list/read/write/mkdir/rename/delete/permissions，含 root 模式（`sudo -S`/`sudo -n`）
+- ✅ M3.3 SFTP 文件操作：list/read/write/mkdir/rename/delete/permissions，含 root 模式（`sudo -S`/`sudo -n`）；若服务端拒绝 `sftp` subsystem，则保留 SSH shell/隧道并将文件操作明确拒绝，不再把 SFTP INIT 超时误报为整条 SSH 连接失败。
 - ✅ M3.4 CWD 跟随：OSC 7 + RemoteUser 1337 解析与广播
 - ✅ M3.5 系统指标：Linux/BusyBox POSIX + Windows PowerShell/CIM + CRLF 归一化 + 平台探测
 - ✅ M3.6 host verification + MFA：in-handshake 异步弹窗 + 多轮 OTP

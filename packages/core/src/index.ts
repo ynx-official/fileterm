@@ -495,6 +495,13 @@ export interface SessionSnapshot {
   followShellCwd?: boolean
   remoteFilesLoading?: boolean
   remoteFiles: RemoteFileItem[]
+  /**
+   * SSH shell sessions may be usable even when the server refuses the SFTP
+   * subsystem. Keep that distinction in the shared snapshot so the renderer
+   * can disable only file actions instead of presenting the whole session as
+   * disconnected.
+   */
+  sftpUnavailableReason?: string
   fileAccessMode?: 'user' | 'root'
   sudoUser?: string
   hasReusableSudoAuth?: boolean

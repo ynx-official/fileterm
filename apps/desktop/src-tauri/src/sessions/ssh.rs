@@ -1757,6 +1757,48 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
+const SFTP_UNAVAILABLE_FALLBACK: &str =
+    "SFTP 文件通道不可用；终端和 SSH 隧道仍可继续使用。请在服务器启用或修复 sftp subsystem 后重新连接。";
+
+/// Open the SFTP subsystem on an already authenticated SSH handle.
+///
+/// `russh-sftp` deliberately does not send the subsystem request itself, so
+/// this boundary is also where we can distinguish a file-channel failure from
+/// a terminal-session failure.
+async fn open_sftp_session(handle: &Handle<ClientHandler>) -> Result<SftpSession, String> {
+    let sftp_channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("无法打开 SFTP channel: {error}"))?;
+    sftp_channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(|error| format!("SFTP subsystem request failed: {error}"))?;
+    SftpSession::new(sftp_channel.into_stream())
+        .await
+        .map_err(|error| format!("SFTP init failed: {error}"))
+}
+
+/// Convert a russh SFTP handshake error into an actionable, non-ambiguous
+/// renderer message. A timeout here happens after the interactive shell is
+/// established, so it must not be presented as a failed SSH login.
+fn format_sftp_unavailable_reason(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("timed out") {
+        format!(
+            "SFTP 子系统在初始化期间没有响应。SSH 终端已连接，服务器可能禁用或拒绝了 sftp subsystem；请在服务器启用/修复 SFTP 后重连。原始错误: {error}"
+        )
+    } else {
+        format!(
+            "SFTP 文件通道不可用（{error}）。SSH 终端和隧道仍可使用；请在服务器启用/修复 SFTP 后重连。"
+        )
+    }
+}
+
+fn sftp_unavailable_result<T>(reason: &str) -> Result<T, String> {
+    Err(reason.to_string())
+}
+
 async fn run_worker_loop(
     tab_id: &str,
     profile: &Value,
@@ -1845,20 +1887,6 @@ async fn run_worker_loop(
         );
     }
 
-    // ── SFTP subsystem ─────────────────────────────────────────────────────
-    // russh-sftp 2.3 does not send `request_subsystem` itself — the caller
-    // must request the "sftp" subsystem on the channel BEFORE converting it
-    // to a stream. Without this, `SftpSession::new` blocks forever waiting
-    // for the INIT reply and eventually times out.
-    let sftp_channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
-    sftp_channel
-        .request_subsystem(true, "sftp")
-        .await
-        .map_err(|e| format!("SFTP subsystem request failed: {}", e))?;
-    let sftp = SftpSession::new(sftp_channel.into_stream())
-        .await
-        .map_err(|e| format!("SFTP init failed: {}", e))?;
-
     update_tab_status_and_emit(app, tab_id, "connected").await;
 
     // Emit "connected" notice so the user sees confirmation in the terminal.
@@ -1889,6 +1917,7 @@ async fn run_worker_loop(
                 follow_shell_cwd: true,
                 remote_files_loading: false,
                 remote_files: Vec::new(),
+                sftp_unavailable_reason: None,
                 file_access_mode: "user".to_string(),
                 sudo_user: None,
                 has_reusable_sudo_auth: false,
@@ -1898,25 +1927,51 @@ async fn run_worker_loop(
         );
     }
 
-    // ── Initial file listing ───────────────────────────────────────────────
-    match list_dir(&sftp, "/").await {
-        Ok(files) => {
-            let mut sessions = state.sessions.write().await;
-            if let Some(s) = sessions.get_mut(tab_id) {
-                s.remote_files = files;
+    // ── SFTP subsystem ─────────────────────────────────────────────────────
+    // russh-sftp 2.3 needs an explicit subsystem request before converting
+    // the channel into its protocol stream. A failed SFTP negotiation must
+    // not tear down an otherwise healthy SSH shell: Electron keeps terminal
+    // and tunnel features available while exposing the file-channel error.
+    let (sftp_arc, sftp_unavailable_reason) = match open_sftp_session(&handle).await {
+        Ok(sftp) => {
+            let sftp_arc = Arc::new(RwLock::new(sftp));
+            let initial_files = {
+                let sftp = sftp_arc.read().await;
+                list_dir(&sftp, "/").await
+            };
+            match initial_files {
+                Ok(files) => {
+                    let mut sessions = state.sessions.write().await;
+                    if let Some(session) = sessions.get_mut(tab_id) {
+                        session.remote_files = files;
+                    }
+                }
+                Err(error) => {
+                    // A usable SFTP channel can still lack access to `/`.
+                    emit_terminal_data(
+                        app,
+                        tab_id,
+                        &format!("\r\n[files] 列出根目录失败: {error}\r\n"),
+                    )
+                    .await;
+                }
             }
+            (Some(sftp_arc), None)
         }
-        Err(e) => {
-            // Surface SFTP listing errors so the user understands why the
-            // file panel stays empty (e.g. permission denied on /).
-            emit_terminal_data(
-                app,
-                tab_id,
-                &format!("\r\n[files] 列出根目录失败: {}\r\n", e),
-            )
-            .await;
+        Err(error) => {
+            let reason = format_sftp_unavailable_reason(&error);
+            eprintln!("[SSH SFTP] tab={tab_id} unavailable: {reason}");
+            crate::services::logging::ssh_debug(app, tab_id, format!("SFTP unavailable: {reason}"));
+            {
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.get_mut(tab_id) {
+                    session.sftp_unavailable_reason = Some(reason.clone());
+                }
+            }
+            emit_terminal_data(app, tab_id, &format!("\r\n[files] {reason}\r\n")).await;
+            (None, Some(reason))
         }
-    }
+    };
 
     // Push the full snapshot (with files) to the renderer
     if let Ok(snapshot) = crate::commands::get_workspace_snapshot(app.clone()).await {
@@ -2098,7 +2153,6 @@ while ($true) {{
     let mut sudo_user: Option<String> = None;
     let mut sudo_password: Option<String> = None;
 
-    let sftp_arc = Arc::new(RwLock::new(sftp));
     let mut tunnel_manager = TunnelManager::new(tab_id, app, Arc::clone(&handle));
     if let Some(rules) = profile.get("forwards").and_then(Value::as_array) {
         for raw_rule in rules {
@@ -2135,19 +2189,30 @@ while ($true) {{
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(cmd) => {
-                        let result = handle_worker_cmd(
-                            cmd,
-                            &handle,
-                            &shell_channel,
-                            &sftp_arc,
-                            &mut file_access_mode,
-                            &mut sudo_user,
-                            &mut sudo_password,
-                            tab_id,
-                            app,
-                            &state,
-                            &mut tunnel_manager,
-                        ).await;
+                        let result = if let Some(sftp) = sftp_arc.as_ref() {
+                            handle_worker_cmd(
+                                cmd,
+                                &handle,
+                                &shell_channel,
+                                sftp,
+                                &mut file_access_mode,
+                                &mut sudo_user,
+                                &mut sudo_password,
+                                tab_id,
+                                app,
+                                &state,
+                                &mut tunnel_manager,
+                            ).await
+                        } else {
+                            handle_worker_cmd_without_sftp(
+                                cmd,
+                                &shell_channel,
+                                tab_id,
+                                app,
+                                &mut tunnel_manager,
+                                sftp_unavailable_reason.as_deref().unwrap_or(SFTP_UNAVAILABLE_FALLBACK),
+                            ).await
+                        };
                         match result {
                             Ok(true) => {
                                 // WorkerCmd::Disconnect requested — flush and exit.
@@ -2194,12 +2259,12 @@ while ($true) {{
                                 if let Some(user) = new_user { s.sudo_user = Some(user); }
                             }
                             drop(sessions);
-                            if let Some(cwd) = cwd_to_follow {
+                            if let (Some(cwd), Some(sftp)) = (cwd_to_follow, sftp_arc.as_ref()) {
                                 tokio::spawn(follow_shell_cwd(
                                     app.clone(),
                                     tab_id.to_string(),
                                     cwd,
-                                    Arc::clone(&sftp_arc),
+                                    Arc::clone(sftp),
                                 ));
                             } else if let Ok(snap) = crate::commands::get_workspace_snapshot(app.clone()).await {
                                 let _ = app.emit("workspace:snapshot", snap);
@@ -2244,6 +2309,104 @@ while ($true) {{
                     last_emit = Instant::now();
                 }
             }
+        }
+    }
+}
+
+/// Returns `Ok(true)` when the worker should exit (Disconnect requested),
+/// `Ok(false)` otherwise.
+///
+/// When a server accepts an SSH shell but refuses its `sftp` subsystem, keep
+/// terminal and tunnel commands operational. Every file operation is replied
+/// to immediately with the cached handshake failure instead of falling back
+/// to shell commands or leaving the caller waiting on a nonexistent channel.
+async fn handle_worker_cmd_without_sftp(
+    cmd: WorkerCmd,
+    shell_channel: &Channel<russh::client::Msg>,
+    tab_id: &str,
+    app: &AppHandle,
+    tunnel_manager: &mut TunnelManager,
+    unavailable_reason: &str,
+) -> Result<bool, String> {
+    match cmd {
+        WorkerCmd::WriteTerminal(data) => {
+            shell_channel
+                .data(data.as_bytes())
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(false)
+        }
+        WorkerCmd::ResizeTerminal { cols, rows, .. } => {
+            shell_channel
+                .window_change(cols, rows, 0, 0)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(false)
+        }
+        WorkerCmd::ListSshTunnels { respond_to } => {
+            let _ = respond_to.send(tunnel_manager.list());
+            Ok(false)
+        }
+        WorkerCmd::CreateSshTunnel { rule, respond_to } => {
+            let result = match serde_json::from_value::<SshTunnelRule>(rule) {
+                Ok(rule) => tunnel_manager.create(rule).await,
+                Err(error) => Err(format!("Invalid tunnel rule: {error}")),
+            };
+            let _ = respond_to.send(result);
+            Ok(false)
+        }
+        WorkerCmd::StartSshTunnel { rule_id, respond_to } => {
+            let _ = respond_to.send(tunnel_manager.start(&rule_id).await);
+            Ok(false)
+        }
+        WorkerCmd::StopSshTunnel { rule_id, respond_to } => {
+            let _ = respond_to.send(tunnel_manager.stop(&rule_id).await);
+            Ok(false)
+        }
+        WorkerCmd::DeleteSshTunnel { rule_id, respond_to } => {
+            let _ = respond_to.send(tunnel_manager.delete(&rule_id).await);
+            Ok(false)
+        }
+        WorkerCmd::ListRemoteFiles { respond_to, .. } => {
+            let _ = respond_to.send(sftp_unavailable_result(unavailable_reason));
+            Ok(false)
+        }
+        WorkerCmd::ReadRemoteFile { respond_to, .. } => {
+            let _ = respond_to.send(sftp_unavailable_result(unavailable_reason));
+            Ok(false)
+        }
+        WorkerCmd::WriteRemoteFile { respond_to, .. }
+        | WorkerCmd::CreateRemoteDirectory { respond_to, .. }
+        | WorkerCmd::CreateRemoteFile { respond_to, .. }
+        | WorkerCmd::CopyRemotePath { respond_to, .. }
+        | WorkerCmd::MoveRemotePath { respond_to, .. }
+        | WorkerCmd::RenameRemotePath { respond_to, .. }
+        | WorkerCmd::DeleteRemotePath { respond_to, .. }
+        | WorkerCmd::ChangeRemotePermissions { respond_to, .. }
+        | WorkerCmd::UploadLocalFile { respond_to, .. }
+        | WorkerCmd::DownloadRemoteFile { respond_to, .. }
+        | WorkerCmd::ReplaceRemoteFile { respond_to, .. }
+        | WorkerCmd::RemoveRemoteFile { respond_to, .. } => {
+            let _ = respond_to.send(sftp_unavailable_result(unavailable_reason));
+            Ok(false)
+        }
+        WorkerCmd::StatRemoteFile { respond_to, .. } => {
+            let _ = respond_to.send(sftp_unavailable_result(unavailable_reason));
+            Ok(false)
+        }
+        WorkerCmd::SetRemoteFileAccessMode { respond_to, .. } => {
+            let _ = respond_to.send(sftp_unavailable_result(unavailable_reason));
+            Ok(false)
+        }
+        WorkerCmd::Disconnect => {
+            let _ = app.emit(
+                "terminal:data",
+                serde_json::json!({
+                    "tabId": tab_id,
+                    "chunk": "",
+                }),
+            );
+            Ok(true)
         }
     }
 }
@@ -3374,8 +3537,9 @@ fn format_perm(perm: u32, is_dir: bool, is_link: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_http_connect_request, is_password_prompt, looks_like_mfa_prompt, parent_remote_path,
-        forward_local_connection, forward_socks5_connection, remote_bind_host_matches, suppress_shell_setup_echo,
+        build_http_connect_request, format_sftp_unavailable_reason, is_password_prompt,
+        looks_like_mfa_prompt, parent_remote_path, forward_local_connection, forward_socks5_connection,
+        remote_bind_host_matches, suppress_shell_setup_echo,
         try_keyboard_interactive_with_responder, tunnel_bind_address, validate_tunnel_rule,
         KeyboardInteractiveRequest, SshTunnelRule,
     };
@@ -3675,6 +3839,15 @@ mod tests {
     #[test]
     fn rejects_http_connect_header_injection() {
         assert!(build_http_connect_request("host\r\nInjected: x", 22, "", "").is_err());
+    }
+
+    #[test]
+    fn reports_sftp_timeout_without_mislabeling_the_ssh_shell() {
+        let message = format_sftp_unavailable_reason("SFTP init failed: Timeout");
+
+        assert!(message.contains("SFTP 子系统"));
+        assert!(message.contains("SSH 终端已连接"));
+        assert!(message.contains("sftp subsystem"));
     }
 
     #[test]

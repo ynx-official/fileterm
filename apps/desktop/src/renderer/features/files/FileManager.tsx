@@ -225,7 +225,8 @@ export function FileManager({
   isRemoteDirectoryLoading: boolean
 }) {
   const defaultRemoteSort = { field: 'name', direction: 'asc' } satisfies RemoteFileSortState
-  const isRemoteConnected = activeSession.connected === true
+  const canUseRemoteFiles = activeSession.connected === true && !activeSession.sftpUnavailableReason
+  const remoteFilesUnavailableText = activeSession.sftpUnavailableReason ?? t.remoteDisconnectedDescription
   const isSshSession = activeTab?.sessionType === 'ssh'
   const canManageTunnels = activeSession.capabilities?.tunnels === true
   const showRemoteDirectoryLoading = isRemoteDirectoryLoading || activeSession.remoteFilesLoading === true
@@ -276,13 +277,13 @@ export function FileManager({
   }, [activeSession.remoteFiles, activeSession.remotePath])
 
   useEffect(() => {
-    if (isRemoteConnected) {
+    if (canUseRemoteFiles) {
       return
     }
     setSelectedRemotePaths([])
     setRemoteAnchorPath(null)
     setContextMenu((prev) => (prev?.pane === 'remote' ? null : prev))
-  }, [isRemoteConnected])
+  }, [canUseRemoteFiles])
 
   useEffect(() => {
     setRemoteSort(defaultRemoteSort)
@@ -295,12 +296,12 @@ export function FileManager({
   }, [activeView, canManageTunnels])
 
   const sortedRemoteRows = useMemo(() => {
-    if (!isRemoteConnected) {
+    if (!canUseRemoteFiles) {
       return []
     }
 
     return sortRemoteFiles(activeSession.remoteFiles, remoteSort)
-  }, [activeSession.remoteFiles, isRemoteConnected, remoteSort])
+  }, [activeSession.remoteFiles, canUseRemoteFiles, remoteSort])
 
   const selectedRemoteItems = activeSession.remoteFiles.filter((item) => selectedRemotePaths.includes(item.path))
   const selectedRemoteFileItems = selectedRemoteItems.filter((item) => item.type === 'file')
@@ -333,29 +334,29 @@ export function FileManager({
       : contextRemoteSelection.length === 1
         ? contextRemoteSelection[0]
         : contextRemoteItem
-  const canOpenContextItem = Boolean(singleContextItem && (contextMenu?.pane !== 'remote' || isRemoteConnected))
+  const canOpenContextItem = Boolean(singleContextItem && (contextMenu?.pane !== 'remote' || canUseRemoteFiles))
   const canCopyContextItems = contextSelectionCount > 0
   const canCopyContextPath = Boolean(singleContextItem && !isMultiContextSelection)
   const canCutContextItems = contextSelectionCount > 0
-  const canDownloadContextItems = isRemoteConnected && contextRemoteSelection.some((item) => item.type === 'file')
+  const canDownloadContextItems = canUseRemoteFiles && contextRemoteSelection.some((item) => item.type === 'file')
   const canPasteIntoContextPane =
-    contextMenu?.pane === 'local' ? canPasteToLocal : isRemoteConnected && canPasteToRemote
+    contextMenu?.pane === 'local' ? canPasteToLocal : canUseRemoteFiles && canPasteToRemote
   const canUploadContextItems =
-    isRemoteConnected &&
+    canUseRemoteFiles &&
     (Boolean(!isMultiContextSelection && contextLocalSelection.length) ||
       Boolean(!isMultiContextSelection && contextMenu?.pane === 'remote'))
-  const canCreateFromContext = !isMultiContextSelection && (contextMenu?.pane !== 'remote' || isRemoteConnected)
+  const canCreateFromContext = !isMultiContextSelection && (contextMenu?.pane !== 'remote' || canUseRemoteFiles)
   const canRenameContextItem = Boolean(
     singleContextItem &&
     !isMultiContextSelection &&
     singleContextItem.name !== '..' &&
-    (contextMenu?.pane !== 'remote' || isRemoteConnected)
+    (contextMenu?.pane !== 'remote' || canUseRemoteFiles)
   )
   const canChangeContextPermissions = Boolean(
     singleContextItem &&
     !isMultiContextSelection &&
     singleContextItem.name !== '..' &&
-    (contextMenu?.pane !== 'remote' || isRemoteConnected)
+    (contextMenu?.pane !== 'remote' || canUseRemoteFiles)
   )
 
   const keyboardSelection =
@@ -371,7 +372,7 @@ export function FileManager({
 
   const submitRemotePath = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!isRemoteConnected) {
+    if (!canUseRemoteFiles) {
       return
     }
     const targetPath = remotePathInput.trim() || activeSession.remotePath
@@ -381,7 +382,7 @@ export function FileManager({
   const handleRemotePaneDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault()
     event.stopPropagation()
-    if (!isRemoteConnected) {
+    if (!canUseRemoteFiles) {
       return
     }
 
@@ -407,7 +408,7 @@ export function FileManager({
       return
     }
 
-    if (!isRemoteConnected) {
+    if (!canUseRemoteFiles) {
       return
     }
 
@@ -633,7 +634,7 @@ export function FileManager({
             <button
               title={t.refresh}
               type="button"
-              disabled={!isRemoteConnected}
+              disabled={!canUseRemoteFiles}
               onClick={() => {
                 onRefresh()
                 setResetColumnsTrigger((prev) => prev + 1)
@@ -645,7 +646,7 @@ export function FileManager({
               <button
                 aria-pressed={remoteFileAccessMode === 'root'}
                 className={remoteFileAccessMode === 'root' ? 'active' : ''}
-                disabled={!isRemoteConnected}
+                disabled={!canUseRemoteFiles}
                 title={`${remoteFileAccessMode === 'root' ? t.fileRootView : t.fileUserView} - ${t.fileRootViewHint}`}
                 type="button"
                 onClick={onToggleRemoteFileAccessMode}
@@ -656,12 +657,12 @@ export function FileManager({
             <button
               title={t.downloadTo}
               type="button"
-              disabled={!isRemoteConnected || !selectedRemoteFileItems.length}
+              disabled={!canUseRemoteFiles || !selectedRemoteFileItems.length}
               onClick={() => onDownloadFiles(selectedRemoteFileItems)}
             >
               <AppIcon name="download" />
             </button>
-            <button title={t.upload} type="button" disabled={!isRemoteConnected} onClick={onChooseUploadFiles}>
+            <button title={t.upload} type="button" disabled={!canUseRemoteFiles} onClick={onChooseUploadFiles}>
               <AppIcon name="upload" />
             </button>
           </div>
@@ -825,7 +826,7 @@ export function FileManager({
             }}
             onDragOver={(event) => {
               event.preventDefault()
-              if (isRemoteConnected) {
+              if (canUseRemoteFiles) {
                 event.dataTransfer.dropEffect = 'copy'
               }
             }}
@@ -833,8 +834,8 @@ export function FileManager({
           >
             <div aria-busy={showRemoteDirectoryLoading} className="remote-pane-content">
               <PanePathBar
-                disabled={!isRemoteConnected}
-                hint={isRemoteConnected ? t.dragUpload : t.remoteDisconnectedDescription}
+                disabled={!canUseRemoteFiles}
+                hint={canUseRemoteFiles ? t.dragUpload : remoteFilesUnavailableText}
                 label={t.remoteHost}
                 value={remotePathInput}
                 action={
@@ -842,7 +843,7 @@ export function FileManager({
                     <button
                       aria-pressed={activeSession.followShellCwd !== false}
                       className={`follow-shell-cwd-toggle ${activeSession.followShellCwd !== false ? 'is-active' : ''}`}
-                      disabled={!isRemoteConnected}
+                      disabled={!canUseRemoteFiles}
                       onClick={onToggleFollowShellCwd}
                       title={
                         activeSession.shellCwd
@@ -863,7 +864,7 @@ export function FileManager({
                   ref={remoteScrollRef}
                   className="file-table-shell remote-file-table-shell"
                   onContextMenu={(event) => {
-                    if (!isRemoteConnected) return
+                    if (!canUseRemoteFiles) return
                     if (event.target !== event.currentTarget) return
                     event.preventDefault()
                     event.stopPropagation()
@@ -872,7 +873,7 @@ export function FileManager({
                     setContextMenu({ pane: 'remote', x: event.clientX, y: event.clientY, path: null })
                   }}
                   onMouseDown={(event) => {
-                    if (!isRemoteConnected) return
+                    if (!canUseRemoteFiles) return
                     if (event.target !== event.currentTarget || event.button !== 0) return
                     isSelectingRemote.current = true
                     didDragSelect.current = false
@@ -894,7 +895,7 @@ export function FileManager({
                   <FileTable
                     scrollRef={remoteScrollRef}
                     cutPaths={remoteCutPaths}
-                    emptyText={isRemoteConnected ? t.emptyFiles : t.remoteDisconnectedDescription}
+                    emptyText={canUseRemoteFiles ? t.emptyFiles : remoteFilesUnavailableText}
                     rows={sortedRemoteRows}
                     sortState={remoteSort}
                     selectedPaths={selectedRemotePaths}
@@ -907,7 +908,7 @@ export function FileManager({
                       )
                     }}
                     onDragItem={(event, item) => {
-                      if (!isRemoteConnected) return
+                      if (!canUseRemoteFiles) return
                       event.dataTransfer.effectAllowed = 'copy'
                       const payload = selectedRemotePaths.includes(item.path) ? selectedRemotePaths : [item.path]
                       const previewItems = sortedRemoteRows.filter((row) => payload.includes(row.path))
@@ -918,12 +919,12 @@ export function FileManager({
                       )
                     }}
                     onOpenItem={(item) => {
-                      if (isRemoteConnected) {
+                      if (canUseRemoteFiles) {
                         onOpenRemoteItem(item)
                       }
                     }}
                     onContextItem={(event, item) => {
-                      if (!isRemoteConnected) return
+                      if (!canUseRemoteFiles) return
                       event.preventDefault()
                       event.stopPropagation()
                       if (!selectedRemotePaths.includes(item.path)) {
@@ -941,12 +942,12 @@ export function FileManager({
                       setRemoteAnchorPath(null)
                     }}
                     onSelectItem={(event, item) => {
-                      if (isRemoteConnected) {
+                      if (canUseRemoteFiles) {
                         selectRemoteItem(event, item)
                       }
                     }}
                     onSelectionDragStart={(event, item) => {
-                      if (!isRemoteConnected) return
+                      if (!canUseRemoteFiles) return
                       setKeyboardPane('remote')
                       isSelectingRemote.current = true
                       didDragSelect.current = false
@@ -966,7 +967,7 @@ export function FileManager({
                       setRemoteAnchorPath(startPath)
                     }}
                     onSelectionDragEnter={(item) => {
-                      if (isRemoteConnected) {
+                      if (canUseRemoteFiles) {
                         extendRemoteDragSelection(item)
                       }
                     }}
@@ -998,7 +999,7 @@ export function FileManager({
           canDownload={canDownloadContextItems}
           canOpen={canOpenContextItem}
           canPaste={canPasteIntoContextPane}
-          canQuickDelete={isRemoteConnected && contextMenu.pane === 'remote' && activeTab?.sessionType === 'ssh'}
+          canQuickDelete={canUseRemoteFiles && contextMenu.pane === 'remote' && activeTab?.sessionType === 'ssh'}
           canRename={canRenameContextItem}
           canUpload={canUploadContextItems}
           item={singleContextItem ?? contextLocalItem ?? contextRemoteItem}

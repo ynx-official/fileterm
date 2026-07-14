@@ -714,6 +714,7 @@ pub async fn app_open_profile(
             follow_shell_cwd: true,
             remote_files_loading: false,
             remote_files: Vec::new(),
+            sftp_unavailable_reason: None,
             file_access_mode: "user".to_string(),
             sudo_user: None,
             has_reusable_sudo_auth: false,

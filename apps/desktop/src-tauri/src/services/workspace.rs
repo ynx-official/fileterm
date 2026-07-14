@@ -29,6 +29,7 @@ pub struct SessionSnapshot {
     pub follow_shell_cwd: bool,
     pub remote_files_loading: bool,
     pub remote_files: Vec<serde_json::Value>,
+    pub sftp_unavailable_reason: Option<String>,
     pub file_access_mode: String, // "user" | "root"
     pub sudo_user: Option<String>,
     pub has_reusable_sudo_auth: bool,
