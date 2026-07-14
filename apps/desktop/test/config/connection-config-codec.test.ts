@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import path from 'node:path'
 import test from 'node:test'
 import type { ConnectionProfile } from '@fileterm/core'
 import {
@@ -67,7 +68,7 @@ test('SSH config parser reports wildcard entries as skipped and retains valid id
   )
   assert.equal(items.length, 1)
   assert.equal(items[0]?.status, 'ready')
-  assert.equal(items[0]?.input?.privateKeyPath?.endsWith('/.ssh/deploy'), true)
+  assert.equal(items[0]?.input?.privateKeyPath?.endsWith(path.join('.ssh', 'deploy')), true)
 })
 
 test('parses all 17 representative external connection files without relying on a default SSH port', () => {

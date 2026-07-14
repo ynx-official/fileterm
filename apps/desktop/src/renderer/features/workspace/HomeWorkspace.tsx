@@ -12,6 +12,7 @@ import { OverviewPage } from './OverviewPage'
 import { QuickLinksPage } from './QuickLinksPage'
 import { ConnectionManagerModal } from '../connections/ConnectionManagerModal'
 import { CommandManagerModal } from '../commands/CommandManagerModal'
+import { SshKeyManagerPage } from '../ssh-keys/SshKeyManagerPage'
 import { SettingsModal } from '../settings/SettingsModal'
 import { TabBar, type TabBarProps } from '../layout/TabBar'
 
@@ -79,19 +80,22 @@ export function HomeWorkspace({
   onResizeStart(): void
 }) {
   const [activeTab, setActiveTab] = useState<
-    'overview' | 'quick-links' | 'command-manager' | 'connection-manager' | 'settings'
+    'overview' | 'quick-links' | 'command-manager' | 'connection-manager' | 'ssh-key-manager' | 'settings'
   >('overview')
   const [navDirection, setNavDirection] = useState<'down' | 'up'>('down')
   const [activeConnectionFolderName, setActiveConnectionFolderName] = useState('')
   const [activeCommandFolderName, setActiveCommandFolderName] = useState('')
+  const [activeSshKeyFolderName, setActiveSshKeyFolderName] = useState('全部密钥')
+  const [sshKeyStats, setSshKeyStats] = useState({ keyCount: 0, folderCount: 0 })
 
   // 侧栏页签的纵向顺序,用于判断切换方向(目标更靠下=向下飞入,更靠上=向上飞入)
   const tabOrder: Record<string, number> = {
     overview: 0,
     'connection-manager': 1,
     'command-manager': 2,
-    settings: 3,
-    'quick-links': 4
+    'ssh-key-manager': 3,
+    settings: 4,
+    'quick-links': 5
   }
   const selectTab = (tab: typeof activeTab) => {
     if (tab === activeTab) return
@@ -224,6 +228,16 @@ export function HomeWorkspace({
             <span>{t.commandManager}</span>
           </button>
           <button
+            className={`sidebar-nav-link ${activeTab === 'ssh-key-manager' ? 'active' : ''}`}
+            onClick={() => selectTab('ssh-key-manager')}
+            aria-label="密钥管理器"
+            title="密钥管理器"
+            type="button"
+          >
+            <span className="material-symbols-outlined">key</span>
+            <span>密钥管理器</span>
+          </button>
+          <button
             className={`sidebar-nav-link ${activeTab === 'settings' ? 'active' : ''}`}
             onClick={() => selectTab('settings')}
             aria-label={t.settings}
@@ -338,6 +352,11 @@ export function HomeWorkspace({
               />
             </div>
           )}
+          {activeTab === 'ssh-key-manager' && (
+            <div key="ssh-key-manager" className="page-transition" data-nav-direction={navDirection}>
+              <SshKeyManagerPage onActiveFolderChange={setActiveSshKeyFolderName} onStatsChange={setSshKeyStats} />
+            </div>
+          )}
           {activeTab === 'settings' && (
             <div key="settings" className="page-transition" data-nav-direction={navDirection}>
               <SettingsModal
@@ -393,6 +412,16 @@ export function HomeWorkspace({
                     <span>{activeCommandFolderName}</span>
                   </>
                 )}
+              </>
+            )}
+            {activeTab === 'ssh-key-manager' && (
+              <>
+                <span className="footer-meta-separator">|</span>
+                <span>{sshKeyStats.keyCount} 个密钥</span>
+                <span className="footer-meta-separator">|</span>
+                <span>{sshKeyStats.folderCount} 个分组</span>
+                <span className="footer-meta-spacer"></span>
+                <span>{activeSshKeyFolderName}</span>
               </>
             )}
           </div>
