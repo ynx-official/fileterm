@@ -11,7 +11,8 @@
 ## 跨平台发布
 
 - macOS 不再生成 universal 二合一包，改为分别提供 Apple Silicon（arm64）和 Intel（x64）安装包。
+- macOS 安装包使用 Ad-hoc 签名，不需要 Apple Developer 证书；首次打开时可能需要在“隐私与安全性”中点击“仍要打开”。
 - macOS 发布元数据继续生成 `latest-mac.yml`，更新检查会按运行架构匹配对应 ZIP。
 - Windows 继续提供 x64 NSIS 安装包和便携版。
 
-> 当前 macOS 客户端仍使用发布页下载模式；首次安装或升级时请选择与设备架构匹配的安装包。
+> 当前 macOS 客户端仍使用发布页下载模式；Ad-hoc 签名不提供 Developer ID 信任链，首次安装或升级时请选择与设备架构匹配的安装包并按系统提示放行。

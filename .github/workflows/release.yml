@@ -86,6 +86,29 @@ jobs:
           cd apps/desktop
           npx electron-builder --mac --arm64 --x64 --publish never
 
+      - name: Verify macOS Ad-hoc signatures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          apps=()
+          while IFS= read -r -d '' app; do
+            apps+=("${app}")
+          done < <(find apps/desktop/release -type d -name 'FileTerm.app' -print0)
+          if [[ "${#apps[@]}" -ne 2 ]]; then
+            echo "Expected two architecture-specific FileTerm.app bundles, found ${#apps[@]}."
+            printf '%s\n' "${apps[@]}"
+            exit 1
+          fi
+
+          for app in "${apps[@]}"; do
+            echo "Verifying Ad-hoc signature: ${app}"
+            codesign --verify --deep --strict --verbose=2 "${app}"
+            signature_info="$(codesign --display --verbose=4 "${app}" 2>&1)"
+            printf '%s\n' "${signature_info}"
+            grep -q 'Signature=adhoc' <<<"${signature_info}"
+          done
+
       - name: Validate macOS update metadata
         shell: bash
         run: |
