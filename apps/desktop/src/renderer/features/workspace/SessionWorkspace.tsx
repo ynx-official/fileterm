@@ -337,6 +337,13 @@ export function SessionWorkspace({
     setIsFilePanelCollapsed(true)
   }
 
+  const reconnectOnEnter =
+    activeSession.reconnectMode === 'enter'
+      ? async () => {
+          await window.fileterm?.reconnectTab(activeTab.id)
+        }
+      : undefined
+
   return (
     <section
       className={`session-workspace ${isFileOnly ? 'file-only' : ''} ${isTerminalOnly ? 'terminal-only' : ''} ${isFilePanelEffectivelyCollapsed ? 'file-panel-collapsed' : ''} ${isFilePanelDragging ? 'is-file-panel-dragging' : ''}`}
@@ -349,13 +356,7 @@ export function SessionWorkspace({
             tabId={activeTab.id}
             bootText={activeSession.terminalTranscript ?? ''}
             connected={activeSession.connected === true}
-            onReconnect={
-              activeSession.reconnectMode === 'enter'
-                ? async () => {
-                    await window.fileterm?.reconnectTab(activeTab.id)
-                  }
-                : undefined
-            }
+            onReconnect={reconnectOnEnter}
           />
           <TerminalDock
             activeTab={activeTab}
@@ -366,6 +367,7 @@ export function SessionWorkspace({
             onSelectedTabIdsChange={onTerminalDockSelectedTabIdsChange}
             onSendCommand={onSendTerminalCommand}
             onSendScopeChange={onTerminalDockSendScopeChange}
+            onReconnect={reconnectOnEnter}
           />
         </div>
       ) : null}

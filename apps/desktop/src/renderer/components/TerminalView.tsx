@@ -753,7 +753,7 @@ export const TerminalView = memo(function TerminalView({
       // When disconnected, intercept Enter to trigger reconnect instead of
       // forwarding to the (dead) PTY. Ignore while a reconnect is in flight.
       if (!wasConnectedRef.current) {
-        if (data === '\r' || data === '\n') requestReconnect()
+        if (data.includes('\r') || data.includes('\n')) requestReconnect()
         return
       }
       if (data.includes('\r') || data.includes('\n')) {

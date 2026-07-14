@@ -1,6 +1,6 @@
 {
   "name": "@fileterm/desktop",
-  "version": "1.1.1",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "Modern remote workspace for SSH, SFTP, and FTP.",
@@ -29,9 +29,9 @@
     "release:win": "tauri build --target x86_64-pc-windows-msvc"
   },
   "dependencies": {
-    "@fileterm/core": "1.1.1",
-    "@fileterm/shared": "1.1.1",
-    "@fileterm/storage": "1.1.1",
+    "@fileterm/core": "1.2.1",
+    "@fileterm/shared": "1.2.1",
+    "@fileterm/storage": "1.2.1",
     "@monaco-editor/react": "4.7.0",
     "@tanstack/react-virtual": "^3.14.3",
     "@xterm/addon-fit": "^0.11.0",
