@@ -38,6 +38,7 @@
 - ✅ Windows 无边框 + Linux 原生 decorations
 - ✅ 窗口尺寸对齐 Electron 默认值（main 1280×820，子窗口 860×680）
 - ✅ 菜单 + 托盘 + macOS dock reopen
+- ✅ 原生快捷键收口：macOS `Cmd+Q` / `Cmd+W`、Windows/Linux `Alt+F4` / `Ctrl+W` 分别进入同一 quit-confirm 或 active-workspace/child-window close 链路，不绕过 transfer journal 或文件编辑器关闭确认。
 - ✅ Windows 自绘菜单栏的 `File` / `View` / `Window` 原生 popup：新建/管理器/日志、reload/zoom、最小化/最大化/关闭均由 Rust `on_menu_event` 执行；release 包不会显示不可用的开发者工具项
 - ✅ 文件编辑器关闭确认 registry：取消关闭会清理 pending 状态，重复 CloseRequested 不会重复弹确认框
 - ✅ 平台/剪贴板/UI prefs/文件选择器通过 contract test

@@ -19,6 +19,11 @@ export function isCompletedTransfer(transfer: TransferTask) {
 }
 
 export function copyText(value: string) {
+  if (window.fileterm?.writeClipboardText) {
+    void window.fileterm.writeClipboardText(value)
+    return
+  }
+
   if (navigator.clipboard?.writeText) {
     void navigator.clipboard.writeText(value)
     return

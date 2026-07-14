@@ -6,7 +6,7 @@ import type {
   WorkspaceSnapshot,
   WorkspaceTab
 } from '@fileterm/core'
-import { homeTabKey, insertTabKeyAfter, reorderTabKeys, sessionTabKey } from '../app/app-utils'
+import { copyText, homeTabKey, insertTabKeyAfter, reorderTabKeys, sessionTabKey } from '../app/app-utils'
 import { resolveSelectedTabIds, type SendScope, type SessionSendTarget } from '../features/common/session-send-targets'
 import type { OrderedTabEntry, TabContextTarget } from '../features/layout/TabBar'
 import { setLocale, t, type AppLocale } from '../i18n'
@@ -1041,7 +1041,7 @@ export function useWorkspaceTabs({
     setTabContextMenu(null)
 
     if (action === 'copy') {
-      navigator.clipboard?.writeText?.(target.title)
+      copyText(target.title)
       return
     }
 

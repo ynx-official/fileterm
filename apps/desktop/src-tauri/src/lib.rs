@@ -104,6 +104,17 @@ fn localized<'a>(is_english: bool, english: &'a str, chinese: &'a str) -> &'a st
     if is_english { english } else { chinese }
 }
 
+/// Match Electron's platform-native window shortcuts. macOS owns Cmd+Q/W;
+/// Windows and Linux keep Alt+F4 for quitting and Ctrl+W for closing the
+/// focused workspace item/window.
+fn application_menu_accelerators(platform: &str) -> (&'static str, &'static str) {
+    if platform == "macos" {
+        ("Cmd+Q", "Cmd+W")
+    } else {
+        ("Alt+F4", "Ctrl+W")
+    }
+}
+
 fn focused_webview_window(app: &AppHandle<Wry>) -> Option<WebviewWindow<Wry>> {
     app.webview_windows()
         .into_values()
@@ -164,6 +175,7 @@ pub(crate) fn show_window_context_menu(
     let is_english = crate::commands::app_get_ui_preferences(app.clone())
         .map(|preferences| preferences.locale == "enUS")
         .unwrap_or(false);
+    let (quit_accelerator, close_accelerator) = application_menu_accelerators(std::env::consts::OS);
 
     let menu = match kind {
         WindowMenuKind::App => {
@@ -208,7 +220,7 @@ pub(crate) fn show_window_context_menu(
             .build(app)
             .map_err(|error| AppError::Window(error.to_string()))?;
             let quit = MenuItemBuilder::with_id("quit", localized(is_english, "Exit", "退出"))
-                .accelerator("Alt+F4")
+                .accelerator(quit_accelerator)
                 .build(app)
                 .map_err(|error| AppError::Window(error.to_string()))?;
             MenuBuilder::new(app)
@@ -282,7 +294,7 @@ pub(crate) fn show_window_context_menu(
                 "window-request-close",
                 localized(is_english, "Close Window", "关闭窗口"),
             )
-            .accelerator("CmdOrCtrl+W")
+            .accelerator(close_accelerator)
             .build(app)
             .map_err(|error| AppError::Window(error.to_string()))?;
             MenuBuilder::new(app)
@@ -458,7 +470,11 @@ pub fn run() {
                 }
             });
 
-            // Native menu building
+            // Native menu building. Keep the shortcuts on the same main-side
+            // lifecycle paths as Electron: Cmd+Q / Alt+F4 asks the renderer
+            // to confirm application exit, while Cmd/Ctrl+W closes the active
+            // workspace item (or a focused child window).
+            let (quit_accelerator, close_accelerator) = application_menu_accelerators(std::env::consts::OS);
             let new_connection_menu = MenuItemBuilder::with_id("new-connection", "新建连接")
                 .accelerator("CmdOrCtrl+N")
                 .build(app)
@@ -479,14 +495,32 @@ pub fn run() {
                 .separator()
                 .item(
                     &MenuItemBuilder::with_id("quit", "退出 FileTerm")
-                        .accelerator("CmdOrCtrl+Q")
+                        .accelerator(quit_accelerator)
                         .build(app)
                         .map_err(|error| error.to_string())?,
                 )
                 .build()
                 .map_err(|error| error.to_string())?;
 
-            let menu = MenuBuilder::new(app).item(&file_submenu).build().map_err(|error| error.to_string())?;
+            let window_minimize_menu = MenuItemBuilder::with_id("window-minimize", "最小化")
+                .build(app)
+                .map_err(|error| error.to_string())?;
+            let window_close_menu = MenuItemBuilder::with_id("window-request-close", "关闭窗口")
+                .accelerator(close_accelerator)
+                .build(app)
+                .map_err(|error| error.to_string())?;
+            let window_submenu = SubmenuBuilder::new(app, "窗口")
+                .item(&window_minimize_menu)
+                .separator()
+                .item(&window_close_menu)
+                .build()
+                .map_err(|error| error.to_string())?;
+
+            let menu = MenuBuilder::new(app)
+                .item(&file_submenu)
+                .item(&window_submenu)
+                .build()
+                .map_err(|error| error.to_string())?;
             app.set_menu(menu).map_err(|error| error.to_string())?;
 
             // Tray configuration
@@ -768,7 +802,14 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{FileEditorCloseRegistry, WindowMenuKind};
+    use super::{application_menu_accelerators, FileEditorCloseRegistry, WindowMenuKind};
+
+    #[test]
+    fn keeps_mac_and_non_mac_window_shortcuts_distinct() {
+        assert_eq!(application_menu_accelerators("macos"), ("Cmd+Q", "Cmd+W"));
+        assert_eq!(application_menu_accelerators("windows"), ("Alt+F4", "Ctrl+W"));
+        assert_eq!(application_menu_accelerators("linux"), ("Alt+F4", "Ctrl+W"));
+    }
 
     #[test]
     fn window_menu_kind_accepts_the_public_bridge_values_only() {
