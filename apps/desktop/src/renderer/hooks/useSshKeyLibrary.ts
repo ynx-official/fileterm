@@ -28,6 +28,18 @@ export function useSshKeyLibrary() {
     })
   }, [desktopApi, refresh])
 
+  const selectKeyFile = useCallback(async () => {
+    if (!desktopApi) return null
+    try {
+      const selection = await desktopApi.selectSshKeyFile()
+      setError(null)
+      return selection
+    } catch (nextError) {
+      setError(errorMessage(nextError))
+      throw nextError
+    }
+  }, [desktopApi])
+
   const importKey = useCallback(
     async (note = '', sourcePath?: string) => {
       if (!desktopApi) return null
@@ -78,7 +90,7 @@ export function useSshKeyLibrary() {
 
   const clearError = useCallback(() => setError(null), [])
 
-  return { keys, loading, error, clearError, refresh, importKey, updateNote, deleteKey }
+  return { keys, loading, error, clearError, refresh, selectKeyFile, importKey, updateNote, deleteKey }
 }
 
 function errorMessage(error: unknown) {

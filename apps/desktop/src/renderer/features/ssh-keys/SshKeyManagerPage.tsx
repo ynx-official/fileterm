@@ -3,7 +3,7 @@ import { useSshKeyLibrary } from '../../hooks/useSshKeyLibrary'
 import { SshKeyNoteDialog } from './SshKeyNoteDialog'
 
 export function SshKeyManagerPage() {
-  const { keys, loading, error, clearError, importKey, updateNote, deleteKey } = useSshKeyLibrary()
+  const { keys, loading, error, clearError, selectKeyFile, importKey, updateNote, deleteKey } = useSshKeyLibrary()
   const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const [noteDialog, setNoteDialog] = useState<
@@ -20,10 +20,11 @@ export function SshKeyManagerPage() {
     )
   }, [keys, query])
 
-  const handleImport = async (note: string) => {
+  const handleImport = async (note: string, sourcePath?: string) => {
+    if (!sourcePath) return
     setBusy(true)
     try {
-      await importKey(note)
+      await importKey(note, sourcePath)
       setNoteDialog(null)
     } catch {
       // useSshKeyLibrary 已将可展示错误写入 error 状态。
@@ -163,9 +164,10 @@ export function SshKeyManagerPage() {
           onClose={() => {
             if (!busy) setNoteDialog(null)
           }}
-          onSubmit={(note) => {
+          onSelectFile={selectKeyFile}
+          onSubmit={(note, sourcePath) => {
             if (noteDialog.mode === 'import') {
-              void handleImport(note)
+              void handleImport(note, sourcePath)
               return
             }
             void handleEditNote(noteDialog.keyId, note)

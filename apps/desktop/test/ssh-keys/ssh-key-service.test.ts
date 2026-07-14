@@ -5,9 +5,11 @@ import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { MemoryProfileRepository } from '@fileterm/storage'
-import { utils } from 'ssh2'
+import ssh2 from 'ssh2'
 import { FileSshKeyRepository } from '../../src/main/services/ssh-keys/file-ssh-key-repository.ts'
 import { SshKeyService } from '../../src/main/services/ssh-keys/ssh-key-service.ts'
+
+const { utils } = ssh2
 
 async function withService(
   run: (context: { service: SshKeyService; profiles: MemoryProfileRepository; directory: string }) => Promise<void>
@@ -29,8 +31,8 @@ function generatePrivateKey(passphrase?: string) {
   return generateKeyPairSync('rsa', {
     modulusLength: 2048,
     privateKeyEncoding: passphrase
-      ? { type: 'pkcs8', format: 'pem', cipher: 'aes-256-cbc', passphrase }
-      : { type: 'pkcs8', format: 'pem' },
+      ? { type: 'pkcs1', format: 'pem', cipher: 'aes-256-cbc', passphrase }
+      : { type: 'pkcs1', format: 'pem' },
     publicKeyEncoding: { type: 'spki', format: 'pem' }
   }).privateKey
 }
@@ -71,7 +73,7 @@ test('service imports a valid private key and deduplicates its fingerprint', asy
 test('service recognizes encrypted private keys without exposing their content', async () => {
   await withService(async ({ service, directory }) => {
     const sourcePath = await writeKeyFile(directory, 'encrypted.pem', generatePrivateKey('secret-passphrase'))
-    const result = await service.import({ sourcePath })
+    const result = await service.import({ sourcePath, note: 'encrypted key' })
 
     assert.ok(result)
     assert.equal(result.key.encrypted, true)
@@ -84,7 +86,7 @@ test('service recognizes encrypted private keys without exposing their content',
 test('service rejects invalid files and SSH public keys', async () => {
   await withService(async ({ service, directory }) => {
     const invalidPath = await writeKeyFile(directory, 'invalid.key', 'not a private key')
-    await assert.rejects(service.import({ sourcePath: invalidPath }), /无法识别/)
+    await assert.rejects(service.import({ sourcePath: invalidPath, note: 'invalid key' }), /无法识别/)
 
     const privateKey = generatePrivateKey()
     const parsed = utils.parseKey(privateKey)
@@ -95,14 +97,14 @@ test('service rejects invalid files and SSH public keys', async () => {
       'id_rsa.pub',
       `${parsed.type} ${parsed.getPublicSSH().toString('base64')} generated@test\n`
     )
-    await assert.rejects(service.import({ sourcePath: publicPath }), /公钥|无法识别/)
+    await assert.rejects(service.import({ sourcePath: publicPath, note: 'public key' }), /公钥|无法识别/)
   })
 })
 
 test('service reports usage and blocks deleting a referenced key', async () => {
   await withService(async ({ service, profiles, directory }) => {
     const sourcePath = await writeKeyFile(directory, 'id_rsa.pem', generatePrivateKey())
-    const imported = await service.import({ sourcePath })
+    const imported = await service.import({ sourcePath, note: 'production key' })
     assert.ok(imported)
 
     await profiles.create({

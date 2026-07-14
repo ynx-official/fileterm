@@ -10,7 +10,7 @@ export function SshPrivateKeyField({
   form: CreateProfileInput
   setForm(value: CreateProfileInput | ((previous: CreateProfileInput) => CreateProfileInput)): void
 }) {
-  const { keys, error, clearError, importKey } = useSshKeyLibrary()
+  const { keys, error, clearError, selectKeyFile, importKey } = useSshKeyLibrary()
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [pendingImport, setPendingImport] = useState<{ sourcePath?: string } | null>(null)
@@ -88,12 +88,14 @@ export function SshPrivateKeyField({
       {pendingImport ? (
         <SshKeyNoteDialog
           errorMessage={error}
+          initialSourcePath={pendingImport.sourcePath}
           isSubmitting={busy}
           mode="import"
           onClose={() => {
             if (!busy) setPendingImport(null)
           }}
-          onSubmit={(note) => void importNewKey(note, pendingImport.sourcePath)}
+          onSelectFile={selectKeyFile}
+          onSubmit={(note, sourcePath) => void importNewKey(note, sourcePath)}
         />
       ) : null}
     </div>

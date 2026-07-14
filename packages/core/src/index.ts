@@ -443,6 +443,12 @@ export interface ImportSshKeyInput {
   note?: string
 }
 
+export interface SshKeyFileSelection {
+  sourcePath: string
+  fileName: string
+  existingKey?: SshKeyMetadata
+}
+
 export interface SshKeyImportResult {
   key: SshKeyMetadata
   duplicate: boolean
@@ -637,6 +643,7 @@ export interface FileTermDesktopApi {
   getSnapshot(): Promise<WorkspaceSnapshot>
   getConnectionLibrary(): Promise<ConnectionLibrarySnapshot>
   listSshKeys(): Promise<SshKeyMetadata[]>
+  selectSshKeyFile(): Promise<SshKeyFileSelection | null>
   importSshKey(input?: ImportSshKeyInput): Promise<SshKeyImportResult | null>
   updateSshKeyNote(keyId: string, note: string): Promise<SshKeyMetadata>
   deleteSshKey(keyId: string): Promise<void>

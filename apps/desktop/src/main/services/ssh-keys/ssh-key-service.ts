@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
-import { dialog, type BrowserWindow, type OpenDialogOptions } from 'electron'
+import electron, { type BrowserWindow, type OpenDialogOptions } from 'electron'
 import ssh2 from 'ssh2'
-import type { ImportSshKeyInput, SshKeyImportResult, SshKeyMetadata } from '@fileterm/core'
+import type { ImportSshKeyInput, SshKeyFileSelection, SshKeyImportResult, SshKeyMetadata } from '@fileterm/core'
 import type { ProfileRepository, SshKeyRepository, StoredSshKey } from '@fileterm/storage'
 
+const { dialog } = electron
 const { utils } = ssh2
 const MAX_PRIVATE_KEY_BYTES = 1024 * 1024
 
@@ -32,6 +33,19 @@ export class SshKeyService {
     }))
   }
 
+  async selectFile(parent?: BrowserWindow): Promise<SshKeyFileSelection | null> {
+    const sourcePath = await this.selectPrivateKey(parent)
+    if (!sourcePath) return null
+
+    const { inspected } = await this.readSource(sourcePath)
+    const existing = await this.repository.getByFingerprint(inspected.fingerprint)
+    return {
+      sourcePath,
+      fileName: path.basename(sourcePath),
+      existingKey: existing ? await this.toMetadata(existing) : undefined
+    }
+  }
+
   async import(input: ImportSshKeyInput = {}, parent?: BrowserWindow): Promise<SshKeyImportResult | null> {
     const note = input.note?.trim()
     if (!note) {
@@ -43,16 +57,7 @@ export class SshKeyService {
       return null
     }
 
-    const fileStat = await stat(sourcePath)
-    if (!fileStat.isFile()) {
-      throw new Error('请选择有效的私钥文件。')
-    }
-    if (fileStat.size <= 0 || fileStat.size > MAX_PRIVATE_KEY_BYTES) {
-      throw new Error('私钥文件为空或超过 1 MB 限制。')
-    }
-
-    const privateKey = await readFile(sourcePath)
-    const inspected = inspectPrivateKey(privateKey)
+    const { privateKey, inspected } = await this.readSource(sourcePath)
     const existing = await this.repository.getByFingerprint(inspected.fingerprint)
     if (existing) {
       return {
@@ -119,6 +124,19 @@ export class SshKeyService {
     return this.repository.setPassphrase(keyId, passphrase)
   }
 
+  private async readSource(sourcePath: string) {
+    const fileStat = await stat(sourcePath)
+    if (!fileStat.isFile()) {
+      throw new Error('请选择有效的私钥文件。')
+    }
+    if (fileStat.size <= 0 || fileStat.size > MAX_PRIVATE_KEY_BYTES) {
+      throw new Error('私钥文件为空或超过 1 MB 限制。')
+    }
+
+    const privateKey = await readFile(sourcePath)
+    return { privateKey, inspected: inspectPrivateKey(privateKey) }
+  }
+
   private async toMetadata(key: StoredSshKey): Promise<SshKeyMetadata> {
     const profiles = await this.profiles.list()
     return {
@@ -140,8 +158,8 @@ function privateKeyDialogOptions(): OpenDialogOptions {
     title: '导入 SSH 私钥',
     properties: ['openFile'],
     filters: [
-      { name: 'SSH 私钥', extensions: ['pem', 'key', 'ppk', 'openssh'] },
-      { name: '所有文件', extensions: ['*'] }
+      { name: '所有文件', extensions: ['*'] },
+      { name: 'SSH 私钥', extensions: ['pem', 'key', 'ppk', 'openssh'] }
     ]
   }
 }

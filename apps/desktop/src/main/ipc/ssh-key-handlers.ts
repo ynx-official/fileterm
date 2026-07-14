@@ -16,6 +16,10 @@ export function registerSshKeyHandlers(services: IpcServices, options: IpcWindow
 
   ipcMain.handle('sshKeys:list', () => services.sshKeyService.list())
 
+  ipcMain.handle('sshKeys:selectFile', (event) =>
+    services.sshKeyService.selectFile(resolveWindow(event.sender, options))
+  )
+
   ipcMain.handle('sshKeys:import', async (event, input?: ImportSshKeyInput) => {
     const result = await services.sshKeyService.import(input, resolveWindow(event.sender, options))
     if (result) {
