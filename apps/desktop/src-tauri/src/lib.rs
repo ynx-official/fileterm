@@ -5,11 +5,13 @@ pub mod storage;
 
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
-    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent, Wry,
+    AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent, Wry,
 };
 use thiserror::Error;
 use url::form_urlencoded::Serializer;
 use crate::commands::OpenWindowInput;
+use std::{collections::{HashMap, HashSet}, sync::Mutex};
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -32,6 +34,269 @@ impl serde::Serialize for AppError {
     {
         serializer.serialize_str(&self.to_string())
     }
+}
+
+/// Tracks file-editor close requests that are waiting for a renderer answer.
+///
+/// A Tauri `CloseRequested` event has no Promise to resolve like Electron's
+/// `close` handler does. Keeping this state in main makes cancellation a real
+/// lifecycle transition instead of a renderer-only no-op, and prevents two
+/// close dialogs from being emitted for the same editor window.
+#[derive(Default)]
+pub(crate) struct FileEditorCloseRegistry {
+    pending_labels: Mutex<HashSet<String>>,
+}
+
+impl FileEditorCloseRegistry {
+    fn request(&self, label: &str) -> bool {
+        self.pending_labels
+            .lock()
+            .expect("file editor close registry lock poisoned")
+            .insert(label.to_string())
+    }
+
+    fn resolve(&self, label: &str) {
+        self.pending_labels
+            .lock()
+            .expect("file editor close registry lock poisoned")
+            .remove(label);
+    }
+}
+
+pub(crate) fn request_file_editor_close(app: &AppHandle<Wry>, window: &WebviewWindow<Wry>) -> bool {
+    app.state::<FileEditorCloseRegistry>().request(window.label())
+}
+
+pub(crate) fn resolve_file_editor_close(app: &AppHandle<Wry>, window: &WebviewWindow<Wry>) {
+    app.state::<FileEditorCloseRegistry>().resolve(window.label());
+}
+
+/// Per-window zoom is not exposed by Wry as a getter. Store the scale we last
+/// applied so the View menu can provide deterministic reset/in/out behavior.
+#[derive(Default)]
+struct WindowMenuState {
+    zoom_scales: Mutex<HashMap<String, f64>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowMenuKind {
+    App,
+    File,
+    View,
+    Window,
+}
+
+impl TryFrom<&str> for WindowMenuKind {
+    type Error = AppError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "app" => Ok(Self::App),
+            "file" => Ok(Self::File),
+            "view" => Ok(Self::View),
+            "window" => Ok(Self::Window),
+            _ => Err(AppError::Command(format!("Unsupported window menu: {value}"))),
+        }
+    }
+}
+
+fn localized<'a>(is_english: bool, english: &'a str, chinese: &'a str) -> &'a str {
+    if is_english { english } else { chinese }
+}
+
+fn focused_webview_window(app: &AppHandle<Wry>) -> Option<WebviewWindow<Wry>> {
+    app.webview_windows()
+        .into_values()
+        .find(|window| window.is_focused().unwrap_or(false))
+        .or_else(|| app.get_webview_window("main"))
+}
+
+fn update_focused_window_zoom(app: &AppHandle<Wry>, operation: ZoomOperation) {
+    let Some(window) = focused_webview_window(app) else {
+        return;
+    };
+    let label = window.label().to_string();
+    let state = app.state::<WindowMenuState>();
+    let mut zoom_scales = state
+        .zoom_scales
+        .lock()
+        .expect("window menu zoom state lock poisoned");
+    let current = zoom_scales.get(&label).copied().unwrap_or(1.0);
+    let next = match operation {
+        ZoomOperation::Reset => 1.0,
+        ZoomOperation::In => (current * 1.1).min(3.0),
+        ZoomOperation::Out => (current / 1.1).max(0.5),
+    };
+    if window.set_zoom(next).is_ok() {
+        zoom_scales.insert(label, next);
+    }
+}
+
+enum ZoomOperation {
+    Reset,
+    In,
+    Out,
+}
+
+fn request_close_focused_window(app: &AppHandle<Wry>) {
+    let Some(window) = focused_webview_window(app) else {
+        return;
+    };
+    if window.label() == "main" {
+        let _ = window.emit("app:close-active-workspace-item-request", ());
+    } else {
+        // `close()` intentionally goes through the child's CloseRequested
+        // guard, so unsaved file editors show the discard confirmation.
+        let _ = window.close();
+    }
+}
+
+pub(crate) fn show_window_context_menu(
+    app: &AppHandle<Wry>,
+    window: &WebviewWindow<Wry>,
+    kind: WindowMenuKind,
+    x: f64,
+    y: f64,
+) -> Result<(), AppError> {
+    if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
+        return Err(AppError::Command("Window menu position is invalid".to_string()));
+    }
+    let is_english = crate::commands::app_get_ui_preferences(app.clone())
+        .map(|preferences| preferences.locale == "enUS")
+        .unwrap_or(false);
+
+    let menu = match kind {
+        WindowMenuKind::App => {
+            let version = MenuItemBuilder::with_id(
+                "app-version",
+                format!("Version {}", app.package_info().version),
+            )
+            .enabled(false)
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
+            MenuBuilder::new(app)
+                .item(&version)
+                .build()
+                .map_err(|error| AppError::Window(error.to_string()))?
+        }
+        WindowMenuKind::File => {
+            let new_connection = MenuItemBuilder::with_id(
+                "new-connection",
+                localized(is_english, "New Connection", "新建连接"),
+            )
+            .accelerator("CmdOrCtrl+N")
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
+            let connection_manager = MenuItemBuilder::with_id(
+                "connection-manager",
+                localized(is_english, "Connection Manager", "连接管理"),
+            )
+            .accelerator("CmdOrCtrl+Shift+C")
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
+            let command_manager = MenuItemBuilder::with_id(
+                "command-manager",
+                localized(is_english, "Command Manager", "命令管理"),
+            )
+            .accelerator("CmdOrCtrl+Shift+M")
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
+            let logs = MenuItemBuilder::with_id(
+                "open-logs-directory",
+                localized(is_english, "Open Logs Directory", "打开日志目录"),
+            )
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
+            let quit = MenuItemBuilder::with_id("quit", localized(is_english, "Exit", "退出"))
+                .accelerator("Alt+F4")
+                .build(app)
+                .map_err(|error| AppError::Window(error.to_string()))?;
+            MenuBuilder::new(app)
+                .item(&new_connection)
+                .item(&connection_manager)
+                .item(&command_manager)
+                .separator()
+                .item(&logs)
+                .separator()
+                .item(&quit)
+                .build()
+                .map_err(|error| AppError::Window(error.to_string()))?
+        }
+        WindowMenuKind::View => {
+            let reload = MenuItemBuilder::with_id("view-reload", localized(is_english, "Reload", "重新加载"))
+                .accelerator("F5")
+                .build(app)
+                .map_err(|error| AppError::Window(error.to_string()))?;
+            let reset_zoom = MenuItemBuilder::with_id(
+                "view-reset-zoom",
+                localized(is_english, "Actual Size", "实际大小"),
+            )
+            .accelerator("CmdOrCtrl+0")
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
+            let zoom_in = MenuItemBuilder::with_id("view-zoom-in", localized(is_english, "Zoom In", "放大"))
+                .accelerator("CmdOrCtrl+Plus")
+                .build(app)
+                .map_err(|error| AppError::Window(error.to_string()))?;
+            let zoom_out = MenuItemBuilder::with_id("view-zoom-out", localized(is_english, "Zoom Out", "缩小"))
+                .accelerator("CmdOrCtrl+-")
+                .build(app)
+                .map_err(|error| AppError::Window(error.to_string()))?;
+
+            let builder = MenuBuilder::new(app).item(&reload);
+            #[cfg(debug_assertions)]
+            let builder = {
+                let devtools = MenuItemBuilder::with_id(
+                    "view-toggle-devtools",
+                    localized(is_english, "Toggle Developer Tools", "开发者工具"),
+                )
+                .accelerator("F12")
+                .build(app)
+                .map_err(|error| AppError::Window(error.to_string()))?;
+                builder.item(&devtools)
+            };
+            builder
+                .separator()
+                .item(&reset_zoom)
+                .item(&zoom_in)
+                .item(&zoom_out)
+                .build()
+                .map_err(|error| AppError::Window(error.to_string()))?
+        }
+        WindowMenuKind::Window => {
+            let minimize = MenuItemBuilder::with_id(
+                "window-minimize",
+                localized(is_english, "Minimize", "最小化"),
+            )
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
+            let maximize_label = if window.is_maximized().unwrap_or(false) {
+                localized(is_english, "Restore", "还原")
+            } else {
+                localized(is_english, "Maximize", "最大化")
+            };
+            let maximize = MenuItemBuilder::with_id("window-toggle-maximize", maximize_label)
+                .build(app)
+                .map_err(|error| AppError::Window(error.to_string()))?;
+            let close = MenuItemBuilder::with_id(
+                "window-request-close",
+                localized(is_english, "Close Window", "关闭窗口"),
+            )
+            .accelerator("CmdOrCtrl+W")
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
+            MenuBuilder::new(app)
+                .item(&minimize)
+                .item(&maximize)
+                .separator()
+                .item(&close)
+                .build()
+                .map_err(|error| AppError::Window(error.to_string()))?
+        }
+    };
+    window
+        .popup_menu_at(&menu, LogicalPosition::new(x, y))
+        .map_err(|error| AppError::Window(error.to_string()))
 }
 
 fn window_query(input: &OpenWindowInput) -> String {
@@ -128,7 +393,9 @@ pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), 
         window.on_window_event(move |event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = editor_window.emit("app:file-editor-close-request", ());
+                if request_file_editor_close(editor_window.app_handle(), &editor_window) {
+                    let _ = editor_window.emit("app:file-editor-close-request", ());
+                }
             }
         });
     }
@@ -156,6 +423,8 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             app.manage(crate::services::WorkspaceState::default());
+            app.manage(FileEditorCloseRegistry::default());
+            app.manage(WindowMenuState::default());
 
             let main_window = app.get_webview_window("main")
                 .ok_or_else(|| "Failed to find main window".to_string())?;
@@ -341,6 +610,46 @@ pub fn run() {
                     },
                 );
             }
+            "open-logs-directory" => {
+                let _ = crate::commands::app_open_logs_directory(app.clone());
+            }
+            "view-reload" => {
+                if let Some(window) = focused_webview_window(app) {
+                    let _ = window.reload();
+                }
+            }
+            "view-reset-zoom" => update_focused_window_zoom(app, ZoomOperation::Reset),
+            "view-zoom-in" => update_focused_window_zoom(app, ZoomOperation::In),
+            "view-zoom-out" => update_focused_window_zoom(app, ZoomOperation::Out),
+            "view-toggle-devtools" => {
+                #[cfg(debug_assertions)]
+                if let Some(window) = focused_webview_window(app) {
+                    if window.is_devtools_open() {
+                        window.close_devtools();
+                    } else {
+                        window.open_devtools();
+                    }
+                }
+            }
+            "window-minimize" => {
+                if let Some(window) = focused_webview_window(app) {
+                    let _ = window.minimize();
+                }
+            }
+            "window-toggle-maximize" => {
+                if let Some(window) = focused_webview_window(app) {
+                    if window.is_maximized().unwrap_or(false) {
+                        let _ = window.unmaximize();
+                    } else {
+                        let _ = window.maximize();
+                    }
+                    let _ = app.emit(
+                        "app:window-maximized-change",
+                        window.is_maximized().unwrap_or(false),
+                    );
+                }
+            }
+            "window-request-close" => request_close_focused_window(app),
             "show-main" => show_main_window(app),
             "quit" => request_main_close(app),
             _ => {}
@@ -379,6 +688,8 @@ pub fn run() {
             crate::commands::app_open_window,
             crate::commands::app_window_action,
             crate::commands::app_is_window_maximized,
+            crate::commands::app_cancel_file_editor_close,
+            crate::commands::app_show_window_menu,
             
             // Phase 3 commands
             crate::commands::app_open_profile,
@@ -453,4 +764,27 @@ pub fn run() {
                 show_main_window(app_handle);
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FileEditorCloseRegistry, WindowMenuKind};
+
+    #[test]
+    fn window_menu_kind_accepts_the_public_bridge_values_only() {
+        assert_eq!(WindowMenuKind::try_from("app").unwrap(), WindowMenuKind::App);
+        assert_eq!(WindowMenuKind::try_from("file").unwrap(), WindowMenuKind::File);
+        assert_eq!(WindowMenuKind::try_from("view").unwrap(), WindowMenuKind::View);
+        assert_eq!(WindowMenuKind::try_from("window").unwrap(), WindowMenuKind::Window);
+        assert!(WindowMenuKind::try_from("developer").is_err());
+    }
+
+    #[test]
+    fn file_editor_close_registry_deduplicates_and_clears_requests() {
+        let registry = FileEditorCloseRegistry::default();
+        assert!(registry.request("file-editor-a"));
+        assert!(!registry.request("file-editor-a"));
+        registry.resolve("file-editor-a");
+        assert!(registry.request("file-editor-a"));
+    }
 }

@@ -3375,7 +3375,7 @@ fn format_perm(perm: u32, is_dir: bool, is_link: bool) -> String {
 mod tests {
     use super::{
         build_http_connect_request, is_password_prompt, looks_like_mfa_prompt, parent_remote_path,
-        forward_local_connection, remote_bind_host_matches, suppress_shell_setup_echo,
+        forward_local_connection, forward_socks5_connection, remote_bind_host_matches, suppress_shell_setup_echo,
         try_keyboard_interactive_with_responder, tunnel_bind_address, validate_tunnel_rule,
         KeyboardInteractiveRequest, SshTunnelRule,
     };
@@ -3515,6 +3515,39 @@ mod tests {
             headers.push(byte[0]);
         }
         String::from_utf8(headers).unwrap()
+    }
+
+    #[cfg(unix)]
+    async fn read_socks5_connect_request(socket: &mut tokio::net::TcpStream) -> (String, u16) {
+        let mut greeting = [0_u8; 2];
+        socket.read_exact(&mut greeting).await.unwrap();
+        assert_eq!(greeting[0], 5);
+        let mut methods = vec![0_u8; greeting[1] as usize];
+        socket.read_exact(&mut methods).await.unwrap();
+        assert!(methods.contains(&0));
+        socket.write_all(&[5, 0]).await.unwrap();
+
+        let mut request = [0_u8; 4];
+        socket.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request[..3], &[5, 1, 0]);
+        let host = match request[3] {
+            1 => {
+                let mut address = [0_u8; 4];
+                socket.read_exact(&mut address).await.unwrap();
+                std::net::Ipv4Addr::from(address).to_string()
+            }
+            3 => {
+                let mut length = [0_u8; 1];
+                socket.read_exact(&mut length).await.unwrap();
+                let mut hostname = vec![0_u8; length[0] as usize];
+                socket.read_exact(&mut hostname).await.unwrap();
+                String::from_utf8(hostname).unwrap()
+            }
+            other => panic!("unexpected SOCKS5 address type: {other}"),
+        };
+        let mut port = [0_u8; 2];
+        socket.read_exact(&mut port).await.unwrap();
+        (host, u16::from_be_bytes(port))
     }
 
     #[cfg(unix)]
@@ -3797,6 +3830,60 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+
+        let dynamic_target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dynamic_target_address = dynamic_target_listener.local_addr().unwrap();
+        let dynamic_target = tokio::spawn(async move {
+            let (mut socket, _) = dynamic_target_listener.accept().await.unwrap();
+            let mut request = [0_u8; 5];
+            socket.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"socks");
+            socket.write_all(b"proxy").await.unwrap();
+        });
+        let dynamic_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dynamic_address = dynamic_listener.local_addr().unwrap();
+        let mut dynamic_client = tokio::net::TcpStream::connect(dynamic_address).await.unwrap();
+        let (dynamic_socket, _) = dynamic_listener.accept().await.unwrap();
+        let dynamic_bridge = tokio::spawn({
+            let tunnel_handle = tunnel_handle.clone();
+            async move { forward_socks5_connection(dynamic_socket, tunnel_handle).await }
+        });
+        dynamic_client.write_all(&[5, 1, 0]).await.unwrap();
+        let mut selected = [0_u8; 2];
+        dynamic_client.read_exact(&mut selected).await.unwrap();
+        assert_eq!(&selected, &[5, 0]);
+        dynamic_client
+            .write_all(&[
+                5,
+                1,
+                0,
+                1,
+                127,
+                0,
+                0,
+                1,
+                (dynamic_target_address.port() >> 8) as u8,
+                dynamic_target_address.port() as u8,
+            ])
+            .await
+            .unwrap();
+        let mut connected = [0_u8; 10];
+        dynamic_client.read_exact(&mut connected).await.unwrap();
+        assert_eq!(&connected[..2], &[5, 0]);
+        dynamic_client.write_all(b"socks").await.unwrap();
+        let mut dynamic_response = [0_u8; 5];
+        dynamic_client.read_exact(&mut dynamic_response).await.unwrap();
+        assert_eq!(&dynamic_response, b"proxy");
+        drop(dynamic_client);
+        timeout(Duration::from_secs(2), dynamic_target)
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(2), dynamic_bridge)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 
     #[cfg(unix)]
@@ -3846,6 +3933,52 @@ mod tests {
         timeout(Duration::from_secs(2), proxy)
             .await
             .expect("HTTP proxy transport did not release")
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn real_openssh_sshd_authenticates_through_tauri_socks5_proxy_transport() {
+        let fixture = start_openssh_fixture();
+        wait_for_openssh(fixture.port).await;
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_address = proxy_listener.local_addr().unwrap();
+        let target_port = fixture.port;
+        let proxy = tokio::spawn(async move {
+            let (mut client, _) = proxy_listener.accept().await.unwrap();
+            let (host, port) = read_socks5_connect_request(&mut client).await;
+            assert_eq!(host, "127.0.0.1");
+            assert_eq!(port, target_port);
+            client
+                .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            let mut target = tokio::net::TcpStream::connect(("127.0.0.1", target_port))
+                .await
+                .unwrap();
+            tokio::io::copy_bidirectional(&mut client, &mut target)
+                .await
+                .unwrap();
+        });
+        let profile = serde_json::json!({
+            "proxy": {
+                "type": "socks5",
+                "host": "127.0.0.1",
+                "port": proxy_address.port()
+            }
+        });
+        let handle = authenticate_openssh_fixture(&fixture, &profile).await;
+        let output = crate::sessions::system_metrics::exec_command(
+            &handle,
+            "printf 'tauri-openssh-socks5-proxy'",
+        )
+        .await
+        .unwrap();
+        assert_eq!(output, "tauri-openssh-socks5-proxy");
+        drop(handle);
+        timeout(Duration::from_secs(2), proxy)
+            .await
+            .expect("SOCKS5 proxy transport did not release")
             .unwrap();
     }
 

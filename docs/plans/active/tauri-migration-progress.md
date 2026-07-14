@@ -13,15 +13,15 @@
 
 ### 2026-07-14 重新审计结论（覆盖下方历史“完成”标记）
 
-| 阶段    | 代码状态                          | 不能宣称完成的原因                                                                                                                                                                                   |
-| ------- | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Phase 0 | ✅ 代码/contract 完成，待 UI 手测 | 已改为从 Rust/Tauri runtime 异步回填 metadata，并缓存原生 drag-drop 的绝对路径供 DOM drop 消费；需在实际 Tauri webview 验证事件时序和多文件路径。                                                    |
-| Phase 1 | ⚠️ 主体已实现                     | `showWindowMenu` 是 no-op；文件编辑器取消关闭依赖本地 UI 行为，未有等价原生取消 command。                                                                                                            |
-| Phase 2 | ✅ 代码与 contract 覆盖已完成     | 未做完整多窗口 renderer 端到端回归；作为实现里程碑完成，但不是发行验收。                                                                                                                             |
-| Phase 3 | ⚠️ 代码主体已实现                 | 真实 sshd 仅覆盖公钥、exec、SFTP、HTTP 代理和 local direct-tcpip；跳板、远程/动态转发、sudo/root、CWD UI 事件、完整指标流和 OpenSSH/PAM MFA 尚未在发行候选闭环。macOS 远端指标当前探测为 `unknown`。 |
-| Phase 4 | ⚠️ 代码主体已实现                 | 已覆盖真实 FTPS、WebDAV ETag、Telnet HTTP 代理和 Linux PTY；仍缺真实 Telnet 设备/SOCKS 代理、真实 WebDAV 服务、macOS/Windows 串口、三平台 socket CI 实际结果，以及签名 in-app updater。              |
+| 阶段    | 代码状态                          | 不能宣称完成的原因                                                                                                                                                                                            |
+| ------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Phase 0 | ✅ 代码/contract 完成，待 UI 手测 | 已改为从 Rust/Tauri runtime 异步回填 metadata，并缓存原生 drag-drop 的绝对路径供 DOM drop 消费；需在实际 Tauri webview 验证事件时序和多文件路径。                                                             |
+| Phase 1 | ✅ 代码/contract 完成，待 UI 手测 | `showWindowMenu` 已替换为 Rust 原生 File/View/Window 弹出菜单；文件编辑器取消关闭已清除 main-side pending state。仍未在打包 Tauri 应用中手测菜单坐标、缩放、关闭确认和多窗口焦点。                            |
+| Phase 2 | ✅ 代码与 contract 覆盖已完成     | 未做完整多窗口 renderer 端到端回归；作为实现里程碑完成，但不是发行验收。                                                                                                                                      |
+| Phase 3 | ⚠️ 代码主体已实现                 | 真实 sshd 已覆盖公钥、exec、SFTP、HTTP/SOCKS5 代理、local/dynamic direct-tcpip；跳板、远程转发、sudo/root、CWD UI 事件、完整指标流和 OpenSSH/PAM MFA 尚未在发行候选闭环。macOS 远端指标当前探测为 `unknown`。 |
+| Phase 4 | ⚠️ 代码主体已实现                 | 已覆盖真实 FTPS、WebDAV HEAD/PUT/GET + ETag/hash、Telnet HTTP/SOCKS5 代理和 Linux PTY；仍缺真实 Telnet 设备/代理、真实 WebDAV 服务、macOS/Windows 串口、三平台 socket CI 实际结果，以及签名 in-app updater。  |
 
-**结论：Phase 0、2 均可标为代码/contract 完成（仍待 UI 端到端回归）；Phase 1、3、4 不能标为“全部完成”。** 下文的旧清单用于描述已落地代码，不等同于发行验收。
+**结论：Phase 0、1、2 均可标为代码/contract 完成（仍待 UI 端到端回归）；Phase 3、4 不能标为“全部完成”。** 下文的旧清单用于描述已落地代码，不等同于发行验收。
 
 ### Phase 0：Tauri 直连骨架与基础能力 ✅ 代码/contract 完成，待原生 UI 手测
 
@@ -31,13 +31,15 @@
 - ✅ Contract test 建立（`tests/contract.rs`，9 项断言）
 - ✅ 命令命名 `app_` 前缀、事件命名 `namespace:name` 格式冻结
 
-### Phase 1：Tauri 桌面壳垂直切片 ⚠️ 主体完成，尚有窗口菜单缺口
+### Phase 1：Tauri 桌面壳垂直切片 ✅ 代码/contract 完成，待打包 UI 手测
 
 - ✅ Tauri 壳加载 React renderer
 - ✅ macOS Overlay titleBar + trafficLightPosition(20,18)
 - ✅ Windows 无边框 + Linux 原生 decorations
 - ✅ 窗口尺寸对齐 Electron 默认值（main 1280×820，子窗口 860×680）
 - ✅ 菜单 + 托盘 + macOS dock reopen
+- ✅ Windows 自绘菜单栏的 `File` / `View` / `Window` 原生 popup：新建/管理器/日志、reload/zoom、最小化/最大化/关闭均由 Rust `on_menu_event` 执行；release 包不会显示不可用的开发者工具项
+- ✅ 文件编辑器关闭确认 registry：取消关闭会清理 pending 状态，重复 CloseRequested 不会重复弹确认框
 - ✅ 平台/剪贴板/UI prefs/文件选择器通过 contract test
 
 ### Phase 2：Rust 存储与 Workspace ✅ 代码/contract 完成
@@ -68,19 +70,19 @@
 - ✅ chmod 递归：`-R` + `applyTo` (all/files/directories) + `find -exec {} +`
 - ✅ JumpHost 跳板机：`jumpProfileId` → `channel_open_direct_tcpip` → `connect_stream`
 - ✅ SOCKS5 / HTTP CONNECT 出站代理：认证、IPv6 authority 与 HTTP 头注入防护（`tokio-socks` + `connect_http_proxy`）
-- ✅ M3.7 SSH `-L/-R/-D` 隧道：Tauri bridge + command + SSH worker，`TcpListener` / `tcpip-forward` / SOCKS5 listener，断线/重连/关闭 tab 自动回收
+- ✅ M3.7 SSH `-L/-R/-D` 隧道：Tauri bridge + command + SSH worker，`TcpListener` / `tcpip-forward` / SOCKS5 listener，断线/重连/关闭 tab 自动回收；本地 OpenSSH 已回归 `-L` 与 `-D` 的 direct-tcpip 字节转发
 
-> 注：Phase 3 的已完成项包含当前未提交工作树中的实现；提交前仍需完成 Rust 编译、contract test、Electron parity 回归和必要的手工 SSH 验收。
+> 注：Phase 3 的本地自动化已执行 Rust 编译与 contract test；发行候选仍需完成真实服务、真实账户和 renderer/UI 手测，不能以本机夹具替代。
 
 > 2026-07-14 回归修复：POSIX CWD hook 现在以交互 shell 的 CR 提交执行，并以 CR/LF 兼容的状态机抑制内部命令回显；CWD 事件会在“跟随终端”开启时发布 `remoteFilesLoading`、异步刷新相同路径的 SFTP 文件列表，并在成功或失败后结束 loading。SFTP `read_dir` 不再依赖服务端返回 `..`，会按 Electron 语义为非根目录生成父目录行。POSIX 指标脚本也移除了从 TypeScript 模板误带入 Rust raw string 的双重转义，恢复磁盘、进程和网络行的真实换行解析。
 
 ### Phase 4：其他协议与 Transfer ⚠️ 实现主体完成，真实服务与设备验收未完成
 
 - ✅ `suppaftp` FTP/FTPS：plain、显式 TLS 与隐式 TLS，文件 CRUD、REST 断点上传/下载、原子 rename 与取消；显式/隐式 TLS 控制与数据通道已由本地真实 TLS 夹具验证。
-- ✅ Telnet：`tokio::net` transport、RFC 854 IAC/NAWS/TERMINAL-TYPE、SOCKS5/HTTP CONNECT、resize 与退出关闭 socket；直接 socket 与 HTTP CONNECT 已由真实 TCP 夹具验证，真实设备/SOCKS 服务待验收。
+- ✅ Telnet：`tokio::net` transport、RFC 854 IAC/NAWS/TERMINAL-TYPE、SOCKS5/HTTP CONNECT、resize 与退出关闭 socket；直接 socket、HTTP CONNECT 与 SOCKS5 均由真实 TCP 夹具验证，真实设备/第三方代理服务待验收。
 - ✅ Serial：`tokio-serial` 的波特率/数据位/停止位/奇偶校验/硬件/软件流控映射和设备断开处理。`mark/space` parity 受 `serialport` 跨平台 API 限制，会返回明确错误而不静默降级；Linux PTY 已有自动验证，macOS/Windows 仍需要实体或可用虚拟串口。
 - ✅ 统一 TransferService：持久 journal、单文件/目录 manifest、上传/下载、hash/identity 校验、暂停/继续/取消/丢弃、tab 关闭与应用退出清理。
-- ✅ WebDAV：HTTPS 默认、Basic Auth、ETag 前置条件冲突检测、SHA-256 bundle 校验、秘密字段剥离与 5 MB 输入上限。
+- ✅ WebDAV：HTTPS 默认、Basic Auth、ETag 前置条件冲突检测、SHA-256 bundle 校验、秘密字段剥离与 5 MB 输入上限；本地 HTTP fixture 已覆盖 HEAD、成功 PUT、GET、`If-Match` 412 和下载 hash 校验。
 - ✅ Electron parity：SSH Config/外部 JSON profile 导入导出、命令历史/发送偏好、文件编辑器关闭确认、跨窗口 UI/最大化事件、CSP、应用/SSH/协议错误本地日志。
 - ✅ 更新检查：GitHub Release 的版本检查与安全发布页交接。签名的应用内静默安装依赖未提供的 Tauri updater 公钥、更新清单与公证资产，保留在 Phase 5 发布前置，不能伪造为已启用。
 
@@ -101,25 +103,25 @@
 
 ### 2.1 完全缺失（优先级高）
 
-| 功能                       | Electron 源                                                    | 说明                                                                                                                                |
-| -------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| **Transfer 系统**          | `services/transfers/`                                          | ✅ `services/transfers.rs`：journal、目录 manifest、断点、暂停/继续/取消/丢弃、退出/关闭清理与 snapshot 事件。                      |
-| **SSH -L 本地转发**        | `services/sessions/ssh-tunnel-service.ts`                      | ✅ 已补齐：`TcpListener` → `channel_open_direct_tcpip`                                                                              |
-| **SSH -R 远程转发**        | 同上                                                           | ✅ 已补齐：`tcpip_forward` / `cancel_tcpip_forward` + `forwarded-tcpip` 回调                                                        |
-| **SSH -D 动态 SOCKS5**     | 同上                                                           | ✅ 已补齐：本地 SOCKS5 CONNECT listener → `channel_open_direct_tcpip`                                                               |
-| **SOCKS5 代理**            | `services/network/proxy-socket-factory.ts`                     | ✅ 已补齐：`tokio-socks`，支持无认证或 username/password                                                                            |
-| **HTTP CONNECT 代理**      | 同上                                                           | ✅ 已补齐：CONNECT + Basic 认证 + IPv6 authority + 响应边界限制                                                                     |
-| **Jump Host / ProxyJump**  | `services/sessions/ssh-session-controller.ts::connectJumpHost` | ✅ 已补齐：`jumpProfileId` → `channel_open_direct_tcpip` → `connect_stream`                                                         |
-| **FTP/FTPS**               | `services/sessions/ftp-session-controller.ts`                  | ✅ `sessions/ftp.rs`，plain/显式/隐式 FTPS 和传输操作均已接入。                                                                     |
-| **Telnet**                 | `services/sessions/telnet-session-controller.ts`               | ✅ `sessions/telnet.rs`，RFC 854 IAC/NAWS/TERMINAL-TYPE 实现完成。                                                                  |
-| **Serial**                 | `services/sessions/serial-session-controller.ts`               | ✅ `sessions/serial.rs`；`mark/space` parity 显式拒绝（上游跨平台限制）。                                                           |
-| **Auto-update**            | `services/app-update-service.ts`                               | ✅ GitHub Release check + 发布页模式；签名 in-app updater 是 Phase 5 发布资产前置。                                                 |
-| **Profile import/export**  | `services/connection-config-codec.ts`                          | ✅ SSH config/JSON preview + commit、fileterm/compatible 导出。                                                                     |
-| **Command history**        | `services/file-profile-repository.ts`                          | ✅ 每 profile 历史与命令发送偏好已持久化。                                                                                          |
-| **openLogsDirectory**      | `apps/desktop/src/main/main.ts`                                | ✅ Rust command 打开应用日志目录。                                                                                                  |
-| **App logger**             | `services/app-logger.ts`                                       | ✅ 轮转本地 app/SSH/协议错误日志，秘密字段脱敏。                                                                                    |
-| **SSH debug logger**       | `services/sessions/ssh-debug-logger.ts`                        | ✅ SSH worker 生命周期/错误写入本地日志；不暴露凭据。                                                                               |
-| **真实 sshd/FTP 集成测试** | `test/protocol/sftp-resume.test.mjs` 等                        | ⚠️ Electron 的 7 项真实协议测试已通过。Tauri 新增本地 OpenSSH、FTPS、WebDAV、Telnet 夹具；Windows/Linux CI 仅已配置，尚未产生结果。 |
+| 功能                       | Electron 源                                                    | 说明                                                                                                                                                                     |
+| -------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Transfer 系统**          | `services/transfers/`                                          | ✅ `services/transfers.rs`：journal、目录 manifest、断点、暂停/继续/取消/丢弃、退出/关闭清理与 snapshot 事件。                                                           |
+| **SSH -L 本地转发**        | `services/sessions/ssh-tunnel-service.ts`                      | ✅ 已补齐：`TcpListener` → `channel_open_direct_tcpip`                                                                                                                   |
+| **SSH -R 远程转发**        | 同上                                                           | ✅ 已补齐：`tcpip_forward` / `cancel_tcpip_forward` + `forwarded-tcpip` 回调                                                                                             |
+| **SSH -D 动态 SOCKS5**     | 同上                                                           | ✅ 已补齐：本地 SOCKS5 CONNECT listener → `channel_open_direct_tcpip`                                                                                                    |
+| **SOCKS5 代理**            | `services/network/proxy-socket-factory.ts`                     | ✅ 已补齐：`tokio-socks`，支持无认证或 username/password                                                                                                                 |
+| **HTTP CONNECT 代理**      | 同上                                                           | ✅ 已补齐：CONNECT + Basic 认证 + IPv6 authority + 响应边界限制                                                                                                          |
+| **Jump Host / ProxyJump**  | `services/sessions/ssh-session-controller.ts::connectJumpHost` | ✅ 已补齐：`jumpProfileId` → `channel_open_direct_tcpip` → `connect_stream`                                                                                              |
+| **FTP/FTPS**               | `services/sessions/ftp-session-controller.ts`                  | ✅ `sessions/ftp.rs`，plain/显式/隐式 FTPS 和传输操作均已接入。                                                                                                          |
+| **Telnet**                 | `services/sessions/telnet-session-controller.ts`               | ✅ `sessions/telnet.rs`，RFC 854 IAC/NAWS/TERMINAL-TYPE 实现完成。                                                                                                       |
+| **Serial**                 | `services/sessions/serial-session-controller.ts`               | ✅ `sessions/serial.rs`；`mark/space` parity 显式拒绝（上游跨平台限制）。                                                                                                |
+| **Auto-update**            | `services/app-update-service.ts`                               | ✅ GitHub Release check + 发布页模式；签名 in-app updater 是 Phase 5 发布资产前置。                                                                                      |
+| **Profile import/export**  | `services/connection-config-codec.ts`                          | ✅ SSH config/JSON preview + commit、fileterm/compatible 导出。                                                                                                          |
+| **Command history**        | `services/file-profile-repository.ts`                          | ✅ 每 profile 历史与命令发送偏好已持久化。                                                                                                                               |
+| **openLogsDirectory**      | `apps/desktop/src/main/main.ts`                                | ✅ Rust command 打开应用日志目录。                                                                                                                                       |
+| **App logger**             | `services/app-logger.ts`                                       | ✅ 轮转本地 app/SSH/协议错误日志，秘密字段脱敏。                                                                                                                         |
+| **SSH debug logger**       | `services/sessions/ssh-debug-logger.ts`                        | ✅ SSH worker 生命周期/错误写入本地日志；不暴露凭据。                                                                                                                    |
+| **真实 sshd/FTP 集成测试** | `test/protocol/sftp-resume.test.mjs` 等                        | ⚠️ Electron 的 7 项真实协议测试已通过。Tauri 本地 OpenSSH、FTPS、WebDAV、Telnet 夹具已覆盖 HTTP/SOCKS5、`-L/-D`、ETag 与 hash；Windows/Linux CI 仅已配置，尚未产生结果。 |
 
 ### 2.2 部分实现（需补齐）
 
@@ -218,7 +220,7 @@ Tauri 迁移整体完成的验收标准（与 Electron 原版功能对齐）：
 - [x] Auto-update：GitHub Release check + 安全发布页更新路径
 - [ ] 签名的 Tauri in-app updater：待 release endpoint、公钥和公证资产
 - [ ] 三平台签名/公证 + 安装包
-- [ ] Tauri 真实协议验收：OpenSSH sshd（MFA、跳板、代理、隧道、root、CWD、指标）、显式/隐式 FTPS、WebDAV ETag、Telnet 设备/代理
+- [ ] Tauri 真实协议验收：OpenSSH sshd（PAM MFA、跳板、远程转发、root、CWD、指标）、受信任显式/隐式 FTPS、WebDAV 服务、Telnet 设备/第三方代理；本机 HTTP/SOCKS5、`-L/-D`、ETag/hash fixture 已通过
 - [ ] Serial 验收：macOS/Linux/Windows 实体或可信虚拟串口；`mark/space` 保持明确不支持
 - [ ] 三平台 socket lifecycle CI 结果归档（当前只有 workflow 配置）
 - [x] macOS 冷启动进程/RSS 基线：Tauri 约 116 MiB，Electron 约 228 MiB（同机隔离配置；详见质量记录）

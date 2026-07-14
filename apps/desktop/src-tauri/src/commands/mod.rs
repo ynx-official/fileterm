@@ -515,6 +515,7 @@ pub async fn app_window_action(
             // `app:window-close-request` and loop forever) by destroying the
             // window directly via the raw handle. `window.close()` re-fires
             // `CloseRequested`, so we use `window.destroy()` instead.
+            crate::resolve_file_editor_close(&app, &window);
             let _ = window.destroy();
         }
         "quit" => {
@@ -534,6 +535,23 @@ pub async fn app_window_action(
 #[tauri::command]
 pub fn app_is_window_maximized(window: WebviewWindow) -> bool {
     window.is_maximized().unwrap_or(false)
+}
+
+#[tauri::command]
+pub fn app_cancel_file_editor_close(app: AppHandle, window: WebviewWindow) {
+    crate::resolve_file_editor_close(&app, &window);
+}
+
+#[tauri::command]
+pub fn app_show_window_menu(
+    app: AppHandle,
+    window: WebviewWindow,
+    menu_type: String,
+    x: f64,
+    y: f64,
+) -> Result<(), AppError> {
+    let kind = crate::WindowMenuKind::try_from(menu_type.as_str())?;
+    crate::show_window_context_menu(&app, &window, kind, x, y)
 }
 
 // ==========================================

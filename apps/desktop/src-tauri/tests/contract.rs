@@ -178,6 +178,8 @@ fn contract_commands_use_app_prefix() {
         "app_get_snapshot",
         "app_open_profile",
         "app_activate_tab",
+        "app_cancel_file_editor_close",
+        "app_show_window_menu",
         "app_reconnect_tab",
         "app_close_tab",
         "app_write_terminal",

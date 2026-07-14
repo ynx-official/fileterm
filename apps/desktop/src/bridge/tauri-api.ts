@@ -193,8 +193,9 @@ export function createTauriApi(): FileTermDesktopApi {
     toggleMaximizeCurrentWindow: () => invoke<void>('app_window_action', { action: 'toggle-maximize' }),
     closeCurrentWindow: () => invoke<void>('app_window_action', { action: 'close' }),
     confirmCloseCurrentFileEditor: () => invoke<void>('app_window_action', { action: 'close' }),
-    cancelCloseCurrentFileEditor: async () => undefined,
-    showWindowMenu: async () => undefined,
+    cancelCloseCurrentFileEditor: () => invoke<void>('app_cancel_file_editor_close'),
+    showWindowMenu: (menuType: 'app' | 'file' | 'view' | 'window', x: number, y: number) =>
+      invoke<void>('app_show_window_menu', { menuType, x, y }),
     requestQuitApp: () => invoke<void>('app_window_action', { action: 'quit' }),
     listLocalDirectory: (dirPath?: string) =>
       invoke<{ path: string; items: LocalFileItem[] }>('app_list_local_directory', {

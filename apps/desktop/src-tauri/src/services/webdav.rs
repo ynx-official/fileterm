@@ -470,27 +470,7 @@ async fn upload_payload(
 pub async fn download(app: &AppHandle) -> Result<Value, AppError> {
     let mut config = configured(app)?;
     let client = client()?;
-    let response = authenticated(client.get(remote_url(&config)?), &config)
-        .send()
-        .await
-        .map_err(|error| command_error(format!("WebDAV 下载失败: {error}")))?;
-    if !response.status().is_success() {
-        return Err(response_error("下载", response.status()));
-    }
-    if response
-        .content_length()
-        .is_some_and(|size| size as usize > MAX_BUNDLE_BYTES)
-    {
-        return Err(command_error("WebDAV 配置包超过 5 MB 限制"));
-    }
-    let remote_etag = etag(response.headers());
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|error| command_error(format!("WebDAV 下载内容失败: {error}")))?;
-    if bytes.len() > MAX_BUNDLE_BYTES {
-        return Err(command_error("WebDAV 配置包超过 5 MB 限制"));
-    }
+    let (bytes, remote_etag) = download_payload(&client, &config).await?;
     let profiles = parse_bundle(&bytes)?;
     let (existing, _) = profile_ops::read_and_heal_profiles(app)?;
     let mut known = existing
@@ -530,10 +510,41 @@ pub async fn download(app: &AppHandle) -> Result<Value, AppError> {
     }))
 }
 
+/// Fetches a remote bundle without mutating local profiles. Keeping the HTTP
+/// exchange at this boundary makes real WebDAV GET + ETag + integrity tests
+/// possible without a Tauri application data directory.
+async fn download_payload(
+    client: &Client,
+    config: &StoredConfig,
+) -> Result<(Vec<u8>, Option<String>), AppError> {
+    let response = authenticated(client.get(remote_url(&config)?), &config)
+        .send()
+        .await
+        .map_err(|error| command_error(format!("WebDAV 下载失败: {error}")))?;
+    if !response.status().is_success() {
+        return Err(response_error("下载", response.status()));
+    }
+    if response
+        .content_length()
+        .is_some_and(|size| size as usize > MAX_BUNDLE_BYTES)
+    {
+        return Err(command_error("WebDAV 配置包超过 5 MB 限制"));
+    }
+    let remote_etag = etag(response.headers());
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| command_error(format!("WebDAV 下载内容失败: {error}")))?;
+    if bytes.len() > MAX_BUNDLE_BYTES {
+        return Err(command_error("WebDAV 配置包超过 5 MB 限制"));
+    }
+    Ok((bytes.to_vec(), remote_etag))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        client, normalize_remote_path, parse_bundle, sha256_hex, upload_payload, StoredConfig,
+        client, download_payload, normalize_remote_path, parse_bundle, sha256_hex, upload_payload, StoredConfig,
     };
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -541,11 +552,11 @@ mod tests {
 
     async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
         let mut request = Vec::new();
-        let mut buffer = [0_u8; 1024];
+        let mut byte = [0_u8; 1];
         while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-            let count = socket.read(&mut buffer).await.unwrap();
+            let count = socket.read(&mut byte).await.unwrap();
             assert!(count > 0, "client closed before completing HTTP headers");
-            request.extend_from_slice(&buffer[..count]);
+            request.extend_from_slice(&byte[..count]);
         }
         String::from_utf8(request).unwrap()
     }
@@ -614,6 +625,102 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("ETag 冲突"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn real_webdav_server_uploads_payload_and_returns_fresh_etag() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let payload = br#"{"profiles":[]}"#.to_vec();
+        let expected_payload = payload.clone();
+        let server = tokio::spawn(async move {
+            let (mut head, _) = listener.accept().await.unwrap();
+            let head_request = read_request(&mut head).await;
+            assert!(head_request.starts_with("HEAD /profiles.json HTTP/1.1\r\n"));
+            head.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+
+            let (mut put, _) = listener.accept().await.unwrap();
+            let put_request = read_request(&mut put).await;
+            assert!(put_request.starts_with("PUT /profiles.json HTTP/1.1\r\n"));
+            assert!(put_request.contains("if-none-match: *\r\n"));
+            assert!(put_request.contains(&format!("content-length: {}\r\n", expected_payload.len())));
+            let mut body = vec![0_u8; expected_payload.len()];
+            put.read_exact(&mut body).await.unwrap();
+            assert_eq!(body, expected_payload);
+            put.write_all(
+                b"HTTP/1.1 201 Created\r\nETag: \"etag-after-write\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        });
+
+        let config = StoredConfig {
+            enabled: true,
+            url: format!("http://{address}"),
+            username: None,
+            remote_path: "profiles.json".to_string(),
+            allow_insecure_tls: Some(true),
+            password: None,
+            last_synced_at: None,
+            last_etag: None,
+            content_hash: None,
+        };
+        assert_eq!(
+            upload_payload(&client().unwrap(), &config, payload).await.unwrap(),
+            Some("\"etag-after-write\"".to_string())
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn real_webdav_server_downloads_payload_and_hash_is_verified() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let profiles = json!([{ "name": "dev", "type": "ssh", "host": "example.test", "port": 22 }]);
+        let profile_bytes = serde_json::to_vec(&profiles).unwrap();
+        let payload = serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "contentHash": sha256_hex(&profile_bytes),
+            "profiles": profiles,
+        }))
+        .unwrap();
+        let server_payload = payload.clone();
+        let server = tokio::spawn(async move {
+            let (mut get, _) = listener.accept().await.unwrap();
+            let get_request = read_request(&mut get).await;
+            assert!(get_request.starts_with("GET /profiles.json HTTP/1.1\r\n"));
+            get.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nETag: \"etag-download\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    server_payload.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+            get.write_all(&server_payload).await.unwrap();
+        });
+
+        let config = StoredConfig {
+            enabled: true,
+            url: format!("http://{address}"),
+            username: None,
+            remote_path: "profiles.json".to_string(),
+            allow_insecure_tls: Some(true),
+            password: None,
+            last_synced_at: None,
+            last_etag: None,
+            content_hash: None,
+        };
+        let (downloaded, etag) = download_payload(&client().unwrap(), &config).await.unwrap();
+        assert_eq!(downloaded, payload);
+        assert_eq!(etag.as_deref(), Some("\"etag-download\""));
+        assert_eq!(parse_bundle(&downloaded).unwrap().len(), 1);
         server.await.unwrap();
     }
 }

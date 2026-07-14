@@ -8,13 +8,13 @@
 
 ## 已执行结果
 
-| 项目                           | 结果                          | 说明                                                                                                                                                                                     |
-| ------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Rust 单元/协议夹具             | 通过，34 library + 9 contract | macOS 本机 `cargo test` 通过真实 OpenSSH 公钥/exec/SFTP/HTTP 代理/local direct-tcpip、SSH MFA、多模式 FTPS、WebDAV ETag、Telnet HTTP CONNECT；Linux PTY 用例已加入 CI，未在 macOS 运行。 |
-| Electron 真实协议测试          | 通过，7/7                     | 本机 `/usr/sbin/sshd` SFTP，FTP、显式 FTPS、隐式 FTPS；这是 Electron controller 证据，不能替代 Tauri 验收。                                                                              |
-| Tauri production build         | 通过                          | 产出 `FileTerm.app` 与 `FileTerm_1.1.1_aarch64.dmg`；CSP 与本地 `.icns/.ico/.png` 图标参与实际打包。                                                                                     |
-| macOS socket lifecycle         | 通过                          | Telnet 直接 transport drop 后服务端在 2 秒内收到 EOF。                                                                                                                                   |
-| Windows/Linux socket lifecycle | 已配置，未执行                | `.github/workflows/ci.yml` 的 `tauri-socket-lifecycle` 在 macOS、Windows、Ubuntu 各运行同一测试；需要推送后由 GitHub Actions 给出外部结果。                                              |
+| 项目                           | 结果                          | 说明                                                                                                                                                                                                                          |
+| ------------------------------ | ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rust 单元/协议夹具             | 通过，40 library + 9 contract | macOS 本机 `cargo test` 通过真实 OpenSSH 公钥/exec/SFTP/HTTP/SOCKS5 代理、`-L/-D` direct-tcpip、SSH MFA、多模式 FTPS、WebDAV HEAD/PUT/GET + ETag/hash、Telnet HTTP CONNECT/SOCKS5；Linux PTY 用例已加入 CI，未在 macOS 运行。 |
+| Electron 真实协议测试          | 通过，7/7                     | 本机 `/usr/sbin/sshd` SFTP，FTP、显式 FTPS、隐式 FTPS；这是 Electron controller 证据，不能替代 Tauri 验收。                                                                                                                   |
+| Tauri production build         | 通过                          | 产出 `FileTerm.app` 与 `FileTerm_1.1.1_aarch64.dmg`；CSP 与本地 `.icns/.ico/.png` 图标参与实际打包。                                                                                                                          |
+| macOS socket lifecycle         | 通过                          | Telnet 直接 transport drop 后服务端在 2 秒内收到 EOF。                                                                                                                                                                        |
+| Windows/Linux socket lifecycle | 已配置，未执行                | `.github/workflows/ci.yml` 的 `tauri-socket-lifecycle` 在 macOS、Windows、Ubuntu 各运行同一测试；需要推送后由 GitHub Actions 给出外部结果。                                                                                   |
 
 ## 性能基线
 
@@ -30,11 +30,12 @@
 
 ## 仍需外部发布条件
 
-- Tauri SSH：真实 OpenSSH/PAM MFA、多级提示词、Jump Host、SOCKS5/HTTP 代理、`-L/-R/-D`、sudo/root、CWD 事件与持续指标流必须在发行候选完整手测。当前自动化覆盖的是 MFA 协议夹具，以及本机 OpenSSH 的公钥/exec/SFTP/HTTP 代理/local direct-tcpip；macOS 远端指标当前不支持。
+- Tauri SSH：真实 OpenSSH/PAM MFA、多级提示词、Jump Host、`-R`、sudo/root、CWD 事件与持续指标流必须在发行候选完整手测。当前自动化覆盖的是 MFA 协议夹具，以及本机 OpenSSH 的公钥/exec/SFTP/HTTP/SOCKS5 代理与 `-L/-D` direct-tcpip；macOS 远端指标当前不支持。
 - Tauri FTPS：本地显式/隐式 TLS 夹具已验证控制与数据通道；仍需真实 FTPS 服务和受信任证书的发行候选验收。
-- WebDAV：本地 HTTP 夹具已验证 HEAD/ETag/`If-Match`/412 冲突；仍需真实 WebDAV 服务、认证与 TLS 证书验收。
-- Telnet：真实 TCP peer 和 HTTP CONNECT 代理夹具已验证；真实设备与 SOCKS5 代理仍待验收。
+- WebDAV：本地 HTTP 夹具已验证 HEAD、成功 PUT、GET、ETag、`If-Match`/412 冲突和下载 hash；仍需真实 WebDAV 服务、认证与 TLS 证书验收。
+- Telnet：真实 TCP peer、HTTP CONNECT 与 SOCKS5 代理夹具已验证；真实设备与第三方代理服务仍待验收。
 - Serial：Linux kernel PTY 已纳入 CI；macOS 和 Windows 需要实体设备或已知可靠的虚拟串口。`mark`/`space` parity 受上游 `serialport` API 限制，必须保持“明确不支持”，不能降级成 `none`。
+- 本机环境核查：macOS 仅发现已配对蓝牙 `cu.*` 端口，没有可安全用于自动化的 USB/虚拟串口；不会打开未知设备来伪造串口验收。Docker CLI 存在但 daemon 未运行，因此本轮未启动第三方 WebDAV/FTPS 容器来替代真实服务验收。
 - 三平台 socket lifecycle 与新增 Linux `tauri-real-protocols` workflow 仍只是配置，尚未推送运行；不能以 workflow 文件代替结果。
 - Tauri signed updater 需要发布方提供更新 endpoint、Ed25519 公钥/私钥与 macOS/Windows 签名、公证资产；当前实现安全地使用 GitHub Release 检查及发布页安装，不伪造 silent install。
 - macOS 以外的 CI 结果、真实代理服务和实体/虚拟串口设备需要在对应平台上运行；这些是外部运行环境，不应由 macOS 本机结果代替。
