@@ -59,6 +59,8 @@ pub enum WorkerCmd {
     ChangeRemotePermissions {
         target_path: String,
         permissions: u32,
+        recursive: bool,
+        apply_to: String, // "all" | "files" | "directories"
         respond_to: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     SetRemoteFileAccessMode {
@@ -66,6 +68,25 @@ pub enum WorkerCmd {
         sudo_user: Option<String>,
         sudo_password: Option<String>,
         respond_to: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+    ListSshTunnels {
+        respond_to: tokio::sync::oneshot::Sender<Result<Vec<serde_json::Value>, String>>,
+    },
+    CreateSshTunnel {
+        rule: serde_json::Value,
+        respond_to: tokio::sync::oneshot::Sender<Result<Vec<serde_json::Value>, String>>,
+    },
+    StartSshTunnel {
+        rule_id: String,
+        respond_to: tokio::sync::oneshot::Sender<Result<Vec<serde_json::Value>, String>>,
+    },
+    StopSshTunnel {
+        rule_id: String,
+        respond_to: tokio::sync::oneshot::Sender<Result<Vec<serde_json::Value>, String>>,
+    },
+    DeleteSshTunnel {
+        rule_id: String,
+        respond_to: tokio::sync::oneshot::Sender<Result<Vec<serde_json::Value>, String>>,
     },
     Disconnect,
 }

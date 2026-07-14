@@ -391,6 +391,7 @@ pub async fn app_open_profile(
             remote_path: "/".to_string(),
             shell_cwd: Some("/".to_string()),
             follow_shell_cwd: true,
+            remote_files_loading: false,
             remote_files: Vec::new(),
             file_access_mode: "user".to_string(),
             sudo_user: None,
@@ -444,8 +445,11 @@ pub async fn app_reconnect_tab(
                 workers.remove(&tab_id);
             }
             
-            // Set connecting status and reset transcript so the renderer
-            // shows "连接主机..." via bootText hydration.
+            // Set connecting status. Preserve the existing transcript so the
+            // renderer can re-hydrate the terminal with prior history on
+            // reconnect (mirrors Electron's BoundedTextBuffer retention).
+            // We only append a separator + "连接主机..." notice so the user
+            // sees that a reconnect is in progress.
             {
                 let mut tabs = state.tabs.write().await;
                 if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
@@ -454,7 +458,16 @@ pub async fn app_reconnect_tab(
                 let mut sessions = state.sessions.write().await;
                 if let Some(session) = sessions.get_mut(&tab_id) {
                     session.connected = false;
-                    session.terminal_transcript = "连接主机...\r\n".to_string();
+                    // Append a reconnect separator instead of wiping history.
+                    if !session.terminal_transcript.is_empty() {
+                        session.terminal_transcript.push_str("\r\n--- 重新连接 ---\r\n");
+                    }
+                    session.terminal_transcript.push_str("连接主机...\r\n");
+                    // Cap to 200k chars (matches Electron's BoundedTextBuffer).
+                    if session.terminal_transcript.len() > 200_000 {
+                        let cut = session.terminal_transcript.len() - 180_000;
+                        session.terminal_transcript = session.terminal_transcript[cut..].to_string();
+                    }
                     session.remote_files = Vec::new();
                     session.system_metrics = None;
                 }
@@ -760,12 +773,20 @@ pub async fn app_change_remote_permissions(
     options: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
     let permissions = options.get("permissions").and_then(|p| p.as_u64()).unwrap_or(0o755) as u32;
+    let recursive = options.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let apply_to = options
+        .get("applyTo")
+        .and_then(|v| v.as_str())
+        .unwrap_or("all")
+        .to_string();
     send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::ChangeRemotePermissions {
         target_path: target_path.clone(),
         permissions,
+        recursive,
+        apply_to,
         respond_to: tx,
     }).await?;
-    
+
     let parent = std::path::Path::new(&target_path)
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -799,6 +820,54 @@ pub async fn app_set_remote_file_access_mode(
     }).await?;
 
     get_workspace_snapshot(app).await
+}
+
+#[tauri::command]
+pub async fn app_list_ssh_tunnels(
+    app: AppHandle,
+    tab_id: String,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::ListSshTunnels { respond_to: tx }).await
+}
+
+#[tauri::command]
+pub async fn app_create_ssh_tunnel(
+    app: AppHandle,
+    tab_id: String,
+    rule: serde_json::Value,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::CreateSshTunnel {
+        rule,
+        respond_to: tx,
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn app_start_ssh_tunnel(
+    app: AppHandle,
+    tab_id: String,
+    rule_id: String,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::StartSshTunnel { rule_id, respond_to: tx }).await
+}
+
+#[tauri::command]
+pub async fn app_stop_ssh_tunnel(
+    app: AppHandle,
+    tab_id: String,
+    rule_id: String,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::StopSshTunnel { rule_id, respond_to: tx }).await
+}
+
+#[tauri::command]
+pub async fn app_delete_ssh_tunnel(
+    app: AppHandle,
+    tab_id: String,
+    rule_id: String,
+) -> Result<Vec<serde_json::Value>, AppError> {
+    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::DeleteSshTunnel { rule_id, respond_to: tx }).await
 }
 
 #[tauri::command]

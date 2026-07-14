@@ -1,11 +1,11 @@
 # Tauri 迁移进度与 Electron 功能差距
 
-| 项目     | 值                                                     |
-| -------- | ------------------------------------------------------ |
-| 文档版本 | v1.0                                                   |
-| 更新日期 | 2026-07-13                                             |
-| 状态     | Phase 3 SSH 主链路已完成（russh），待 Phase 4          |
-| 关联文档 | `russh-migration.md`、`rust-backend-migration-plan.md` |
+| 项目     | 值                                                            |
+| -------- | ------------------------------------------------------------- |
+| 文档版本 | v1.1                                                          |
+| 更新日期 | 2026-07-14                                                    |
+| 状态     | Phase 3 SSH 实现已完成，待真实服务/三平台验收；Phase 4 未开始 |
+| 关联文档 | `russh-migration.md`、`rust-backend-migration-plan.md`        |
 
 ---
 
@@ -38,7 +38,7 @@
 - ✅ 旧 Electron userData 兼容（按 id 去重合并 + secrets 回填）
 - ✅ Workspace snapshot 广播
 
-### Phase 3：SSH 工作区主链路 ✅ 已完成（russh 迁移）
+### Phase 3：SSH 工作区主链路 ✅ 实现完成，待真实服务验收（russh 迁移 + 补齐）
 
 - ✅ M3.1 russh 0.62.2 锁定：password / privateKey / agent / keyboard-interactive 四种认证
 - ✅ M3.2 SSH shell + 终端：write/resize/data/state，16ms batcher
@@ -49,8 +49,18 @@
 - ✅ `app_resolve_ssh_interaction` 真实异步接通
 - ✅ 单 SSH session 复用 shell + SFTP + metrics（避免 MaxSessions 限制）
 - ✅ echo 重复 bug 修复（worker recv None 退出 + StrictMode 双挂载防护）
-- 🔲 M3.7 proxy + jumphost + tunnel（缺失，见第 2 节）
-- 🔲 Shell setup injection per platform（POSIX CWD 脚本注入门控）
+- ✅ Shell setup 注入：POSIX CWD 脚本双重门控（`shell_cwd_setup_for_platform` + `SHELL_CWD_SETUP`/`BUSYBOX_SHELL_CWD_SETUP`）
+- ✅ Transcript 水化：reconnect 保留终端历史（追加分隔符而非重置）
+- ✅ Auto-reconnect 2000ms 延迟（`reconnectMode === 'auto'` 触发 + 三重 guard）
+- ✅ 远程文件多编码：UTF-8/UTF-16/GBK/Big5/EUC-JP/Shift-JIS/EUC-KR 等 16 种（`encoding_rs`）
+- ✅ chmod 递归：`-R` + `applyTo` (all/files/directories) + `find -exec {} +`
+- ✅ JumpHost 跳板机：`jumpProfileId` → `channel_open_direct_tcpip` → `connect_stream`
+- ✅ SOCKS5 / HTTP CONNECT 出站代理：认证、IPv6 authority 与 HTTP 头注入防护（`tokio-socks` + `connect_http_proxy`）
+- ✅ M3.7 SSH `-L/-R/-D` 隧道：Tauri bridge + command + SSH worker，`TcpListener` / `tcpip-forward` / SOCKS5 listener，断线/重连/关闭 tab 自动回收
+
+> 注：Phase 3 的已完成项包含当前未提交工作树中的实现；提交前仍需完成 Rust 编译、contract test、Electron parity 回归和必要的手工 SSH 验收。
+
+> 2026-07-14 回归修复：POSIX CWD hook 现在以交互 shell 的 CR 提交执行，并以 CR/LF 兼容的状态机抑制内部命令回显；CWD 事件会在“跟随终端”开启时发布 `remoteFilesLoading`、异步刷新相同路径的 SFTP 文件列表，并在成功或失败后结束 loading。SFTP `read_dir` 不再依赖服务端返回 `..`，会按 Electron 语义为非根目录生成父目录行。POSIX 指标脚本也移除了从 TypeScript 模板误带入 Rust raw string 的双重转义，恢复磁盘、进程和网络行的真实换行解析。
 
 ### Phase 4：其他协议与 Transfer 🔲 未开始
 
@@ -77,12 +87,12 @@
 | 功能                       | Electron 源                                                    | 说明                                                                                                                 |
 | -------------------------- | -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | **Transfer 系统**          | `services/transfers/`                                          | upload/download 队列、scope、journal、retry、pause/resume/cancel/discard 全部缺失；snapshot 永远返回 `transfers: []` |
-| **SSH -L 本地转发**        | `services/sessions/ssh-tunnel-service.ts`                      | `channel_open_direct_tcpip` 未实现                                                                                   |
-| **SSH -R 远程转发**        | 同上                                                           | `tcpip-forward` global request 未实现                                                                                |
-| **SSH -D 动态 SOCKS5**     | 同上                                                           | SOCKS5 server + `channel_open_direct_tcpip` 未实现                                                                   |
-| **SOCKS5 代理**            | `services/network/proxy-socket-factory.ts`                     | `establishSocks5Connect` 未实现                                                                                      |
-| **HTTP CONNECT 代理**      | 同上                                                           | `establishHttpConnect` 未实现                                                                                        |
-| **Jump Host / ProxyJump**  | `services/sessions/ssh-session-controller.ts::connectJumpHost` | 链式 SSH session 未实现                                                                                              |
+| **SSH -L 本地转发**        | `services/sessions/ssh-tunnel-service.ts`                      | ✅ 已补齐：`TcpListener` → `channel_open_direct_tcpip`                                                               |
+| **SSH -R 远程转发**        | 同上                                                           | ✅ 已补齐：`tcpip_forward` / `cancel_tcpip_forward` + `forwarded-tcpip` 回调                                         |
+| **SSH -D 动态 SOCKS5**     | 同上                                                           | ✅ 已补齐：本地 SOCKS5 CONNECT listener → `channel_open_direct_tcpip`                                                |
+| **SOCKS5 代理**            | `services/network/proxy-socket-factory.ts`                     | ✅ 已补齐：`tokio-socks`，支持无认证或 username/password                                                             |
+| **HTTP CONNECT 代理**      | 同上                                                           | ✅ 已补齐：CONNECT + Basic 认证 + IPv6 authority + 响应边界限制                                                      |
+| **Jump Host / ProxyJump**  | `services/sessions/ssh-session-controller.ts::connectJumpHost` | ✅ 已补齐：`jumpProfileId` → `channel_open_direct_tcpip` → `connect_stream`                                          |
 | **FTP/FTPS**               | `services/sessions/ftp-session-controller.ts`                  | suppaftp 未引入                                                                                                      |
 | **Telnet**                 | `services/sessions/telnet-session-controller.ts`               | RFC 854 IAC 状态机未实现                                                                                             |
 | **Serial**                 | `services/sessions/serial-session-controller.ts`               | tokio-serial 未引入                                                                                                  |
@@ -96,19 +106,20 @@
 
 ### 2.2 部分实现（需补齐）
 
-| 功能                           | Electron 源                                                                            | Tauri 现状                                                                                             | 缺口                                                                            |
-| ------------------------------ | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------- |
-| **远程文件 encoding**          | `services/text-encoding.ts`（iconv-lite + 16 种编码）                                  | `WorkerCmd::ReadRemoteFile/WriteRemoteFile` 接 `encoding` 字段但 `read_file`/`write_file` 忽略         | 远程文件多编码解码（gbk/big5/euc-jp/shift_jis/euc-kr 等）                       |
-| **远程 chmod 递归**            | `services/sessions/ssh-session-controller.ts::changeRemotePermissions`                 | 仅单层 `chmod {:o}`                                                                                    | 递归 `-R` 支持                                                                  |
-| **Shell setup injection**      | `services/sessions/shell-cwd-integration.ts`（bash/zsh/posix/busybox 脚本 + 双重门控） | PTY 直接 `request_shell`，未注入 CWD 脚本                                                              | `supportsPosixShellSetup()` + `injectShellSetup()` 双重门控（仅 linux/busybox） |
-| **Transcript hydration**       | `services/sessions/ssh-session-controller.ts::BoundedTextBuffer`                       | `SessionSnapshot.terminal_transcript` 字段始终为空字符串                                               | reconnect 后终端历史水化                                                        |
-| **Auto-reconnect 2000ms 延迟** | `services/workspace-service.ts::autoReconnectingTabs`                                  | `app_reconnect_tab` 立即调用 `start_ssh_worker`                                                        | 延迟自动重连                                                                    |
-| **WebDAV upload/download**     | `services/webdav-sync-service.ts`                                                      | 仅 config 持久化，传输逻辑全桩                                                                         | ETag 冲突检测 + content hash + secrets stripping                                |
-| **UI preferences 变更事件**    | `apps/desktop/src/main/main.ts`（广播到所有窗口）                                      | `app_set_ui_preferences` 写盘后不 emit `app:ui-preferences-changed`                                    | 多窗口偏好同步                                                                  |
-| **窗口最大化事件**             | Electron 自动广播                                                                      | `app_window_action` 未 emit `app:window-maximized-change`                                              | 事件链路补齐                                                                    |
-| **文件编辑器关闭确认**         | `apps/desktop/src/main/main.ts::requestQuitConfirmation`                               | `confirmCloseCurrentFileEditor`/`cancelCloseCurrentFileEditor`/`onFileEditorCloseRequest` 在 TS 中为桩 | pending close request Promise 协调                                              |
-| **CSP 安装**                   | `apps/desktop/src/main/main.ts::installContentSecurityPolicy`                          | `tauri.conf.json` 中 `csp: null`                                                                       | 严格 CSP 注入                                                                   |
-| **Command send preferences**   | `services/file-profile-repository.ts`                                                  | 命令模板字段以 raw JSON 透传，无服务端校验                                                             | `commandSendPreferences` get/set                                                |
+| 功能                           | Electron 源                                                                            | Tauri 现状                                                                                                     | 缺口                                             |
+| ------------------------------ | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **远程文件 encoding**          | `services/text-encoding.ts`（iconv-lite + 16 种编码）                                  | ✅ 已补齐：`decode_bytes`/`encode_text` + `encoding_rs`，支持 UTF-8/UTF-16/GBK/Big5/EUC-JP/Shift-JIS/EUC-KR 等 | —                                                |
+| **远程 chmod 递归**            | `services/sessions/ssh-session-controller.ts::changeRemotePermissions`                 | ✅ 已补齐：`recursive` + `applyTo` (all/files/directories) + `find -exec {} +`                                 | —                                                |
+| **Shell setup injection**      | `services/sessions/shell-cwd-integration.ts`（bash/zsh/posix/busybox 脚本 + 双重门控） | ✅ 已补齐：`shell_cwd_setup_for_platform` + `SHELL_CWD_SETUP`/`BUSYBOX_SHELL_CWD_SETUP` + 平台门控             | —                                                |
+| **Transcript hydration**       | `services/sessions/ssh-session-controller.ts::BoundedTextBuffer`                       | ✅ 已补齐：reconnect 追加分隔符 + 200k 截断                                                                    | —                                                |
+| **Auto-reconnect 2000ms 延迟** | `services/workspace-service.ts::autoReconnectingTabs`                                  | ✅ 已补齐：`reconnectMode === 'auto'` + 2000ms 延迟 + 三重 guard                                               | —                                                |
+| **JumpHost / ProxyJump**       | `services/sessions/ssh-session-controller.ts::connectJumpHost`                         | ✅ 已补齐：`jumpProfileId` → `channel_open_direct_tcpip` → `connect_stream`                                    | —                                                |
+| **WebDAV upload/download**     | `services/webdav-sync-service.ts`                                                      | 仅 config 持久化，传输逻辑全桩                                                                                 | ETag 冲突检测 + content hash + secrets stripping |
+| **UI preferences 变更事件**    | `apps/desktop/src/main/main.ts`（广播到所有窗口）                                      | `app_set_ui_preferences` 写盘后不 emit `app:ui-preferences-changed`                                            | 多窗口偏好同步                                   |
+| **窗口最大化事件**             | Electron 自动广播                                                                      | `app_window_action` 未 emit `app:window-maximized-change`                                                      | 事件链路补齐                                     |
+| **文件编辑器关闭确认**         | `apps/desktop/src/main/main.ts::requestQuitConfirmation`                               | `confirmCloseCurrentFileEditor`/`cancelCloseCurrentFileEditor`/`onFileEditorCloseRequest` 在 TS 中为桩         | pending close request Promise 协调               |
+| **CSP 安装**                   | `apps/desktop/src/main/main.ts::installContentSecurityPolicy`                          | `tauri.conf.json` 中 `csp: null`                                                                               | 严格 CSP 注入                                    |
+| **Command send preferences**   | `services/file-profile-repository.ts`                                                  | 命令模板字段以 raw JSON 透传，无服务端校验                                                                     | `commandSendPreferences` get/set                 |
 
 ### 2.3 已完整实现（无需补齐）
 
@@ -135,19 +146,19 @@
 ### P0（阻塞日常使用）
 
 1. **Transfer 系统**：上传/下载是文件管理器的核心能力，当前完全缺失
-2. **远程文件 encoding**：中文/日文环境远程文件乱码，影响可用性
-3. **Shell setup injection per platform**：CWD 跟随依赖远端 shell 主动 emit OSC7，不注入脚本则 CWD 不更新
-4. **Auto-reconnect 2000ms 延迟**：立即重连在网络抖动时加剧服务器负载
+2. ~~**远程文件 encoding**：中文/日文环境远程文件乱码，影响可用性~~ ✅ 已完成
+3. ~~**Shell setup injection per platform**：CWD 跟随依赖远端 shell 主动 emit OSC7，不注入脚本则 CWD 不更新~~ ✅ 已完成
+4. ~~**Auto-reconnect 2000ms 延迟**：立即重连在网络抖动时加剧服务器负载~~ ✅ 已完成
 
 ### P1（功能对齐）
 
-5. **SSH -L/-R/-D 隧道**
-6. **SOCKS5/HTTP CONNECT 代理**
-7. **Jump Host / ProxyJump**
+5. ~~**SSH -L/-R/-D 隧道**~~ ✅ 已完成
+6. ~~**SOCKS5/HTTP CONNECT 代理**~~ ✅ 已完成
+7. ~~**Jump Host / ProxyJump**~~ ✅ 已完成
 8. **WebDAV 同步真实实现**
 9. **Profile import/export**（SSH config + 外部 JSON）
-10. **Transcript hydration**（reconnect 后终端历史）
-11. **远程 chmod 递归**
+10. ~~**Transcript hydration**（reconnect 后终端历史）~~ ✅ 已完成
+11. ~~**远程 chmod 递归**~~ ✅ 已完成
 
 ### P2（生态完整）
 
@@ -178,13 +189,13 @@
 Tauri 迁移整体完成的验收标准（与 Electron 原版功能对齐）：
 
 - [ ] Transfer 系统：upload/download queue + journal + pause/resume/cancel/discard + 断点续传
-- [ ] SSH 隧道：-L / -R / -D 全部支持
-- [ ] 代理：SOCKS5 + HTTP CONNECT + 鉴权
-- [ ] Jump Host：链式 SSH session
+- [x] SSH 隧道：-L / -R / -D 全部支持
+- [x] 代理：SOCKS5 + HTTP CONNECT + 鉴权
+- [x] Jump Host：单级链式 SSH session（当前范围不支持嵌套跳板）
 - [ ] 协议补齐：FTP/FTPS + Telnet + Serial
-- [ ] 远程文件多编码：gbk/big5/euc-jp/shift_jis/euc-kr 等
-- [ ] Shell setup injection：POSIX 双重门控
-- [ ] Auto-reconnect：2000ms 延迟
+- [x] 远程文件多编码：gbk/big5/euc-jp/shift_jis/euc-kr 等
+- [x] Shell setup injection：POSIX 双重门控
+- [x] Auto-reconnect：2000ms 延迟
 - [ ] WebDAV 同步：upload + download + ETag + content hash
 - [ ] Profile import/export：SSH config + 外部 JSON + fileterm/compatible
 - [ ] Auto-update：tauri-plugin-updater 接入

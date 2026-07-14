@@ -25,12 +25,24 @@ pub struct SessionSnapshot {
     pub remote_path: String,
     pub shell_cwd: Option<String>,
     pub follow_shell_cwd: bool,
+    pub remote_files_loading: bool,
     pub remote_files: Vec<serde_json::Value>,
     pub file_access_mode: String, // "user" | "root"
     pub sudo_user: Option<String>,
     pub has_reusable_sudo_auth: bool,
     pub connected: bool,
     pub system_metrics: Option<serde_json::Value>,
+}
+
+/// The local endpoint to connect when an SSH server opens a `forwarded-tcpip`
+/// channel for a remote (`-R`) rule. These stay main-process only; renderer
+/// receives the public tunnel snapshot through the command result instead.
+#[derive(Clone, Debug)]
+pub struct RemoteForwardTarget {
+    pub bind_host: String,
+    pub bind_port: u32,
+    pub target_host: String,
+    pub target_port: u16,
 }
 
 pub struct WorkspaceState {
@@ -42,6 +54,7 @@ pub struct WorkspaceState {
     /// The renderer resolves each one via `app_resolve_ssh_interaction`.
     pub pending_interactions:
         Arc<RwLock<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
+    pub remote_forwards: Arc<RwLock<HashMap<String, Vec<RemoteForwardTarget>>>>,
 }
 
 impl Default for WorkspaceState {
@@ -52,6 +65,7 @@ impl Default for WorkspaceState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             workers: Arc::new(RwLock::new(HashMap::new())),
             pending_interactions: Arc::new(RwLock::new(HashMap::new())),
+            remote_forwards: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }

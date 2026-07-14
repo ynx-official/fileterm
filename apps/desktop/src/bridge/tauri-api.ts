@@ -269,6 +269,11 @@ export function createTauriApi(): FileTermDesktopApi {
       invoke<void>('app_resolve_ssh_interaction', { requestId, response }),
     setRemoteFileAccessMode: (tabId: string, mode: 'user' | 'root', options?: RemoteFileAccessOptions) =>
       invoke<WorkspaceSnapshot>('app_set_remote_file_access_mode', { tabId, mode, options }),
+    listSshTunnels: (tabId: string) => invoke('app_list_ssh_tunnels', { tabId }),
+    createSshTunnel: (tabId: string, rule: unknown) => invoke('app_create_ssh_tunnel', { tabId, rule }),
+    startSshTunnel: (tabId: string, ruleId: string) => invoke('app_start_ssh_tunnel', { tabId, ruleId }),
+    stopSshTunnel: (tabId: string, ruleId: string) => invoke('app_stop_ssh_tunnel', { tabId, ruleId }),
+    deleteSshTunnel: (tabId: string, ruleId: string) => invoke('app_delete_ssh_tunnel', { tabId, ruleId }),
 
     getDroppedFilePaths: (files: File[]) => files.map((file) => file.name),
     onUiPreferencesChanged: (

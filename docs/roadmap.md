@@ -4,6 +4,18 @@
 
 路线图目标不是一次把所有协议做全，而是尽快形成一个可工作的桌面端 MVP，然后逐步打磨成可发布版本。
 
+## 当前重构进度（2026-07-14）
+
+仓库当前处于 **Rust + Tauri 迁移 Phase 3：实现完成、待真实服务验收**，下一开发阶段是 Phase 4。
+
+- Phase 0–2 已完成：Tauri bridge/contract test、桌面壳、Rust JSON 存储、Workspace snapshot 与旧 Electron 用户数据兼容已经落地。
+- Phase 3 的 russh SSH 主链路已实现：shell、SFTP、MFA、host verification、系统指标、CWD/远端用户跟随、重连水化、自动重连、远程编码、递归 chmod、单级 Jump Host、SOCKS5/HTTP CONNECT 出站代理及运行时 SSH `-L/-R/-D` 隧道均已接入 `apps/desktop/src-tauri`。
+- Phase 3 仍需真实 SSH/代理服务的三平台手工验收；这不阻塞开始 Phase 4，但不能视作发行验收已完成。
+- Phase 4 尚未开始：Transfer 系统、FTP/FTPS、Telnet、Serial、WebDAV 真实同步仍是下一阶段的主要工作。
+- Phase 5 尚未开始：Tauri updater、三平台打包/签名、性能对比、迁移工具和正式切换均未进入验收。
+
+更细的差距和里程碑以 [`docs/plans/active/tauri-migration-progress.md`](plans/active/tauri-migration-progress.md) 为准；Rust 后端的模块级拆分以 [`rust-backend-migration-plan.md`](plans/active/rust-backend-migration-plan.md) 为准。
+
 ## Phase 0: 仓库初始化
 
 目标：建立不会返工的工程基础。
@@ -161,13 +173,10 @@
 
 ## 近期待办
 
-当前仓库已经完成基础初始化，下一步建议围绕“核心链路稳定 + 结构边界整理”推进：
+当前优先级已经从 Electron 结构拆分转为 Tauri/Rust 功能对齐：
 
-1. 拆分 `apps/desktop/src/main/ipc.ts`，按领域建立 IPC 模块。
-2. 拆分 `workspace-service.ts` 中的 tabs、sessions、transfers 职责。
-3. 拆分 `session-controllers.ts`，让 SSH/SFTP 与 FTP controller 独立演进。
-4. 拆分 `renderer/App.tsx`，把连接管理、文件面板、传输面板、顶部标签沉到 feature 组件。
-5. 继续收敛 `packages/core` 中的共享领域类型。
-6. 稳定主题系统，让 token、theme vars、组件皮肤和终端配色保持一致。
-7. 规划并分阶段推进多平台系统信息采集能力，先覆盖标准 Linux、BusyBox/OpenWrt，再评估 Windows。
-8. 继续把已经稳定的桌面壳 UI 状态从 `App.tsx` 下沉到 feature hooks 或更小的 workspace 组件。
+1. 在真实 SSH/代理服务上验收 Phase 3（认证、CWD、SFTP、`-L/-R/-D`、断线回收）。
+2. 迁移 TransferService、journal、断点续传、暂停/恢复/取消和退出清理。
+3. 迁移 FTP/FTPS、Telnet、Serial，并保持协议 controller 物理分离。
+4. 补齐 WebDAV 真实上传/下载、profile import/export、日志和窗口事件等 Electron parity 缺口。
+5. 最后进入 Tauri 三平台构建、签名、公证、性能对比与数据迁移验收。

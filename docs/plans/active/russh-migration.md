@@ -1,5 +1,7 @@
 # russh 迁移评估与计划
 
+> 状态（2026-07-14）：russh 主链路、代理和 `-L/-R/-D` 隧道实现已完成；本文剩余内容只描述三平台构建和 Electron parity 的真实服务验收。
+
 ## 1. 背景
 
 Tauri 迁移 Phase 3 当前选用 `ssh2 = "0.9.6"`（libssh2 C 绑定 + vendored-openssl）。本文档评估是否切换到 `russh`（纯 Rust SSH 实现），并给出迁移路径。
@@ -54,7 +56,7 @@ Tauri 迁移 Phase 3 当前选用 `ssh2 = "0.9.6"`（libssh2 C 绑定 + vendored
 
 ## 6. 推荐策略：分阶段迁移
 
-### 阶段 A（当前）：ssh2 补齐 Phase 3 主链路
+### 阶段 A（历史）：ssh2 补齐 Phase 3 主链路
 
 在 ssh2 基础上完成 Phase 3 缺失项中**可行性高**的部分：
 
@@ -70,7 +72,7 @@ Tauri 迁移 Phase 3 当前选用 `ssh2 = "0.9.6"`（libssh2 C 绑定 + vendored
 - 🔜 SOCKS5/HTTP 代理（自实现协议握手，注入 ssh2 `set_tcp_stream`）
 - 🔜 Jump Host（链式 SSH session，jump session `forwardOut` → 主 session `set_tcp_stream`）
 
-### 阶段 B（russh 迁移）：解决 ssh2 架构性瓶颈
+### 阶段 B（已完成）：russh 迁移解决 ssh2 架构性瓶颈
 
 下列功能在 ssh2 下**架构性不可行或极复杂**，必须等 russh 迁移：
 
@@ -79,7 +81,7 @@ Tauri 迁移 Phase 3 当前选用 `ssh2 = "0.9.6"`（libssh2 C 绑定 + vendored
 - ⏳ SSH -D 动态转发（SOCKS5 server + async `channel_open_direct_tcpip`）
 - ⏳ `app_resolve_ssh_interaction` 真实异步接通（pending Map + oneshot channel 唤醒）
 
-### 阶段 C（长期）：完全切换
+### 阶段 C（当前）：russh 迁移后的功能收尾
 
 - russh 主链路稳定后，移除 ssh2 依赖。
 - 移除 `vendored-openssl` feature，简化 Windows 构建。
@@ -175,7 +177,7 @@ let entries = sftp.read_dir(path).await?;
 
 ## 8. 决策
 
-**已完成 russh 迁移（2026-07-13）。**
+**已完成 russh 迁移（2026-07-13）；当前仍在做 Tauri Phase 3 的功能收尾。**
 
 用户明确要求"转 Rust 最主要的就是要用 russh"，已推翻"保留 ssh2 补齐 Phase 3"的过渡决策，直接完成 russh 迁移。
 
@@ -192,12 +194,12 @@ let entries = sftp.read_dir(path).await?;
 9. `system_metrics.rs` 全面 async 化：`probe_remote_platform` / `exec_command` / `exec_command_with_stdin` 接收 `&ClientHandle`，复用主 session。
 10. cargo build/test（14 pass）+ npm typecheck/lint/format/test（16 pass）全绿。
 
-待后续推进：
+已补齐：
 
-- SSH -L/-R/-D 隧道（russh `channel_open_forwarded_tcpip` + `tcpip-forward` global request）
-- SOCKS5/HTTP 代理（自实现协议握手，注入 russh connection）
-- Jump Host（链式 SSH session，jump session 转发 → 主 session）
-- sudo/root 文件访问模式真正用 `sudo -S` / `sudo -n` 执行（当前 `SetRemoteFileAccessMode` 只改状态字段）
+- SSH `-L/-R/-D` 隧道（`TcpListener` / `tcpip-forward` / forwarded-tcpip callback / SOCKS5 listener）。
+- SOCKS5/HTTP CONNECT 代理（认证、IPv6 authority、HTTP 响应边界与注入防护）。
+- Jump Host（链式 SSH session，jump session 转发 → 主 session）。
+- sudo/root 文件访问模式真正用 `sudo -S` / `sudo -n` 执行（以当前工作树实现和测试结果为准）。
 
 ## 9. 验收标准
 
@@ -208,7 +210,7 @@ russh 迁移完成的验收标准：
 - [x] MFA 多 prompt 异步弹窗（支持多轮 OTP）
 - [x] `app_resolve_ssh_interaction` 真实异步接通
 - [x] cargo build/test + npm typecheck/lint/format/test 全绿
-- [ ] SSH -L/-R/-D 隧道全部支持（后续推进）
-- [ ] SOCKS5/HTTP 代理 + Jump Host 全部支持（后续推进）
+- [x] SSH -L/-R/-D 隧道全部支持（待真实 SSH 服务验收）
+- [x] SOCKS5/HTTP 代理全部支持（待真实代理服务验收）
 - [ ] macOS / Windows / Linux 三平台构建验证（后续推进）
-- [ ] 与 Electron 版本功能对齐：sudo 文件访问、隧道、代理、跳板机（后续推进）
+- [ ] 与 Electron 版本完成真实服务 parity：重点为三平台 socket 生命周期、SFTP 边角 case 与 Phase 4 协议/传输能力

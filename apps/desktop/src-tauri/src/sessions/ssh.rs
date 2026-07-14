@@ -10,6 +10,7 @@
 //  4. Move from a manual `set_blocking(true/false)` juggle to a native
 //     tokio task per session.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -20,7 +21,10 @@ use russh::{Channel, ChannelMsg};
 use russh_sftp::client::SftpSession;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio_socks::tcp::Socks5Stream;
 
 use super::WorkerCmd;
 
@@ -107,7 +111,8 @@ pub fn start_ssh_worker(
         // snapshot's `terminal_transcript` (set by `app_open_profile`), so
         // the renderer hydrates it via `bootText` — no need to emit it here.
         // Emitting here would race the renderer's listener registration.
-        match run_worker_loop(&tab_id, &profile, &mut cmd_rx, &app).await {
+        let run_result = run_worker_loop(&tab_id, &profile, &mut cmd_rx, &app).await;
+        match run_result {
             Ok(()) => {
                 emit_terminal_data(&app, &tid, "连接已断开\r\n").await;
             }
@@ -117,6 +122,48 @@ pub fn start_ssh_worker(
             }
         }
         update_tab_status_and_emit(&app, &tid, "disconnected").await;
+
+        // ── Auto-reconnect with 2000ms delay ───────────────────────────────
+        // Mirrors Electron's `workspace-service.ts` autoReconnectingTabs:
+        // if the profile's `reconnectMode === 'auto'`, schedule a reconnect
+        // after 2 seconds. The guard set prevents re-entrant triggers while
+        // a reconnect is already pending.
+        let reconnect_mode = profile
+            .get("reconnectMode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("manual");
+        if reconnect_mode == "auto" {
+            eprintln!(
+                "[SSH Worker] tab={} auto-reconnect scheduled (2000ms delay)",
+                tid
+            );
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            // Re-check: tab may have been closed or already reconnected by
+            // the user during the delay.
+            let state = app.state::<crate::services::workspace::WorkspaceState>();
+            let should_reconnect = {
+                let tabs = state.tabs.read().await;
+                let sessions = state.sessions.read().await;
+                let tab_exists = tabs.iter().any(|t| t.id == tid);
+                let session_connected = sessions
+                    .get(&tid)
+                    .map(|s| s.connected)
+                    .unwrap_or(false);
+                tab_exists && !session_connected
+            };
+
+            if should_reconnect {
+                eprintln!("[SSH Worker] tab={} auto-reconnect firing", tid);
+                // Trigger reconnect via the same path the renderer uses.
+                let _ = crate::commands::app_reconnect_tab(app.clone(), tid.clone()).await;
+            } else {
+                eprintln!(
+                    "[SSH Worker] tab={} auto-reconnect cancelled (tab closed or already connected)",
+                    tid
+                );
+            }
+        }
     });
 }
 
@@ -222,6 +269,409 @@ impl Handler for ClientHandler {
             _ => Ok(false),
         }
     }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<russh::client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        let state = self.app.state::<crate::services::workspace::WorkspaceState>();
+        let target = {
+            let forwards = state.remote_forwards.read().await;
+            forwards.get(&self.tab_id).and_then(|rules| {
+                rules.iter().find(|rule| {
+                    rule.bind_port == connected_port
+                        && remote_bind_host_matches(&rule.bind_host, connected_address)
+                })
+            }).cloned()
+        };
+
+        let Some(target) = target else {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+
+        reply.accept().await;
+        let tab_id = self.tab_id.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let mut local = TcpStream::connect((&*target.target_host, target.target_port)).await?;
+                let mut remote = channel.into_stream();
+                copy_bidirectional(&mut local, &mut remote).await?;
+                Ok::<(), std::io::Error>(())
+            }
+            .await;
+            if let Err(error) = result {
+                eprintln!("[SSH tunnel] remote forward tab={tab_id} connection failed: {error}");
+            }
+        });
+        Ok(())
+    }
+}
+
+fn remote_bind_host_matches(bind_host: &str, connected_address: &str) -> bool {
+    bind_host == connected_address || matches!(bind_host, "0.0.0.0" | "::" | "*")
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SshTunnelRule {
+    id: String,
+    #[serde(default)]
+    name: String,
+    kind: String,
+    bind_host: String,
+    bind_port: u16,
+    #[serde(default)]
+    target_host: Option<String>,
+    #[serde(default)]
+    target_port: Option<u16>,
+    #[serde(default)]
+    auto_start: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SshTunnelSnapshot {
+    #[serde(flatten)]
+    rule: SshTunnelRule,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    runtime_only: bool,
+}
+
+struct TunnelManager {
+    tab_id: String,
+    app: AppHandle,
+    handle: Arc<Handle<ClientHandler>>,
+    tunnels: HashMap<String, SshTunnelSnapshot>,
+    local_stops: HashMap<String, oneshot::Sender<()>>,
+    remote_rules: HashMap<String, (String, u32)>,
+}
+
+impl TunnelManager {
+    fn new(tab_id: &str, app: &AppHandle, handle: Arc<Handle<ClientHandler>>) -> Self {
+        Self {
+            tab_id: tab_id.to_string(),
+            app: app.clone(),
+            handle,
+            tunnels: HashMap::new(),
+            local_stops: HashMap::new(),
+            remote_rules: HashMap::new(),
+        }
+    }
+
+    fn list(&self) -> Result<Vec<Value>, String> {
+        let mut tunnels = self
+            .tunnels
+            .values()
+            .cloned()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        tunnels.sort_by(|left, right| left["name"].as_str().unwrap_or("").cmp(right["name"].as_str().unwrap_or("")));
+        Ok(tunnels)
+    }
+
+    fn register(&mut self, rule: SshTunnelRule, runtime_only: bool) -> Result<(), String> {
+        validate_tunnel_rule(&rule)?;
+        if let Some(existing) = self.tunnels.get(&rule.id) {
+            if existing.status == "running" || existing.status == "starting" {
+                return Err(format!("Tunnel {} is already running", rule.id));
+            }
+        }
+        let conflict = self.tunnels.values().any(|existing| {
+            existing.rule.id != rule.id
+                && (existing.rule.kind == "remote") == (rule.kind == "remote")
+                && existing.rule.bind_host == rule.bind_host
+                && existing.rule.bind_port == rule.bind_port
+        });
+        if conflict {
+            return Err(format!("Tunnel {}:{} is already configured", rule.bind_host, rule.bind_port));
+        }
+        self.tunnels.insert(
+            rule.id.clone(),
+            SshTunnelSnapshot {
+                rule,
+                status: "stopped".to_string(),
+                error: None,
+                runtime_only,
+            },
+        );
+        Ok(())
+    }
+
+    async fn create(&mut self, rule: SshTunnelRule) -> Result<Vec<Value>, String> {
+        self.register(rule.clone(), true)?;
+        self.start(&rule.id).await?;
+        self.list()
+    }
+
+    async fn start(&mut self, rule_id: &str) -> Result<Vec<Value>, String> {
+        if self.local_stops.contains_key(rule_id) || self.remote_rules.contains_key(rule_id) {
+            return self.list();
+        }
+        let rule = self
+            .tunnels
+            .get(rule_id)
+            .map(|snapshot| snapshot.rule.clone())
+            .ok_or_else(|| format!("Tunnel {rule_id} was not found"))?;
+        validate_tunnel_rule(&rule)?;
+        self.set_status(rule_id, "starting", None);
+
+        let start_result = if rule.kind == "remote" {
+            self.start_remote(&rule).await
+        } else {
+            self.start_local_or_dynamic(&rule).await
+        };
+        match start_result {
+            Ok(()) => {
+                self.set_status(rule_id, "running", None);
+                self.list()
+            }
+            Err(error) => {
+                self.set_status(rule_id, "error", Some(error.clone()));
+                Err(error)
+            }
+        }
+    }
+
+    async fn start_local_or_dynamic(&mut self, rule: &SshTunnelRule) -> Result<(), String> {
+        let listener = TcpListener::bind(tunnel_bind_address(&rule.bind_host, rule.bind_port)?)
+            .await
+            .map_err(|error| format!("Tunnel listen failed on {}:{}: {error}", rule.bind_host, rule.bind_port))?;
+        let (stop_tx, mut stop_rx) = oneshot::channel();
+        let handle = Arc::clone(&self.handle);
+        let rule = rule.clone();
+        let rule_id = rule.id.clone();
+        let tab_id = self.tab_id.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    accepted = listener.accept() => match accepted {
+                        Ok((socket, _peer)) => {
+                            let handle = Arc::clone(&handle);
+                            let rule = rule.clone();
+                            let connection_tab_id = tab_id.clone();
+                            tokio::spawn(async move {
+                                let result = if rule.kind == "dynamic" {
+                                    forward_socks5_connection(socket, handle).await
+                                } else {
+                                    forward_local_connection(socket, handle, &rule).await
+                                };
+                                if let Err(error) = result {
+                                    eprintln!("[SSH tunnel] tab={connection_tab_id} {} connection failed: {error}", rule.id);
+                                }
+                            });
+                        }
+                        Err(error) => {
+                            eprintln!("[SSH tunnel] tab={tab_id} {} listener failed: {error}", rule.id);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        self.local_stops.insert(rule_id, stop_tx);
+        Ok(())
+    }
+
+    async fn start_remote(&mut self, rule: &SshTunnelRule) -> Result<(), String> {
+        let actual_port = self
+            .handle
+            .tcpip_forward(rule.bind_host.clone(), rule.bind_port as u32)
+            .await
+            .map_err(|error| format!("Remote tunnel request failed: {error}"))?;
+        let target = crate::services::workspace::RemoteForwardTarget {
+            bind_host: rule.bind_host.clone(),
+            bind_port: actual_port,
+            target_host: rule.target_host.clone().unwrap_or_default(),
+            target_port: rule.target_port.unwrap_or_default(),
+        };
+        let state = self.app.state::<crate::services::workspace::WorkspaceState>();
+        state
+            .remote_forwards
+            .write()
+            .await
+            .entry(self.tab_id.clone())
+            .or_default()
+            .push(target);
+        self.remote_rules
+            .insert(rule.id.clone(), (rule.bind_host.clone(), actual_port));
+        Ok(())
+    }
+
+    async fn stop(&mut self, rule_id: &str) -> Result<Vec<Value>, String> {
+        if !self.tunnels.contains_key(rule_id) {
+            return Err(format!("Tunnel {rule_id} was not found"));
+        }
+        self.set_status(rule_id, "stopping", None);
+        if let Some(stop) = self.local_stops.remove(rule_id) {
+            let _ = stop.send(());
+        }
+        if let Some((bind_host, bind_port)) = self.remote_rules.get(rule_id).cloned() {
+            self.handle
+                .cancel_tcpip_forward(bind_host.clone(), bind_port)
+                .await
+                .map_err(|error| format!("Remote tunnel stop failed: {error}"))?;
+            self.remote_rules.remove(rule_id);
+            let state = self.app.state::<crate::services::workspace::WorkspaceState>();
+            let mut forwards = state.remote_forwards.write().await;
+            if let Some(rules) = forwards.get_mut(&self.tab_id) {
+                rules.retain(|rule| !(rule.bind_host == bind_host && rule.bind_port == bind_port));
+                if rules.is_empty() {
+                    forwards.remove(&self.tab_id);
+                }
+            }
+        }
+        self.set_status(rule_id, "stopped", None);
+        self.list()
+    }
+
+    async fn delete(&mut self, rule_id: &str) -> Result<Vec<Value>, String> {
+        self.stop(rule_id).await?;
+        self.tunnels.remove(rule_id);
+        self.list()
+    }
+
+    async fn stop_all(&mut self) {
+        let ids = self.tunnels.keys().cloned().collect::<Vec<_>>();
+        for id in ids {
+            let _ = self.stop(&id).await;
+        }
+    }
+
+    fn set_status(&mut self, rule_id: &str, status: &str, error: Option<String>) {
+        if let Some(snapshot) = self.tunnels.get_mut(rule_id) {
+            snapshot.status = status.to_string();
+            snapshot.error = error;
+        }
+    }
+}
+
+fn validate_tunnel_rule(rule: &SshTunnelRule) -> Result<(), String> {
+    if rule.id.trim().is_empty() || !matches!(rule.kind.as_str(), "local" | "remote" | "dynamic") {
+        return Err("Tunnel requires a valid id and kind".to_string());
+    }
+    if rule.bind_host.trim().is_empty() || rule.bind_port == 0 {
+        return Err("Tunnel requires a valid bind address and port".to_string());
+    }
+    if rule.kind != "dynamic"
+        && (rule.target_host.as_deref().unwrap_or("").trim().is_empty() || rule.target_port.unwrap_or(0) == 0)
+    {
+        return Err(format!("{} tunnel requires a valid target", rule.kind));
+    }
+    Ok(())
+}
+
+fn tunnel_bind_address(host: &str, port: u16) -> Result<String, String> {
+    let host = match host.trim() {
+        "*" => "0.0.0.0",
+        value if value.is_empty() => return Err("Tunnel bind host is empty".to_string()),
+        value => value,
+    };
+    Ok(if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    })
+}
+
+async fn forward_local_connection(
+    mut socket: TcpStream,
+    handle: Arc<Handle<ClientHandler>>,
+    rule: &SshTunnelRule,
+) -> Result<(), String> {
+    let origin = socket.local_addr().ok();
+    let origin_host = origin.map(|address| address.ip().to_string()).unwrap_or_else(|| "127.0.0.1".to_string());
+    let origin_port = origin.map(|address| address.port()).unwrap_or(0);
+    let mut channel = handle
+        .channel_open_direct_tcpip(
+            rule.target_host.clone().unwrap_or_default(),
+            rule.target_port.unwrap_or_default() as u32,
+            origin_host,
+            origin_port as u32,
+        )
+        .await
+        .map_err(|error| format!("SSH local forward failed: {error}"))?
+        .into_stream();
+    copy_bidirectional(&mut socket, &mut channel)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn forward_socks5_connection(mut socket: TcpStream, handle: Arc<Handle<ClientHandler>>) -> Result<(), String> {
+    let mut greeting = [0_u8; 2];
+    socket.read_exact(&mut greeting).await.map_err(|error| error.to_string())?;
+    if greeting[0] != 5 {
+        return Err("Only SOCKS5 is supported".to_string());
+    }
+    let mut methods = vec![0_u8; greeting[1] as usize];
+    socket.read_exact(&mut methods).await.map_err(|error| error.to_string())?;
+    if !methods.contains(&0) {
+        socket.write_all(&[5, 0xff]).await.map_err(|error| error.to_string())?;
+        return Err("SOCKS5 client does not support no-authentication".to_string());
+    }
+    socket.write_all(&[5, 0]).await.map_err(|error| error.to_string())?;
+
+    let mut request = [0_u8; 4];
+    socket.read_exact(&mut request).await.map_err(|error| error.to_string())?;
+    if request[0] != 5 || request[1] != 1 {
+        return Err("Only SOCKS5 CONNECT is supported".to_string());
+    }
+    let target_host = read_socks5_host(&mut socket, request[3]).await?;
+    let mut port = [0_u8; 2];
+    socket.read_exact(&mut port).await.map_err(|error| error.to_string())?;
+    let target_port = u16::from_be_bytes(port);
+    let origin = socket.local_addr().ok();
+    let origin_host = origin.map(|address| address.ip().to_string()).unwrap_or_else(|| "127.0.0.1".to_string());
+    let origin_port = origin.map(|address| address.port()).unwrap_or(0);
+    let mut channel = handle
+        .channel_open_direct_tcpip(target_host, target_port as u32, origin_host, origin_port as u32)
+        .await
+        .map_err(|error| format!("SSH SOCKS5 forward failed: {error}"))?
+        .into_stream();
+    socket
+        .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+        .await
+        .map_err(|error| error.to_string())?;
+    copy_bidirectional(&mut socket, &mut channel)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn read_socks5_host(socket: &mut TcpStream, address_type: u8) -> Result<String, String> {
+    match address_type {
+        1 => {
+            let mut address = [0_u8; 4];
+            socket.read_exact(&mut address).await.map_err(|error| error.to_string())?;
+            Ok(std::net::Ipv4Addr::from(address).to_string())
+        }
+        3 => {
+            let mut length = [0_u8; 1];
+            socket.read_exact(&mut length).await.map_err(|error| error.to_string())?;
+            let mut name = vec![0_u8; length[0] as usize];
+            socket.read_exact(&mut name).await.map_err(|error| error.to_string())?;
+            String::from_utf8(name).map_err(|_| "Invalid SOCKS5 hostname".to_string())
+        }
+        4 => {
+            let mut address = [0_u8; 16];
+            socket.read_exact(&mut address).await.map_err(|error| error.to_string())?;
+            Ok(std::net::Ipv6Addr::from(address).to_string())
+        }
+        _ => Err("Unsupported SOCKS5 address type".to_string()),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -284,6 +734,53 @@ async fn emit_terminal_data(app: &AppHandle, tab_id: &str, chunk: &str) {
     }
 }
 
+/// Mirrors Electron's `followShellCwd`: only a confirmed shell CWD update may
+/// move the file panel, and only while the user has Follow terminal enabled.
+async fn follow_shell_cwd(
+    app: AppHandle,
+    tab_id: String,
+    cwd: String,
+    sftp: Arc<RwLock<SftpSession>>,
+) {
+    {
+        let state = app.state::<crate::services::workspace::WorkspaceState>();
+        let mut sessions = state.sessions.write().await;
+        let Some(session) = sessions.get_mut(&tab_id) else {
+            return;
+        };
+        if session.shell_cwd.as_deref() != Some(cwd.as_str()) || !session.follow_shell_cwd {
+            return;
+        }
+        session.remote_files_loading = true;
+    }
+    if let Ok(snapshot) = crate::commands::get_workspace_snapshot(app.clone()).await {
+        let _ = app.emit("workspace:snapshot", snapshot);
+    }
+
+    let files = {
+        let sftp = sftp.read().await;
+        list_dir(&sftp, &cwd).await
+    };
+
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let mut sessions = state.sessions.write().await;
+    let Some(session) = sessions.get_mut(&tab_id) else {
+        return;
+    };
+    session.remote_files_loading = false;
+    if session.shell_cwd.as_deref() == Some(cwd.as_str()) && session.follow_shell_cwd {
+        if let Ok(files) = files {
+            session.remote_path = cwd;
+            session.remote_files = files;
+        }
+    }
+    drop(sessions);
+
+    if let Ok(snapshot) = crate::commands::get_workspace_snapshot(app.clone()).await {
+        let _ = app.emit("workspace:snapshot", snapshot);
+    }
+}
+
 /// Flush the batch buffer to the renderer and append to the session
 /// transcript in one step. Used by every flush path in the main event
 /// loop (cmd exit, shell close, 16ms timer) so they stay consistent.
@@ -343,6 +840,196 @@ fn track_cwd_and_user(chunk: &str, buffer: &mut String) -> (Option<String>, Opti
     (cwd, user)
 }
 
+/// Removes the one command line echoed by an interactive POSIX shell while we
+/// install the CWD hook. Electron performs the same suppression so an internal
+/// setup command never becomes part of the user's terminal transcript.
+///
+/// The echo can arrive fragmented, so retain data until the line containing
+/// the hook marker is complete. If the remote shell behaves unexpectedly, the
+/// bounded fallback releases the buffered terminal output instead of hiding it.
+fn suppress_shell_setup_echo(pending: &mut Option<String>, chunk: &str) -> String {
+    let Some(buffer) = pending.as_mut() else {
+        return chunk.to_string();
+    };
+
+    buffer.push_str(chunk);
+    const HOOK_MARKER: &str = "__tdcwd";
+
+    if let Some(marker_index) = buffer.find(HOOK_MARKER) {
+        if let Some(line_end_relative) = buffer[marker_index..].find(['\r', '\n']) {
+            let line_start = buffer[..marker_index]
+                .rfind(['\r', '\n'])
+                .map(|index| index + 1)
+                .unwrap_or(0);
+            let mut line_end = marker_index + line_end_relative + 1;
+            if buffer.as_bytes().get(line_end) == Some(&b'\n') {
+                line_end += 1;
+            }
+            let mut visible = buffer[..line_start].to_string();
+            visible.push_str(&buffer[line_end..]);
+            *pending = None;
+            return visible;
+        }
+    }
+
+    if buffer.len() > 32 * 1024 {
+        let visible = std::mem::take(buffer);
+        *pending = None;
+        return visible;
+    }
+
+    String::new()
+}
+
+/// Returns the POSIX shell CWD setup script for the given platform.
+///
+/// Mirrors Electron's `shellCwdSetupForPlatform`:
+/// - `busybox` → compact ash-compatible one-liner (≤256 bytes to avoid
+///   BusyBox line-editor truncation)
+/// - `linux` → bash/zsh/posix-aware hook via PROMPT_COMMAND / precmd / PS1
+/// - `windows` / unknown → `None` (fail-closed, no injection)
+///
+/// The injected hook defines `__tdcwd` which emits OSC7 (`file://<path>`) and
+/// 1337 (`RemoteUser=<user>`) on every prompt, enabling CWD + sudo user
+/// tracking without polling.
+fn shell_cwd_setup_for_platform(platform: &str) -> Option<&'static str> {
+    match platform {
+        "busybox" => Some(BUSYBOX_SHELL_CWD_SETUP),
+        "linux" => Some(SHELL_CWD_SETUP),
+        _ => None,
+    }
+}
+
+/// Linux shell CWD hook (bash / zsh / posix). Mirrors Electron's
+/// `SHELL_CWD_SETUP` constant. Uses `test -z "${FISH_VERSION-}"` as a fish
+/// guard so the hook is a no-op on fish (which has its own CWD reporting).
+const SHELL_CWD_SETUP: &str = "test -z \"${FISH_VERSION-}\" && eval '__tdcwd() { printf \"\\033]7;file://%s\\007\\033]1337;RemoteUser=%s\\007\" \"$(pwd -P 2>/dev/null)\" \"$(id -un 2>/dev/null)\"; }; if [ -n \"${ZSH_VERSION-}\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook -D precmd __tdcwd 2>/dev/null; add-zsh-hook precmd __tdcwd 2>/dev/null; elif [ -n \"${BASH_VERSION-}\" ]; then case \"${PROMPT_COMMAND-}\" in *\"__tdcwd\"*) ;; *) PROMPT_COMMAND=\"__tdcwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}\" ;; esac; else case \"${PS1-}\" in *\"__tdcwd\"*) ;; *) PS1=\"\\$(__tdcwd)${PS1-}\" ;; esac; fi; __tdcwd'";
+
+/// BusyBox ash CWD hook. Kept under 256 bytes to avoid truncation in the
+/// small interactive line-editing buffer. Mirrors Electron's
+/// `BUSYBOX_SHELL_CWD_SETUP` constant.
+const BUSYBOX_SHELL_CWD_SETUP: &str = "__tdcwd(){ printf '\\033]7;file://%s\\007\\033]1337;RemoteUser=%s\\007' \"$(pwd -P 2>/dev/null)\" \"$(id -un 2>/dev/null)\";};PS1='$(__tdcwd)'\"${PS1-}\";__tdcwd";
+
+/// Normalize an encoding label to a canonical name understood by
+/// `encoding_rs`. Mirrors Electron's `normalizeEncoding` alias table.
+fn normalize_encoding(encoding: &str) -> &'static str {
+    let normalized = encoding.trim().to_lowercase();
+    match normalized.as_str() {
+        "utf8" | "utf-8" | "" => "utf-8",
+        "utf-8-bom" => "utf-8-bom",
+        "utf16" | "utf-16" | "utf16le" | "utf-16le" => "utf-16le",
+        "utf16be" | "utf-16be" => "utf-16be",
+        "gb18030" => "gb18030",
+        "gbk" => "gbk",
+        "big5" | "cp950" => "big5",
+        "euc-jp" | "eucjp" => "euc-jp",
+        "shift-jis" | "shiftjis" | "shift_jis" | "sjis" => "shift_jis",
+        "iso-2022-jp" => "iso-2022-jp",
+        "euc-kr" | "euckr" | "cp949" => "euc-kr",
+        "windows-1252" | "cp1252" => "windows-1252",
+        "latin1" | "iso-8859-1" => "iso-8859-1",
+        "windows-1251" | "cp1251" => "windows-1251",
+        _ => "utf-8",
+    }
+}
+
+/// Decode raw bytes into a string using the given encoding. Mirrors
+/// Electron's `decodeBuffer` (iconv-lite + BOM stripping).
+fn decode_bytes(buf: &[u8], encoding: &str) -> Result<String, String> {
+    let normalized = normalize_encoding(encoding);
+    match normalized {
+        "utf-8" => {
+            let mut s = String::from_utf8_lossy(buf).into_owned();
+            // Strip UTF-8 BOM if present
+            if s.starts_with('\u{feff}') {
+                s = s[3..].to_string();
+            }
+            Ok(s)
+        }
+        "utf-8-bom" => {
+            let start = if buf.starts_with(&[0xef, 0xbb, 0xbf]) { 3 } else { 0 };
+            String::from_utf8(buf[start..].to_vec())
+                .map_err(|e| format!("utf-8 decode failed: {}", e))
+        }
+        "utf-16le" => {
+            let start = if buf.starts_with(&[0xff, 0xfe]) { 2 } else { 0 };
+            decode_utf16(&buf[start..], true)
+        }
+        "utf-16be" => {
+            let start = if buf.starts_with(&[0xfe, 0xff]) { 2 } else { 0 };
+            decode_utf16(&buf[start..], false)
+        }
+        "gb18030" => Ok(encoding_rs::GB18030.decode(buf).0.into_owned()),
+        "gbk" => Ok(encoding_rs::GBK.decode(buf).0.into_owned()),
+        "big5" => Ok(encoding_rs::BIG5.decode(buf).0.into_owned()),
+        "euc-jp" => Ok(encoding_rs::EUC_JP.decode(buf).0.into_owned()),
+        "shift_jis" => Ok(encoding_rs::SHIFT_JIS.decode(buf).0.into_owned()),
+        "iso-2022-jp" => Ok(encoding_rs::ISO_2022_JP.decode(buf).0.into_owned()),
+        "euc-kr" => Ok(encoding_rs::EUC_KR.decode(buf).0.into_owned()),
+        "windows-1252" => Ok(encoding_rs::WINDOWS_1252.decode(buf).0.into_owned()),
+        "iso-8859-1" => Ok(encoding_rs::WINDOWS_1252.decode(buf).0.into_owned()),
+        "windows-1251" => Ok(encoding_rs::WINDOWS_1251.decode(buf).0.into_owned()),
+        _ => Ok(String::from_utf8_lossy(buf).into_owned()),
+    }
+}
+
+/// Decode UTF-16 bytes (little-endian or big-endian) into a string.
+fn decode_utf16(bytes: &[u8], little_endian: bool) -> Result<String, String> {
+    if bytes.len() % 2 != 0 {
+        return Err("utf-16 data length is odd".to_string());
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|chunk| {
+            if little_endian {
+                u16::from_le_bytes([chunk[0], chunk[1]])
+            } else {
+                u16::from_be_bytes([chunk[0], chunk[1]])
+            }
+        })
+        .collect();
+    String::from_utf16(&units).map_err(|e| format!("utf-16 decode failed: {}", e))
+}
+
+/// Encode a string into bytes using the given encoding. Mirrors Electron's
+/// `encodeText` (iconv-lite + BOM prefixing for utf-8-bom / utf-16le / utf-16be).
+fn encode_text(content: &str, encoding: &str) -> Vec<u8> {
+    let normalized = normalize_encoding(encoding);
+    match normalized {
+        "utf-8" => content.as_bytes().to_vec(),
+        "utf-8-bom" => {
+            let mut bytes = vec![0xef, 0xbb, 0xbf];
+            bytes.extend_from_slice(content.as_bytes());
+            bytes
+        }
+        "utf-16le" => {
+            let mut bytes = vec![0xff, 0xfe];
+            for unit in content.encode_utf16() {
+                bytes.extend_from_slice(&unit.to_le_bytes());
+            }
+            bytes
+        }
+        "utf-16be" => {
+            let mut bytes = vec![0xfe, 0xff];
+            for unit in content.encode_utf16() {
+                bytes.extend_from_slice(&unit.to_be_bytes());
+            }
+            bytes
+        }
+        "gb18030" => encoding_rs::GB18030.encode(content).0.into_owned(),
+        "gbk" => encoding_rs::GBK.encode(content).0.into_owned(),
+        "big5" => encoding_rs::BIG5.encode(content).0.into_owned(),
+        "euc-jp" => encoding_rs::EUC_JP.encode(content).0.into_owned(),
+        "shift_jis" => encoding_rs::SHIFT_JIS.encode(content).0.into_owned(),
+        "iso-2022-jp" => encoding_rs::ISO_2022_JP.encode(content).0.into_owned(),
+        "euc-kr" => encoding_rs::EUC_KR.encode(content).0.into_owned(),
+        "windows-1252" => encoding_rs::WINDOWS_1252.encode(content).0.into_owned(),
+        "iso-8859-1" => encoding_rs::WINDOWS_1252.encode(content).0.into_owned(),
+        "windows-1251" => encoding_rs::WINDOWS_1251.encode(content).0.into_owned(),
+        _ => content.as_bytes().to_vec(),
+    }
+}
+
 /// Compute the OpenSSH-style SHA256 fingerprint of a host key.
 ///
 /// Matches Electron's `computeHostFingerprint`:
@@ -356,6 +1043,157 @@ fn fingerprint_sha256_base64(key: &russh::keys::PublicKey) -> String {
 /// Open an SSH session using the profile credentials. `trusted_fingerprint`
 /// flows into the Handler's `check_server_key` so it can short-circuit the
 /// accept/reject prompt when the fingerprint already matches.
+/// Load a jump host profile from the profiles.json storage by its id.
+/// Mirrors Electron's `resolveProfile(jumpProfileId)`.
+fn load_jump_profile(app: &AppHandle, profile_id: &str) -> Result<Value, String> {
+    let profiles = crate::storage::read_json_array(app, "profiles.json")
+        .map_err(|e| format!("Failed to read profiles.json for jump host: {}", e))?;
+    profiles
+        .iter()
+        .find(|p| p.get("id").and_then(|id| id.as_str()) == Some(profile_id))
+        .cloned()
+        .ok_or_else(|| format!("Jump Host profile '{}' not found", profile_id))
+}
+
+trait SshTransport: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> SshTransport for T {}
+
+type BoxedSshTransport = Box<dyn SshTransport>;
+
+/// Creates the raw transport used by russh. Profiles with a SOCKS5 or HTTP
+/// CONNECT proxy must reach the target through that proxy before SSH begins
+/// its handshake; passing the profile directly to `russh::connect` bypasses
+/// proxy configuration entirely.
+async fn connect_ssh_transport(profile: &Value, host: &str, port: u16) -> Result<BoxedSshTransport, String> {
+    let proxy = profile.get("proxy").and_then(Value::as_object);
+    let proxy_type = proxy
+        .and_then(|value| value.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+
+    if proxy_type == "none" {
+        let stream = TcpStream::connect((host, port))
+            .await
+            .map_err(|error| format!("SSH connect failed: {error}"))?;
+        let _ = stream.set_nodelay(true);
+        return Ok(Box::new(stream));
+    }
+
+    let proxy_host = proxy
+        .and_then(|value| value.get("host"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Proxy host is required".to_string())?;
+    let proxy_port = proxy
+        .and_then(|value| value.get("port"))
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=u16::MAX as u64).contains(value))
+        .ok_or_else(|| "Proxy port must be between 1 and 65535".to_string())? as u16;
+    let username = proxy
+        .and_then(|value| value.get("username"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let password = proxy
+        .and_then(|value| value.get("password"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    match proxy_type {
+        "socks5" => {
+            let stream = if username.is_empty() {
+                Socks5Stream::connect((proxy_host, proxy_port), (host, port))
+                    .await
+                    .map_err(|error| format!("SOCKS5 proxy connect failed: {error}"))?
+            } else {
+                Socks5Stream::connect_with_password(
+                    (proxy_host, proxy_port),
+                    (host, port),
+                    username,
+                    password,
+                )
+                .await
+                .map_err(|error| format!("SOCKS5 proxy authentication failed: {error}"))?
+            };
+            Ok(Box::new(stream))
+        }
+        "http" => Ok(Box::new(
+            connect_http_proxy(proxy_host, proxy_port, host, port, username, password).await?,
+        )),
+        other => Err(format!("Unsupported proxy type: {other}")),
+    }
+}
+
+async fn connect_http_proxy(
+    proxy_host: &str,
+    proxy_port: u16,
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<TcpStream, String> {
+    let mut stream = TcpStream::connect((proxy_host, proxy_port))
+        .await
+        .map_err(|error| format!("HTTP proxy connect failed: {error}"))?;
+    let _ = stream.set_nodelay(true);
+    let request = build_http_connect_request(host, port, username, password)?;
+    stream
+        .write_all(&request)
+        .await
+        .map_err(|error| format!("HTTP proxy CONNECT write failed: {error}"))?;
+
+    let mut response = Vec::with_capacity(1024);
+    let mut chunk = [0_u8; 1024];
+    while !response.windows(4).any(|window| window == b"\r\n\r\n") {
+        if response.len() >= 32 * 1024 {
+            return Err("HTTP proxy response headers are too large".to_string());
+        }
+        let read = stream
+            .read(&mut chunk)
+            .await
+            .map_err(|error| format!("HTTP proxy CONNECT read failed: {error}"))?;
+        if read == 0 {
+            return Err("HTTP proxy closed before CONNECT completed".to_string());
+        }
+        response.extend_from_slice(&chunk[..read]);
+    }
+
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .unwrap_or(response.len());
+    let status_line = std::str::from_utf8(&response[..header_end])
+        .map_err(|_| "HTTP proxy returned a non-text response".to_string())?
+        .lines()
+        .next()
+        .unwrap_or("");
+    let status = status_line.split_whitespace().nth(1).unwrap_or("");
+    if status != "200" {
+        return Err(format!("HTTP proxy CONNECT failed: {status_line}"));
+    }
+    Ok(stream)
+}
+
+fn build_http_connect_request(host: &str, port: u16, username: &str, password: &str) -> Result<Vec<u8>, String> {
+    if [host, username, password]
+        .iter()
+        .any(|value| value.contains(['\r', '\n']))
+    {
+        return Err("Proxy values must not contain line breaks".to_string());
+    }
+    let authority = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n");
+    if !username.is_empty() {
+        let credentials = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        request.push_str(&format!("Proxy-Authorization: Basic {credentials}\r\n"));
+    }
+    request.push_str("\r\n");
+    Ok(request.into_bytes())
+}
+
 async fn open_session(
     profile: &Value,
     app: &AppHandle,
@@ -396,18 +1234,97 @@ async fn open_session(
     let handler = ClientHandler {
         app: app.clone(),
         tab_id: tab_id.to_string(),
-        profile_id,
+        profile_id: profile_id.clone(),
         host: host.clone(),
         port,
-        trusted_fingerprint: trusted,
+        trusted_fingerprint: trusted.clone(),
     };
 
     let mut config = russh::client::Config::default();
     config.inactivity_timeout = Some(Duration::from_secs(300));
     let config = Arc::new(config);
 
-    let addr = format!("{}:{}", host, port);
-    let mut handle = russh::client::connect(config, &addr, handler)
+    // ── Jump Host support ─────────────────────────────────────────────────
+    // Mirrors Electron's `connectJumpHost`: if the profile has a
+    // `jumpProfileId`, first connect to the jump host, then open a
+    // `direct-tcpip` channel through it to reach the target host.
+    // The jump host's channel is used as the TCP socket for the main
+    // SSH connection.
+    let jump_profile_id = profile
+        .get("jumpProfileId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    if let Some(jpid) = jump_profile_id {
+        eprintln!(
+            "[SSH jump] tab={} — resolving jump profile '{}'",
+            tab_id, jpid
+        );
+        // Load the jump profile from disk (same directory as profiles.json)
+        let jump_profile = load_jump_profile(app, &jpid)?;
+
+        // Validate: jump must be a different SSH profile, and must not
+        // itself have a jumpProfileId (no chained jumps).
+        let jump_id = jump_profile.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if jump_id == profile.get("id").and_then(|v| v.as_str()).unwrap_or("") {
+            return Err("Jump Host must reference a different profile".to_string());
+        }
+        if jump_profile.get("jumpProfileId").is_some() {
+            return Err("Jump Host cannot itself reference another Jump Host".to_string());
+        }
+
+        eprintln!(
+            "[SSH jump] tab={} — connecting to jump host '{}@{}:{}'",
+            tab_id,
+            jump_profile.get("username").and_then(|v| v.as_str()).unwrap_or(""),
+            jump_profile.get("host").and_then(|v| v.as_str()).unwrap_or(""),
+            jump_profile.get("port").and_then(|v| v.as_i64()).unwrap_or(22)
+        );
+
+        // Connect + authenticate to the jump host.
+        // Box::pin is required because `open_session` is recursive (the jump
+        // host itself could be resolved via another open_session call) and
+        // Rust requires indirection for recursive async fns to avoid
+        // infinitely-sized futures.
+        let jump_handle = Box::pin(open_session(&jump_profile, app, tab_id)).await?;
+        eprintln!("[SSH jump] tab={} — jump host connected, opening direct-tcpip to target", tab_id);
+
+        // Open a direct-tcpip channel through the jump host to the target
+        let jump_target_host = host.clone();
+        let jump_target_port = port;
+        let jump_channel = jump_handle
+            .channel_open_direct_tcpip(jump_target_host, jump_target_port as u32, "127.0.0.1", 0)
+            .await
+            .map_err(|e| format!("Jump Host direct-tcpip failed: {}", e))?;
+
+        // Build the main handler for the target connection
+        let target_handler = ClientHandler {
+            app: app.clone(),
+            tab_id: tab_id.to_string(),
+            profile_id: profile_id.clone(),
+            host: host.clone(),
+            port,
+            trusted_fingerprint: trusted,
+        };
+
+        // Connect to the target through the jump channel.
+        // russh's `connect_stream` takes a config + a stream (the channel).
+        // The channel implements AsyncRead + AsyncWrite so it can serve as
+        // the underlying TCP socket.
+        let stream = jump_channel.into_stream();
+        let mut target_handle = russh::client::connect_stream(config, stream, target_handler)
+            .await
+            .map_err(|e| format!("SSH connect via jump host failed: {}", e))?;
+
+        let authed = try_authenticate(&mut target_handle, &username, &auth_type, profile, app, tab_id).await?;
+        if !authed {
+            return Err("SSH Authentication failed (via jump host)".to_string());
+        }
+        return Ok(target_handle);
+    }
+
+    let stream = connect_ssh_transport(profile, &host, port).await?;
+    let mut handle = russh::client::connect_stream(config, stream, handler)
         .await
         .map_err(|e| format!("SSH connect failed: {}", e))?;
 
@@ -705,6 +1622,41 @@ async fn run_worker_loop(
         tab_id, platform
     );
 
+    // ── Inject shell CWD setup (POSIX only, fail-closed) ───────────────────
+    // Mirrors Electron's `supportsPosixShellSetup()` + `injectShellSetup()`
+    // double gate. Only `linux` / `busybox` get the OSC7/RemoteUser hook
+    // injected; Windows / unknown are left untouched so we never push a
+    // POSIX script into a non-POSIX shell.
+    let mut pending_shell_setup_echo = None;
+    if let Some(setup) = shell_cwd_setup_for_platform(&platform) {
+        eprintln!(
+            "[SSH shell-setup] tab={} platform='{}' — injecting CWD hook ({} bytes)",
+            tab_id,
+            platform,
+            setup.len()
+        );
+        // An interactive shell only executes submitted input after CR/LF. The
+        // previous port sent the script without a terminator, leaving it on
+        // the prompt as visible text and preventing OSC7/RemoteUser updates.
+        let setup_command = format!(" {setup}\r");
+        if let Err(e) = shell_channel.data(setup_command.as_bytes()).await {
+            eprintln!(
+                "[SSH shell-setup] tab={} failed to write setup: {}",
+                tab_id, e
+            );
+        } else {
+            pending_shell_setup_echo = Some(String::new());
+        }
+        // The setup script's trailing `__tdcwd` call emits an OSC7 + RemoteUser
+        // pair immediately; the main loop's `track_cwd_and_user` will pick it
+        // up and sync the initial CWD into the session snapshot.
+    } else {
+        eprintln!(
+            "[SSH shell-setup] tab={} platform='{}' — skipping setup (unsupported platform)",
+            tab_id, platform
+        );
+    }
+
     // ── SFTP subsystem ─────────────────────────────────────────────────────
     // russh-sftp 2.3 does not send `request_subsystem` itself — the caller
     // must request the "sftp" subsystem on the channel BEFORE converting it
@@ -747,6 +1699,7 @@ async fn run_worker_loop(
                 remote_path: "/".to_string(),
                 shell_cwd: Some("/".to_string()),
                 follow_shell_cwd: true,
+                remote_files_loading: false,
                 remote_files: Vec::new(),
                 file_access_mode: "user".to_string(),
                 sudo_user: None,
@@ -958,6 +1911,24 @@ while ($true) {{
     let mut sudo_password: Option<String> = None;
 
     let sftp_arc = Arc::new(RwLock::new(sftp));
+    let mut tunnel_manager = TunnelManager::new(tab_id, app, Arc::clone(&handle));
+    if let Some(rules) = profile.get("forwards").and_then(Value::as_array) {
+        for raw_rule in rules {
+            match serde_json::from_value::<SshTunnelRule>(raw_rule.clone()) {
+                Ok(rule) => {
+                    let should_start = rule.auto_start;
+                    if let Err(error) = tunnel_manager.register(rule.clone(), false) {
+                        emit_terminal_data(app, tab_id, &format!("[tunnel] 忽略无效规则: {error}\r\n")).await;
+                    } else if should_start {
+                        if let Err(error) = tunnel_manager.start(&rule.id).await {
+                            emit_terminal_data(app, tab_id, &format!("[tunnel] 自动启动 {} 失败: {error}\r\n", rule.id)).await;
+                        }
+                    }
+                }
+                Err(error) => emit_terminal_data(app, tab_id, &format!("[tunnel] 解析规则失败: {error}\r\n")).await,
+            }
+        }
+    }
 
     loop {
         // 16ms batch window for terminal output.
@@ -987,12 +1958,14 @@ while ($true) {{
                             tab_id,
                             app,
                             &state,
+                            &mut tunnel_manager,
                         ).await;
                         match result {
                             Ok(true) => {
                                 // WorkerCmd::Disconnect requested — flush and exit.
                                 flush_batch(&mut batch_buffer, app, tab_id).await;
                                 metrics_shutdown.notify_waiters();
+                                tunnel_manager.stop_all().await;
                                 return Ok(());
                             }
                             Ok(false) => {}
@@ -1005,6 +1978,7 @@ while ($true) {{
                         // Sender dropped — flush and exit cleanly.
                         flush_batch(&mut batch_buffer, app, tab_id).await;
                         metrics_shutdown.notify_waiters();
+                        tunnel_manager.stop_all().await;
                         return Ok(());
                     }
                 }
@@ -1016,19 +1990,49 @@ while ($true) {{
                         let bytes = data.as_ref();
                         let text = String::from_utf8_lossy(bytes);
                         let (new_cwd, new_user) = track_cwd_and_user(&text, &mut cwd_buffer);
-                        if new_cwd.is_some() || new_user.is_some() {
+                        let hook_marker_seen = new_cwd.is_some() || new_user.is_some();
+                        let mut cwd_to_follow = None;
+                        if hook_marker_seen {
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.get_mut(tab_id) {
-                                if let Some(cwd) = new_cwd { s.shell_cwd = Some(cwd.clone()); s.remote_path = cwd; }
+                                if let Some(cwd) = new_cwd {
+                                    if s.shell_cwd.as_deref() != Some(cwd.as_str()) {
+                                        s.shell_cwd = Some(cwd.clone());
+                                        if s.follow_shell_cwd {
+                                            cwd_to_follow = Some(cwd);
+                                        }
+                                    }
+                                }
                                 if let Some(user) = new_user { s.sudo_user = Some(user); }
                             }
                             drop(sessions);
-                            if let Ok(snap) = crate::commands::get_workspace_snapshot(app.clone()).await {
+                            if let Some(cwd) = cwd_to_follow {
+                                tokio::spawn(follow_shell_cwd(
+                                    app.clone(),
+                                    tab_id.to_string(),
+                                    cwd,
+                                    Arc::clone(&sftp_arc),
+                                ));
+                            } else if let Ok(snap) = crate::commands::get_workspace_snapshot(app.clone()).await {
                                 let _ = app.emit("workspace:snapshot", snap);
                             }
                         }
 
-                        batch_buffer.extend_from_slice(bytes);
+                        let visible = suppress_shell_setup_echo(&mut pending_shell_setup_echo, &text);
+                        // A shell with PTY echo disabled has no setup command
+                        // to remove. Its OSC marker proves the hook completed,
+                        // so safely release the buffered greeting/prompt.
+                        let visible = if visible.is_empty()
+                            && hook_marker_seen
+                            && pending_shell_setup_echo.is_some()
+                        {
+                            pending_shell_setup_echo.take().unwrap_or_default()
+                        } else {
+                            visible
+                        };
+                        if !visible.is_empty() {
+                            batch_buffer.extend_from_slice(visible.as_bytes());
+                        }
                     }
                     Some(ChannelMsg::ExtendedData { data, .. }) => {
                         batch_buffer.extend_from_slice(data.as_ref());
@@ -1037,6 +2041,7 @@ while ($true) {{
                         // Shell closed → flush and disconnect.
                         flush_batch(&mut batch_buffer, app, tab_id).await;
                         metrics_shutdown.notify_waiters();
+                        tunnel_manager.stop_all().await;
                         return Ok(());
                     }
                     _ => {}
@@ -1069,6 +2074,7 @@ async fn handle_worker_cmd(
     tab_id: &str,
     app: &AppHandle,
     state: &tauri::State<'_, crate::services::workspace::WorkspaceState>,
+    tunnel_manager: &mut TunnelManager,
 ) -> Result<bool, String> {
     match cmd {
         WorkerCmd::WriteTerminal(data) => {
@@ -1086,6 +2092,30 @@ async fn handle_worker_cmd(
                 .map_err(|e| e.to_string())?;
             Ok(false)
         }
+        WorkerCmd::ListSshTunnels { respond_to } => {
+            let _ = respond_to.send(tunnel_manager.list());
+            Ok(false)
+        }
+        WorkerCmd::CreateSshTunnel { rule, respond_to } => {
+            let result = match serde_json::from_value::<SshTunnelRule>(rule) {
+                Ok(rule) => tunnel_manager.create(rule).await,
+                Err(error) => Err(format!("Invalid tunnel rule: {error}")),
+            };
+            let _ = respond_to.send(result);
+            Ok(false)
+        }
+        WorkerCmd::StartSshTunnel { rule_id, respond_to } => {
+            let _ = respond_to.send(tunnel_manager.start(&rule_id).await);
+            Ok(false)
+        }
+        WorkerCmd::StopSshTunnel { rule_id, respond_to } => {
+            let _ = respond_to.send(tunnel_manager.stop(&rule_id).await);
+            Ok(false)
+        }
+        WorkerCmd::DeleteSshTunnel { rule_id, respond_to } => {
+            let _ = respond_to.send(tunnel_manager.delete(&rule_id).await);
+            Ok(false)
+        }
         WorkerCmd::ListRemoteFiles { path, respond_to } => {
             let res = if file_access_mode == "root" {
                 exec_list_dir_via_shell(handle, &path, sudo_user, sudo_password).await
@@ -1096,22 +2126,22 @@ async fn handle_worker_cmd(
             let _ = respond_to.send(res);
             Ok(false)
         }
-        WorkerCmd::ReadRemoteFile { path, encoding: _, respond_to } => {
+        WorkerCmd::ReadRemoteFile { path, encoding, respond_to } => {
             let res = if file_access_mode == "root" {
-                exec_read_file_via_shell(handle, &path, sudo_user, sudo_password).await
+                exec_read_file_via_shell(handle, &path, &encoding, sudo_user, sudo_password).await
             } else {
                 let sftp = sftp.read().await;
-                read_file(&sftp, &path).await
+                read_file(&sftp, &path, &encoding).await
             };
             let _ = respond_to.send(res);
             Ok(false)
         }
-        WorkerCmd::WriteRemoteFile { path, content, encoding: _, respond_to } => {
+        WorkerCmd::WriteRemoteFile { path, content, encoding, respond_to } => {
             let res = if file_access_mode == "root" {
-                exec_write_file_via_shell(handle, &path, &content, sudo_user, sudo_password).await
+                exec_write_file_via_shell(handle, &path, &content, &encoding, sudo_user, sudo_password).await
             } else {
                 let sftp = sftp.read().await;
-                write_file(&sftp, &path, &content).await
+                write_file(&sftp, &path, &content, &encoding).await
             };
             let _ = respond_to.send(res);
             Ok(false)
@@ -1138,10 +2168,10 @@ async fn handle_worker_cmd(
         WorkerCmd::CreateRemoteFile { parent_path, name, respond_to } => {
             let full_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
             let res = if file_access_mode == "root" {
-                exec_write_file_via_shell(handle, &full_path, "", sudo_user, sudo_password).await
+                exec_write_file_via_shell(handle, &full_path, "", "utf-8", sudo_user, sudo_password).await
             } else {
                 let sftp = sftp.read().await;
-                write_file(&sftp, &full_path, "").await
+                write_file(&sftp, &full_path, "", "utf-8").await
             };
             let _ = respond_to.send(res);
             Ok(false)
@@ -1238,15 +2268,37 @@ async fn handle_worker_cmd(
             let _ = respond_to.send(res);
             Ok(false)
         }
-        WorkerCmd::ChangeRemotePermissions { target_path, permissions, respond_to } => {
-            let cmd_str = format!("chmod {:o} {}", permissions, shell_quote(&target_path));
+        WorkerCmd::ChangeRemotePermissions { target_path, permissions, recursive, apply_to, respond_to } => {
+            // Mirrors Electron's `changeRemotePermissions`:
+            // - `apply_to='all'` → `chmod -R` for recursive, plain `chmod` otherwise
+            // - `apply_to='files'` → `chmod <mode> <path>` + `find <path> -type f -exec chmod <mode> {} +`
+            // - `apply_to='directories'` → `chmod <mode> <path>` + `find <path> -type d -exec chmod <mode> {} +`
+            let mode_str = format!("{:o}", permissions);
+            let cmd_str = if !recursive {
+                format!("chmod {} {}", mode_str, shell_quote(&target_path))
+            } else {
+                match apply_to.as_str() {
+                    "files" => format!(
+                        "chmod {} {} && find {} -type f -exec chmod {} {} +",
+                        mode_str, shell_quote(&target_path),
+                        shell_quote(&target_path), mode_str, "{}"
+                    ),
+                    "directories" => format!(
+                        "chmod {} {} && find {} -type d -exec chmod {} {} +",
+                        mode_str, shell_quote(&target_path),
+                        shell_quote(&target_path), mode_str, "{}"
+                    ),
+                    _ => format!("chmod -R {} {}", mode_str, shell_quote(&target_path)),
+                }
+            };
             let res = if file_access_mode == "root" {
                 exec_shell_file_command(handle, &cmd_str, sudo_user, sudo_password)
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string())
             } else {
-                super::system_metrics::exec_command(handle, &cmd_str)
+                let wrapped = format!("sh -lc {}", shell_quote(&cmd_str));
+                super::system_metrics::exec_command(handle, &wrapped)
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string())
@@ -1306,6 +2358,19 @@ pub async fn list_dir(sftp: &SftpSession, dir_path: &str) -> Result<Vec<Value>, 
         .await
         .map_err(|e| e.to_string())?;
     let mut items = Vec::new();
+    // SFTP servers commonly omit `..` from read_dir. Keep the file pane
+    // navigation consistent with Electron by creating the parent row ourselves.
+    if let Some(parent_path) = parent_remote_path(dir_path) {
+        items.push(serde_json::json!({
+            "name": "..",
+            "path": parent_path,
+            "type": "folder",
+            "size": "-",
+            "modified": "",
+            "permission": "",
+            "ownerGroup": "",
+        }));
+    }
     for entry in entries {
         let name = entry.file_name();
         if name == "." || name == ".." {
@@ -1355,24 +2420,38 @@ pub async fn list_dir(sftp: &SftpSession, dir_path: &str) -> Result<Vec<Value>, 
     Ok(items)
 }
 
-async fn read_file(sftp: &SftpSession, path: &str) -> Result<String, String> {
+fn parent_remote_path(dir_path: &str) -> Option<String> {
+    let normalized = dir_path.trim_end_matches('/');
+    if normalized.is_empty() || normalized == "/" {
+        return None;
+    }
+
+    match normalized.rfind('/') {
+        Some(0) => Some("/".to_string()),
+        Some(index) => Some(normalized[..index].to_string()),
+        None => Some("/".to_string()),
+    }
+}
+
+async fn read_file(sftp: &SftpSession, path: &str, encoding: &str) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
     let mut f = sftp
         .open(path)
         .await
         .map_err(|e| e.to_string())?;
-    let mut s = String::new();
-    f.read_to_string(&mut s).await.map_err(|e| e.to_string())?;
-    Ok(s)
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).await.map_err(|e| e.to_string())?;
+    decode_bytes(&buf, encoding)
 }
 
-async fn write_file(sftp: &SftpSession, path: &str, content: &str) -> Result<(), String> {
+async fn write_file(sftp: &SftpSession, path: &str, content: &str, encoding: &str) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
+    let bytes = encode_text(content, encoding);
     let mut f = sftp
         .create(path)
         .await
         .map_err(|e| e.to_string())?;
-    f.write_all(content.as_bytes())
+    f.write_all(&bytes)
         .await
         .map_err(|e| e.to_string())?;
     f.flush().await.map_err(|e| e.to_string())?;
@@ -1519,9 +2598,12 @@ async fn exec_list_dir_via_shell(
 }
 
 /// Read a file via `sudo cat` + base64 (binary-safe over the exec channel).
+/// Decodes the result using the given encoding (mirrors Electron's
+/// `readRemoteFileViaShell` + `decodeBuffer`).
 async fn exec_read_file_via_shell(
     handle: &Handle<ClientHandler>,
     path: &str,
+    encoding: &str,
     sudo_user: &Option<String>,
     sudo_password: &Option<String>,
 ) -> Result<String, String> {
@@ -1531,18 +2613,22 @@ async fn exec_read_file_via_shell(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&trimmed)
         .map_err(|e| format!("base64 decode failed: {}", e))?;
-    String::from_utf8(bytes).map_err(|e| format!("utf8 decode failed: {}", e))
+    decode_bytes(&bytes, encoding)
 }
 
-/// Write a file via `sudo tee` + base64 (binary-safe).
+/// Write a file via `sudo tee` + base64 (binary-safe). Encodes the content
+/// using the given encoding before base64-wrapping (mirrors Electron's
+/// `writeRemoteFileViaShell` + `encodeText`).
 async fn exec_write_file_via_shell(
     handle: &Handle<ClientHandler>,
     path: &str,
     content: &str,
+    encoding: &str,
     sudo_user: &Option<String>,
     sudo_password: &Option<String>,
 ) -> Result<(), String> {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(content.as_bytes());
+    let bytes = encode_text(content, encoding);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let cmd = format!("base64 -d | tee {} > /dev/null", shell_quote(path));
     let user = sudo_user.as_deref().unwrap_or("root");
     let full_cmd = if sudo_password.is_some() {
@@ -1652,4 +2738,88 @@ fn format_perm(perm: u32, is_dir: bool, is_link: bool) -> String {
         s.push(if oct & 1 != 0 { 'x' } else { '-' });
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_http_connect_request, parent_remote_path, remote_bind_host_matches, suppress_shell_setup_echo,
+        tunnel_bind_address, validate_tunnel_rule, SshTunnelRule,
+    };
+
+    #[test]
+    fn suppresses_only_the_echoed_cwd_setup_command() {
+        let mut pending = Some(String::new());
+
+        assert_eq!(
+            suppress_shell_setup_echo(
+                &mut pending,
+                "Debian GNU/Linux\r\nuser@host:~$ __tdcwd(){ printf"
+            ),
+            ""
+        );
+
+        let visible = suppress_shell_setup_echo(
+            &mut pending,
+            " '\\033]7;file:///home/user\\007'; }; __tdcwd\r\n\u{1b}]7;file:///home/user\u{7}user@host:~$ ",
+        );
+
+        assert_eq!(
+            visible,
+            "Debian GNU/Linux\r\n\u{1b}]7;file:///home/user\u{7}user@host:~$ "
+        );
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn creates_parent_rows_only_below_remote_root() {
+        assert_eq!(parent_remote_path("/"), None);
+        assert_eq!(parent_remote_path("/home"), Some("/".to_string()));
+        assert_eq!(parent_remote_path("/home/stoffel/下载/"), Some("/home/stoffel".to_string()));
+    }
+
+    #[test]
+    fn builds_authenticated_http_connect_request_with_ipv6_authority() {
+        let request = String::from_utf8(
+            build_http_connect_request("2001:db8::1", 22, "alice", "secret").unwrap(),
+        )
+        .unwrap();
+
+        assert!(request.starts_with("CONNECT [2001:db8::1]:22 HTTP/1.1\r\n"));
+        assert!(request.contains("Host: [2001:db8::1]:22\r\n"));
+        assert!(request.contains("Proxy-Authorization: Basic YWxpY2U6c2VjcmV0\r\n"));
+    }
+
+    #[test]
+    fn rejects_http_connect_header_injection() {
+        assert!(build_http_connect_request("host\r\nInjected: x", 22, "", "").is_err());
+    }
+
+    #[test]
+    fn validates_tunnel_rules_and_normalizes_cross_platform_bind_addresses() {
+        let valid = SshTunnelRule {
+            id: "local-db".to_string(),
+            name: "database".to_string(),
+            kind: "local".to_string(),
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 15432,
+            target_host: Some("db.internal".to_string()),
+            target_port: Some(5432),
+            auto_start: false,
+        };
+        assert!(validate_tunnel_rule(&valid).is_ok());
+        assert_eq!(tunnel_bind_address("*", 1080).unwrap(), "0.0.0.0:1080");
+        assert_eq!(tunnel_bind_address("::1", 1080).unwrap(), "[::1]:1080");
+
+        let invalid = SshTunnelRule { target_port: None, ..valid };
+        assert!(validate_tunnel_rule(&invalid).is_err());
+    }
+
+    #[test]
+    fn remote_forward_matches_exact_and_wildcard_bind_hosts() {
+        assert!(remote_bind_host_matches("127.0.0.1", "127.0.0.1"));
+        assert!(!remote_bind_host_matches("127.0.0.1", "10.0.0.4"));
+        assert!(remote_bind_host_matches("0.0.0.0", "10.0.0.4"));
+        assert!(remote_bind_host_matches("::", "2001:db8::4"));
+    }
 }

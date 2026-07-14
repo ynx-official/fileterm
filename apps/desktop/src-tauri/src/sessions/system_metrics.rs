@@ -944,7 +944,7 @@ cpu_info=$(awk -F: '
       model=model_order[index]
       if (printed[model]) continue
       printed[model]=1
-      printf "%s|%s|%s|%s|%s\\n", model, (cores[model] == "" ? "0" : cores[model]), (mhz[model] == "" ? "-" : mhz[model]), (cache[model] == "" ? "-" : cache[model]), (bogomips[model] == "" ? "-" : bogomips[model])
+      printf "%s|%s|%s|%s|%s\n", model, (cores[model] == "" ? "0" : cores[model]), (mhz[model] == "" ? "-" : mhz[model]), (cache[model] == "" ? "-" : cache[model]), (bogomips[model] == "" ? "-" : bogomips[model])
     }}
   }}
 ' /proc/cpuinfo 2>/dev/null)
@@ -966,7 +966,7 @@ if [ -z "$cpu_info" ]; then
     /^BogoMIPS:/ {{ bogomips=trim($2) }}
     END {{
       if (total_cores == 0 && sockets > 0 && cores_per_socket > 0) total_cores=sockets * cores_per_socket
-      if (model != "") printf "%s|%s|%s|%s|%s\\n", model, (total_cores > 0 ? total_cores : 0), (frequency == "" ? "-" : sprintf("%.3f", frequency + 0)), (cache == "" ? "-" : cache), (bogomips == "" ? "-" : bogomips)
+      if (model != "") printf "%s|%s|%s|%s|%s\n", model, (total_cores > 0 ? total_cores : 0), (frequency == "" ? "-" : sprintf("%.3f", frequency + 0)), (cache == "" ? "-" : cache), (bogomips == "" ? "-" : bogomips)
     }}
   ')
 fi
@@ -980,7 +980,7 @@ gpu_info=$(run_bounded 1 nvidia-smi --query-gpu=name,driver_version,memory.total
     model=trim($1)
     driver=trim($2)
     memory=trim($3)
-    printf "%s|NVIDIA|%s|%s MiB\\n", model, (driver == "" ? "-" : driver), (memory == "" ? "-" : memory)
+    printf "%s|NVIDIA|%s|%s MiB\n", model, (driver == "" ? "-" : driver), (memory == "" ? "-" : memory)
   }}
 ')
 if [ -z "$gpu_info" ]; then
@@ -991,7 +991,7 @@ if [ -z "$gpu_info" ]; then
       sub(/^[[:xdigit:]:.]+[[:space:]]+[^:]+: /, "", line)
       vendor=line
       sub(/[[:space:]].*$/, "", vendor)
-      printf "%s|%s|-|-\\n", line, (vendor == "" ? "-" : vendor)
+      printf "%s|%s|-|-\n", line, (vendor == "" ? "-" : vendor)
     }}
   ')
 fi
@@ -1003,11 +1003,11 @@ tx1=$(awk -F: 'NR>2 {{name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[
 before_file="/tmp/fileterm-if-before-$$"
 after_file="/tmp/fileterm-if-after-$$"
 trap 'rm -f "$before_file" "$after_file"' 0 1 2 15
-awk -F: 'NR>2 {{name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[:space:]]+/); if (name != "lo") printf "%s|%.0f|%.0f\\n", name, values[2], values[10]}}' /proc/net/dev 2>/dev/null > "$before_file"
+awk -F: 'NR>2 {{name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[:space:]]+/); if (name != "lo") printf "%s|%.0f|%.0f\n", name, values[2], values[10]}}' /proc/net/dev 2>/dev/null > "$before_file"
 sleep "$sleep_interval"
 rx2=$(awk -F: 'NR>2 {{name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[:space:]]+/); if (name != "lo") sum += values[2]}} END {{printf "%.0f", sum+0}}' /proc/net/dev 2>/dev/null)
 tx2=$(awk -F: 'NR>2 {{name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[:space:]]+/); if (name != "lo") sum += values[10]}} END {{printf "%.0f", sum+0}}' /proc/net/dev 2>/dev/null)
-awk -F: 'NR>2 {{name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[:space:]]+/); if (name != "lo") printf "%s|%.0f|%.0f\\n", name, values[2], values[10]}}' /proc/net/dev 2>/dev/null > "$after_file"
+awk -F: 'NR>2 {{name=$1; gsub(/[[:space:]]/,"",name); split($2, values, /[[:space:]]+/); if (name != "lo") printf "%s|%.0f|%.0f\n", name, values[2], values[10]}}' /proc/net/dev 2>/dev/null > "$after_file"
 sample_ms=$(awk -v interval="$sleep_interval" 'BEGIN {{ printf "%d", interval * 1000 }}')
 [ -z "$sample_ms" ] && sample_ms=1000
 rx_rate=$(awk -v before="$rx1" -v after="$rx2" -v ms="$sample_ms" 'BEGIN {{ if (ms > 0) printf "%d", (after-before) * 1000 / ms; else print 0 }}')
@@ -1023,14 +1023,14 @@ else
   [ -z "$local_mounts" ] && local_mounts="/"
   df_output=$(df "$df_flags" $local_mounts 2>/dev/null)
 fi
-disk=$(printf "%s\\n" "$df_output" | awk 'NR>1 {{printf "%s|%sK/%sK\\n", $6, $4, $2}}' | head -n 12)
-filesystems=$(printf "%s\\n" "$df_output" | awk 'NR>1 {{printf "%s|%sK|%sK|%s|%sK|%s\\n", $1, $2, $3, $5, $4, $6}}' | head -n 20)
+disk=$(printf "%s\n" "$df_output" | awk 'NR>1 {{printf "%s|%sK/%sK\n", $6, $4, $2}}' | head -n 12)
+filesystems=$(printf "%s\n" "$df_output" | awk 'NR>1 {{printf "%s|%sK|%sK|%s|%sK|%s\n", $1, $2, $3, $5, $4, $6}}' | head -n 20)
 if has_bounded_runner; then
-  procs=$(run_bounded 1 ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {{printf "%.1fM|%s|%s|%s\\n", $1/1024, $2, $3, $4}}')
-  [ -z "$procs" ] && procs=$(run_bounded 1 ps 2>/dev/null | awk 'NR>1 && NF >= 5 {{proc_name=$5; sub(/^.*\\//, "", proc_name); printf "%.1fM|0|0|%s\\n", $3/1024, proc_name}}')
+  procs=$(run_bounded 1 ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {{printf "%.1fM|%s|%s|%s\n", $1/1024, $2, $3, $4}}')
+  [ -z "$procs" ] && procs=$(run_bounded 1 ps 2>/dev/null | awk 'NR>1 && NF >= 5 {{proc_name=$5; sub(/^.*\//, "", proc_name); printf "%.1fM|0|0|%s\n", $3/1024, proc_name}}')
 else
-  procs=$(ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {{printf "%.1fM|%s|%s|%s\\n", $1/1024, $2, $3, $4}}')
-  [ -z "$procs" ] && procs=$(ps 2>/dev/null | awk 'NR>1 && NF >= 5 {{proc_name=$5; sub(/^.*\\//, "", proc_name); printf "%.1fM|0|0|%s\\n", $3/1024, proc_name}}')
+  procs=$(ps -eo rss=,pcpu=,etimes=,comm= 2>/dev/null | awk 'NF >= 4 {{printf "%.1fM|%s|%s|%s\n", $1/1024, $2, $3, $4}}')
+  [ -z "$procs" ] && procs=$(ps 2>/dev/null | awk 'NR>1 && NF >= 5 {{proc_name=$5; sub(/^.*\//, "", proc_name); printf "%.1fM|0|0|%s\n", $3/1024, proc_name}}')
 fi
 echo "__PLATFORM__{}"
 echo "__OS__$os_name"
@@ -1067,7 +1067,7 @@ awk -F'|' -v sample_ms="$sample_ms" '
     curr_tx=$3
     rx_rate=(curr_rx-prev_rx) * 1000 / sample_ms
     tx_rate=(curr_tx-prev_tx) * 1000 / sample_ms
-    printf "%s|%.0f|%.0f|%d|%d\\n", $1, curr_rx, curr_tx, rx_rate, tx_rate
+    printf "%s|%.0f|%.0f|%d|%d\n", $1, curr_rx, curr_tx, rx_rate, tx_rate
   }}
 ' "$before_file" "$after_file"
 rm -f "$before_file" "$after_file"
@@ -1214,4 +1214,31 @@ $procLines | ForEach-Object { Write-Output $_ }
 Write-Output '__PROCS_END__'
 Write-Output '__FILETERM_METRICS_COMPLETE__'
 "#.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_posix_metrics_command, parse_system_metrics};
+
+    #[test]
+    fn posix_metrics_command_emits_real_awk_line_breaks() {
+        let command = build_posix_metrics_command("linux");
+
+        assert!(command.contains(r#"printf "%s|%sK/%sK\n"#));
+        assert!(command.contains(r#"printf "%.1fM|%s|%s|%s\n"#));
+        assert!(!command.contains(r#"printf "%s|%sK/%sK\\n"#));
+        assert!(!command.contains(r#"printf "%.1fM|%s|%s|%s\\n"#));
+    }
+
+    #[test]
+    fn parser_keeps_disk_and_process_rows_separate() {
+        let metrics = parse_system_metrics(
+            "__PLATFORM__linux\n__CPU__10\n__MEM__1|2|50|0|0|0\n__MEM_BYTES__1048576|2097152|1048576|50|0|0|0\n__SWAP__0|0|0\n__SWAP_BYTES__0|0|0|0\n__CPU_USAGE__1|2|0|97|0|0|0|0\n__DISK_START__\n/|10K/20K\n/dev|30K/40K\n__DISK_END__\n__PROCS_START__\n1.0M|0.1|4|systemd\n2.0M|0.2|5|sshd\n__PROCS_END__\n",
+            "linux",
+        );
+
+        assert_eq!(metrics["diskRows"].as_array().map(Vec::len), Some(2));
+        assert_eq!(metrics["topProcesses"].as_array().map(Vec::len), Some(2));
+        assert_eq!(metrics["topProcesses"][0]["command"], "sshd");
+    }
 }

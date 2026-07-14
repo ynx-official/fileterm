@@ -2,13 +2,26 @@
 
 | 项目       | 值                                                        |
 | ---------- | --------------------------------------------------------- |
-| 文档版本   | v1.0                                                      |
-| 编写日期   | 2025-07-13                                                |
-| 状态       | Phase 0 implementation in progress                        |
+| 文档版本   | v1.1                                                      |
+| 更新日期   | 2026-07-14                                                |
+| 状态       | Phase 0–3 实现已完成；Phase 3 待真实服务/三平台验收       |
 | 编写人     | 高见远（架构师）                                          |
 | 适用分支   | `tauri-rust-migration-roadmap`                            |
 | 仓库根目录 | `/Users/stoffel/CodeFile/fileterm`                        |
 | 关联文档   | `docs/plans/active/tauri-rust-migration.md`（高层路线图） |
+
+---
+
+## 当前执行状态
+
+实际 Rust/Tauri 工程位于 `apps/desktop/src-tauri`（不是早期草案中的 `apps/desktop-tauri`）。截至 2026-07-14：
+
+- Phase 0–2 已完成：Tauri bridge、桌面壳、Rust JSON 存储、Workspace snapshot、旧 Electron 数据兼容和 contract test 已落地。
+- Phase 3 已完成 SSH 垂直切片：russh shell/SFTP、MFA/host verification、系统指标、CWD/远端用户跟随、Jump Host、重连、编码、递归 chmod、SOCKS5/HTTP CONNECT 代理和运行时 SSH `-L/-R/-D` 隧道。
+- Phase 3 尚缺完整 parity 验收，重点是真实 SSH/代理服务与三平台 socket 生命周期。
+- Phase 4（FTP/FTPS、Telnet、Serial、Transfer、WebDAV 真实同步）和 Phase 5（发行切换）尚未开始。
+
+本计划的模块设计和里程碑仍然有效，但实现状态以 `tauri-migration-progress.md` 和实际 `apps/desktop/src-tauri/src/` 代码为准。
 
 ---
 
@@ -150,7 +163,7 @@ graph TB
     TPRE["preload/IPC 桥"]
     TCMD["#[tauri::command]"]
   end
-  subgraph RustBackend["Rust 后端 (apps/desktop-tauri/src-tauri)"]
+  subgraph RustBackend["Rust 后端 (apps/desktop/src-tauri)"]
     CMD["commands/（领域命令薄层）"]
     SVC["services/"]
     SESS["sessions/<br/>ssh/ftp/telnet/serial 各自独立"]
@@ -179,10 +192,10 @@ graph TB
 
 ### 3.2 Rust 模块划分
 
-新增 `apps/desktop-tauri/src-tauri/src/`，按领域分层。模块边界与 TS 侧一一对应，便于迁移与对照。
+新增 `apps/desktop/src-tauri/src/`，按领域分层。模块边界与 TS 侧一一对应，便于迁移与对照。
 
 ```
-apps/desktop-tauri/src-tauri/src/
+apps/desktop/src-tauri/src/
 ├── main.rs                       # Tauri 入口，装配 AppState
 ├── lib.rs
 ├── error.rs                      # 统一错误类型 FileTermError + serde 序列化

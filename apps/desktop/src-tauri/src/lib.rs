@@ -366,6 +366,11 @@ pub fn run() {
             crate::commands::app_change_remote_permissions,
             crate::commands::app_set_remote_file_access_mode,
             crate::commands::app_resolve_ssh_interaction,
+            crate::commands::app_list_ssh_tunnels,
+            crate::commands::app_create_ssh_tunnel,
+            crate::commands::app_start_ssh_tunnel,
+            crate::commands::app_stop_ssh_tunnel,
+            crate::commands::app_delete_ssh_tunnel,
 
             // Phase 2: profile / folder / command CRUD
             crate::commands::app_create_profile,

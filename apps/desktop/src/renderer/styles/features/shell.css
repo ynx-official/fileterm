@@ -763,6 +763,13 @@
   margin-left: 2px;
 }
 
+:root[data-platform='darwin'] .titlebar-brand strong {
+  /* Shift text UP to perfectly align with the un-modifiable macOS traffic lights
+     which naturally sit slightly higher than the mathematical center of the 48px tabbar */
+  position: relative;
+  top: -4px;
+}
+
 .titlebar-tabarea {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
