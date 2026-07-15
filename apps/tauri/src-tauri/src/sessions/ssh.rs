@@ -1703,25 +1703,35 @@ async fn try_authenticate(
             })
         }
         _ => {
-            // agent
-            let mut agent = russh::keys::agent::client::AgentClient::connect_env()
-                .await
-                .map_err(|e| e.to_string())?;
-            let identities = agent
-                .request_identities()
-                .await
-                .map_err(|e| e.to_string())?;
-            for identity in identities {
-                let pub_key = identity.public_key().into_owned();
-                let res = handle
-                    .authenticate_publickey_with(username, pub_key, None, &mut agent)
+            // russh's environment-backed agent client uses a Unix socket and
+            // is not available on Windows. Fail explicitly there rather than
+            // compiling a nonexistent `connect_env` implementation.
+            #[cfg(unix)]
+            {
+                let mut agent = russh::keys::agent::client::AgentClient::connect_env()
                     .await
                     .map_err(|e| e.to_string())?;
-                if res.success() {
-                    return Ok(AuthenticationResult::Authenticated);
+                let identities = agent
+                    .request_identities()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                for identity in identities {
+                    let pub_key = identity.public_key().into_owned();
+                    let res = handle
+                        .authenticate_publickey_with(username, pub_key, None, &mut agent)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if res.success() {
+                        return Ok(AuthenticationResult::Authenticated);
+                    }
                 }
+                Ok(AuthenticationResult::Rejected)
             }
-            Ok(AuthenticationResult::Rejected)
+            #[cfg(not(unix))]
+            {
+                let _ = (handle, username);
+                Err("SSH Agent authentication is not supported on this platform.".to_string())
+            }
         }
     }
 }

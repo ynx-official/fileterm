@@ -799,14 +799,14 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building FileTerm Tauri application")
-        .run(|app_handle, event| {
+        .run(|_app_handle, _event| {
             // macOS: clicking the dock icon when the main window is hidden
             // should bring it back (mirrors Electron `activate`).
             // `Reopen` is a macOS-only Tauri event and must not be referenced
             // while compiling the Linux or Windows desktop targets.
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { .. } = event {
-                show_main_window(app_handle);
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_main_window(_app_handle);
             }
         });
 }
