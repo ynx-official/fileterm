@@ -763,11 +763,14 @@
   margin-left: 2px;
 }
 
-:root[data-platform='darwin'] .titlebar-brand strong {
-  /* Shift text UP to perfectly align with the un-modifiable macOS traffic lights
-     which naturally sit slightly higher than the mathematical center of the 48px tabbar */
+:root[data-runtime='tauri'][data-platform='darwin'] .titlebar-brand strong {
+  /* Tauri Overlay leaves AppKit's traffic-light center at 16pt from the
+     window top, while this renderer tab bar is 48px tall. The Tauri/Tao
+     trafficLightPosition y value only changes the control-container height;
+     it does not move the buttons vertically. Keep this correction scoped to
+     Tauri so Electron hiddenInset retains its own native baseline. */
   position: relative;
-  top: -4px;
+  top: -8px;
 }
 
 .titlebar-tabarea {

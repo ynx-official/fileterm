@@ -442,8 +442,10 @@ pub fn run() {
                 .ok_or_else(|| "Failed to find main window".to_string())?;
 
             // ── Platform-specific window chrome ────────────────────────────
-            // macOS: keep decorations + Overlay titleBarStyle (traffic light
-            //        floats over content), aligned with Electron hiddenInset.
+            // macOS: keep decorations + Overlay titleBarStyle so the traffic
+            //        lights float over renderer content. Overlay's AppKit
+            //        geometry is intentionally calibrated in renderer CSS;
+            //        it is not identical to Electron's hiddenInset.
             // Windows: drop the OS frame so the renderer owns the title bar.
             // Linux: keep native decorations.
             #[cfg(target_os = "windows")]

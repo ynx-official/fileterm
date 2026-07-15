@@ -7,6 +7,10 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import './styles/index.css'
 
 const initialWindowMode = new URLSearchParams(window.location.search).get('window') ?? 'main'
+// Keep renderer-only chrome adjustments scoped to the Tauri window model.
+// macOS Overlay uses a different native title-bar baseline than Electron's
+// hiddenInset, even when both apps render the same React title bar.
+document.documentElement.dataset.runtime = 'tauri'
 document.documentElement.classList.toggle('tauri-standalone-window', initialWindowMode !== 'main')
 
 // Global window dragging handler for Tauri custom titlebars
