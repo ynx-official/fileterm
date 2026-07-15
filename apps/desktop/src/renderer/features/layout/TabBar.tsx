@@ -92,8 +92,12 @@ export function TabBar({
       <div className="titlebar-tabarea">
         <div
           className="fs-tabs"
+          data-workspace-tab-drop-zone="precise"
           onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => onDrop(event)}
+          onDrop={(event) => {
+            event.stopPropagation()
+            onDrop(event)
+          }}
           onWheel={handleHorizontalWheelScroll}
         >
           {orderedTabs.map((entry, index) =>

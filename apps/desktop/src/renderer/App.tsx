@@ -234,6 +234,7 @@ export function App() {
     workspace,
     windowContext: workspaceWindow.context,
     workspaceTabPlacements: workspaceWindow.placements,
+    isWorkspaceWindow,
     isMainWorkspaceWindow,
     hasLoadedInitialSnapshot,
     locale,

@@ -418,6 +418,19 @@ interface WorkspaceTab {
 }
 ```
 
+### 7.6 Workspace 窗口拖放边界
+
+会话标签跨窗口移动由 `WorkspaceWindowRegistry` 统一结算，renderer 只负责识别落点类型：
+
+- 标签栏是 `precise` drop zone，按具体标签或标签栏空白位置提交精确索引。
+- 主窗口与独立会话窗口的其余区域是 `workspace` drop zone；跨窗口释放时追加到目标会话列表末尾。
+- 同一窗口的 `workspace` drop 是已处理的 no-op，恢复拖动前顺序，不触发拆窗。
+- 只有 `application/x-fileterm-workspace-tab` 可进入这条链路；文件、文本及其他 feature 拖放保持原处理器。
+- 文件编辑器、连接管理器、命令管理器等 standalone 窗口不注册 workspace drop zone。
+- main process 从 IPC `event.sender` 解析真实源/目标窗口，不信任 renderer 传入的窗口 ID。
+
+拖动记录在成功 drop 后保持短期 `dropped` 状态，以吸收重复 drop 和迟到 `dragend`；未正常结束的记录通过超时、窗口关闭或 renderer 销毁清理。
+
 ## 8. 为什么 SSH/SFTP 与 FTP 必须拆开
 
 这是第一版最重要的建模约束。

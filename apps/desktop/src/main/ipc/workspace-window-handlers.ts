@@ -22,14 +22,14 @@ export function registerWorkspaceWindowHandlers(services: IpcServices) {
   ipcMain.handle('workspaceWindow:moveTab', (_event, input: MoveWorkspaceTabInput) => {
     workspaceWindowRegistry.move(input)
   })
-  ipcMain.handle('workspaceWindow:startTabDrag', (_event, input: WorkspaceTabDragInput) => {
-    workspaceWindowRegistry.startDrag(input)
+  ipcMain.handle('workspaceWindow:startTabDrag', (event, input: WorkspaceTabDragInput) => {
+    workspaceWindowRegistry.startDrag(input, event.sender)
   })
-  ipcMain.handle('workspaceWindow:dropTab', (_event, input: DropWorkspaceTabInput) => {
-    workspaceWindowRegistry.drop(input)
+  ipcMain.handle('workspaceWindow:dropTab', (event, input: DropWorkspaceTabInput) => {
+    workspaceWindowRegistry.drop(input, event.sender)
   })
-  ipcMain.handle('workspaceWindow:finishTabDrag', (_event, input: FinishWorkspaceTabDragInput) => {
-    workspaceWindowRegistry.finishDrag(input)
+  ipcMain.handle('workspaceWindow:finishTabDrag', (event, input: FinishWorkspaceTabDragInput) => {
+    workspaceWindowRegistry.finishDrag(input, event.sender)
   })
   ipcMain.handle('workspaceWindow:claimTab', (event, tabId: string) => {
     workspaceWindowRegistry.claim(tabId, event.sender)

@@ -793,6 +793,7 @@ export interface WorkspaceTabDragInput {
 export interface DropWorkspaceTabInput extends MoveWorkspaceTabInput {
   dragId: string
   sourceWindowId: string
+  dropZone: 'precise' | 'workspace'
 }
 
 export interface FinishWorkspaceTabDragInput {

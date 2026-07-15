@@ -1,3 +1,6 @@
+export const WORKSPACE_TAB_DRAG_MIME = 'application/x-fileterm-workspace-tab'
+export const WORKSPACE_TAB_PRECISE_DROP_SELECTOR = '[data-workspace-tab-drop-zone="precise"]'
+
 export type TabDragEndState = {
   screenX: number
   screenY: number
@@ -8,6 +11,50 @@ export type WindowScreenBounds = {
   y: number
   width: number
   height: number
+}
+
+export type DragDataTransferLike = {
+  types: ArrayLike<string>
+}
+
+export function isWorkspaceTabDrag(dataTransfer: DragDataTransferLike | null | undefined) {
+  return Boolean(dataTransfer && Array.from(dataTransfer.types).includes(WORKSPACE_TAB_DRAG_MIME))
+}
+
+export function isWorkspaceTabPreciseDropTarget(target: EventTarget | null) {
+  return (
+    typeof Element !== 'undefined' &&
+    target instanceof Element &&
+    target.closest(WORKSPACE_TAB_PRECISE_DROP_SELECTOR) !== null
+  )
+}
+
+export type WorkspaceTabDropIndexInput = {
+  sessionTabIds: string[]
+  draggedTabId: string
+  isSameWindow: boolean
+  targetTabId?: string | null
+  preserveCurrentOrder?: boolean
+}
+
+export function resolveWorkspaceTabDropTargetIndex({
+  sessionTabIds,
+  draggedTabId,
+  isSameWindow,
+  targetTabId,
+  preserveCurrentOrder = false
+}: WorkspaceTabDropIndexInput) {
+  const sourceIndex = isSameWindow ? sessionTabIds.indexOf(draggedTabId) : -1
+  let targetIndex =
+    preserveCurrentOrder && sourceIndex >= 0
+      ? sourceIndex
+      : targetTabId
+        ? sessionTabIds.indexOf(targetTabId)
+        : sessionTabIds.length
+  if (!preserveCurrentOrder && sourceIndex >= 0 && targetIndex > sourceIndex) {
+    targetIndex -= 1
+  }
+  return Math.max(0, targetIndex)
 }
 
 export function isTabDragReleasedOutsideWindow(dragEnd: TabDragEndState, windowBounds: WindowScreenBounds, margin = 8) {
