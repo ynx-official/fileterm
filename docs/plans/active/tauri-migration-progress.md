@@ -1,11 +1,11 @@
-# Tauri 迁移进度与 Electron 功能差距
+# Tauri 迁移进度与 Electron 并行运行时差距
 
-| 项目     | 值                                                                                                              |
-| -------- | --------------------------------------------------------------------------------------------------------------- |
-| 文档版本 | v1.2                                                                                                            |
-| 更新日期 | 2026-07-15                                                                                                      |
-| 状态     | 当前运行入口已切换为 Tauri v2；Phase 0–4 的代码主体与本地协议夹具已完成，Phase 5 发布与外部发行候选验收进行中。 |
-| 关联文档 | `russh-migration.md`、`rust-backend-migration-plan.md`                                                          |
+| 项目     | 值                                                                                                                         |
+| -------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 文档版本 | v1.2                                                                                                                       |
+| 更新日期 | 2026-07-15                                                                                                                 |
+| 状态     | Tauri 与 Electron 均为独立运行入口；Tauri Phase 0–4 的代码主体与本地协议夹具已完成，Phase 5 发布与外部发行候选验收进行中。 |
+| 关联文档 | `russh-migration.md`、`rust-backend-migration-plan.md`                                                                     |
 
 ---
 
@@ -13,15 +13,15 @@
 
 ### 运行时与版本核对（2026-07-15）
 
-| 项目               | 当前事实                                                                                                                                                          |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 历史 Electron 基线 | Electron `42.4.0`，来自迁移前的 npm lockfile；对应的是历史 FileTerm 1.2.x 构建，不是当前运行时。                                                                  |
-| 当前桌面运行时     | Tauri v2；Rust crate 锁定 `tauri 2.11.5`、`russh 0.62.2`、`russh-sftp 2.3.0`。                                                                                    |
-| 当前 npm manifest  | `apps/desktop/package.json` 使用 `tauri dev/build`；当前 lockfile 不再包含 `electron`、`electron-builder` 或 `electron-updater`。                                 |
-| 本地依赖残留       | 当前 `node_modules` 仍可能被 `npm ls` 报告为 extraneous 的 `electron 42.4.0`、`electron-builder` 和 `electron-updater`；它们不属于 manifest，后续可清理安装目录。 |
-| 遗留 Electron 文件 | `src/main`、`src/preload`、`dist-electron` 测试配置和部分历史发布文档仍保留，作为迁移对照/清理对象，不代表 Electron 仍是可运行入口。                              |
+| 项目            | 当前事实                                                                                              |
+| --------------- | ----------------------------------------------------------------------------------------------------- |
+| Electron 运行时 | Electron `42.4.0` 位于 `apps/electron`，拥有独立 main、preload、renderer、测试和打包配置。            |
+| Tauri 运行时    | Tauri v2 位于 `apps/tauri`；Rust crate 锁定 `tauri 2.11.5`、`russh 0.62.2`、`russh-sftp 2.3.0`。      |
+| npm manifest    | `apps/tauri/package.json` 与 `apps/electron/package.json` 分别声明运行时依赖；lockfile 同时锁定两者。 |
+| 数据边界        | 两个 app 使用不同 userData 根，不能并发写同一份 profile、secret 或 transfer journal。                 |
+| 前端边界        | React renderer、CSS、hooks、bridge/preload 均物理分叉；共享只允许进入 `packages/*`。                  |
 
-因此，本次迁移不是“还在 Electron 运行时和 Tauri 之间二选一”的阶段，而是已经完成运行时切换；剩余工作集中在 Tauri 的跨平台构建、真实服务/设备验收、签名发布和数据回滚保障。
+因此，当前不是“二选一”的切换阶段：两个 runtime 并行演进。剩余 Tauri 工作集中在跨平台构建、真实服务/设备验收和签名发布；跨端功能必须单独计划与验证。
 
 ### 2026-07-14 重新审计结论（覆盖下方历史“完成”标记）
 
@@ -37,7 +37,7 @@
 
 ### Phase 0：Tauri 直连骨架与基础能力 ✅ 代码/contract 完成，待原生 UI 手测
 
-- ✅ `apps/desktop/src/bridge/tauri-api.ts` 建立，renderer 不再直接 import Electron 类型
+- ✅ `apps/tauri/src/bridge/tauri-api.ts` 建立，Tauri renderer 不再直接 import Electron 类型
 - ✅ Tauri 基础 commands：平台信息、剪贴板、UI preferences/state
 - ✅ React bridge 接入，renderer 通过 `tauri-api.ts` 初始化
 - ✅ Contract test 建立（`tests/contract.rs`，9 项断言）
@@ -133,7 +133,7 @@
 | **Auto-update**            | `services/app-update-service.ts`                               | ✅ GitHub Release check + 发布页模式；签名 in-app updater 是 Phase 5 发布资产前置。                                                                                      |
 | **Profile import/export**  | `services/connection-config-codec.ts`                          | ✅ SSH config/JSON preview + commit、fileterm/compatible 导出。                                                                                                          |
 | **Command history**        | `services/file-profile-repository.ts`                          | ✅ 每 profile 历史与命令发送偏好已持久化。                                                                                                                               |
-| **openLogsDirectory**      | `apps/desktop/src/main/main.ts`                                | ✅ Rust command 打开应用日志目录。                                                                                                                                       |
+| **openLogsDirectory**      | `apps/electron/src/main/main.ts`                               | ✅ Rust command 打开应用日志目录。                                                                                                                                       |
 | **App logger**             | `services/app-logger.ts`                                       | ✅ 轮转本地 app/SSH/协议错误日志，秘密字段脱敏。                                                                                                                         |
 | **SSH debug logger**       | `services/sessions/ssh-debug-logger.ts`                        | ✅ SSH worker 生命周期/错误写入本地日志；不暴露凭据。                                                                                                                    |
 | **真实 sshd/FTP 集成测试** | `test/protocol/sftp-resume.test.mjs` 等                        | ⚠️ Electron 的 7 项真实协议测试已通过。Tauri 本地 OpenSSH、FTPS、WebDAV、Telnet 夹具已覆盖 HTTP/SOCKS5、`-L/-D`、ETag 与 hash；Windows/Linux CI 仅已配置，尚未产生结果。 |
@@ -149,10 +149,10 @@
 | **Auto-reconnect 2000ms 延迟** | `services/workspace-service.ts::autoReconnectingTabs`                                  | ✅ 已补齐：`reconnectMode === 'auto'` + 2000ms 延迟 + 三重 guard                                               | —    |
 | **JumpHost / ProxyJump**       | `services/sessions/ssh-session-controller.ts::connectJumpHost`                         | ✅ 已补齐：`jumpProfileId` → `channel_open_direct_tcpip` → `connect_stream`                                    | —    |
 | **WebDAV upload/download**     | `services/webdav-sync-service.ts`                                                      | ✅ PUT/GET + ETag/If-Match + SHA-256 + secret stripping。                                                      | —    |
-| **UI preferences 变更事件**    | `apps/desktop/src/main/main.ts`（广播到所有窗口）                                      | ✅ `app:ui-preferences-changed` 广播。                                                                         | —    |
+| **UI preferences 变更事件**    | `apps/electron/src/main/main.ts`（广播到所有窗口）                                     | ✅ `app:ui-preferences-changed` 广播。                                                                         | —    |
 | **窗口最大化事件**             | Electron 自动广播                                                                      | ✅ toggle 与 Resized 均广播 `app:window-maximized-change`。                                                    | —    |
-| **文件编辑器关闭确认**         | `apps/desktop/src/main/main.ts::requestQuitConfirmation`                               | ✅ `CloseRequested` 防关闭并发事件，确认后 destroy，取消保持窗口。                                             | —    |
-| **CSP 安装**                   | `apps/desktop/src/main/main.ts::installContentSecurityPolicy`                          | ✅ Tauri production CSP 已安装；打包验证通过。                                                                 | —    |
+| **文件编辑器关闭确认**         | `apps/electron/src/main/main.ts::requestQuitConfirmation`                              | ✅ `CloseRequested` 防关闭并发事件，确认后 destroy，取消保持窗口。                                             | —    |
+| **CSP 安装**                   | `apps/electron/src/main/main.ts::installContentSecurityPolicy`                         | ✅ Tauri production CSP 已安装；打包验证通过。                                                                 | —    |
 | **Command send preferences**   | `services/file-profile-repository.ts`                                                  | ✅ `command-send-preferences.json` get/set。                                                                   | —    |
 
 ### 2.3 代码已实现（仍需按第 1 节完成发行验收）

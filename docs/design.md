@@ -200,12 +200,12 @@ Don't:
 
 主要样式入口：
 
-- `apps/desktop/src/renderer/styles/themes/tokens.css`
-- `apps/desktop/src/renderer/styles/themes/default-light.css`
-- `apps/desktop/src/renderer/styles/themes/default-dark.css`
-- `apps/desktop/src/renderer/styles/features/shell.css`
-- `apps/desktop/src/renderer/styles/features/session.css`
-- `apps/desktop/src/renderer/styles/features/workstation-skin.css`
+- `apps/tauri/src/renderer/styles/themes/tokens.css`
+- `apps/tauri/src/renderer/styles/themes/default-light.css`
+- `apps/tauri/src/renderer/styles/themes/default-dark.css`
+- `apps/tauri/src/renderer/styles/features/shell.css`
+- `apps/tauri/src/renderer/styles/features/session.css`
+- `apps/tauri/src/renderer/styles/features/workstation-skin.css`
 
 新增 UI 时按以下顺序落地：
 

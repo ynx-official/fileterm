@@ -1,0 +1,51 @@
+{
+  "name": "@fileterm/tauri",
+  "version": "1.2.1",
+  "private": true,
+  "type": "module",
+  "description": "Modern remote workspace for SSH, SFTP, and FTP.",
+  "author": "St0ff3l",
+  "scripts": {
+    "predev": "npm --prefix ../.. run sync:version",
+    "prebuild": "npm --prefix ../.. run sync:version",
+    "pretypecheck": "npm --prefix ../.. run sync:version",
+    "prepackage:mac": "npm --prefix ../.. run sync:version",
+    "prepackage:win": "npm --prefix ../.. run sync:version",
+    "dev": "tauri dev",
+    "dev:update-test": "FILETERM_LOCAL_UPDATE=1 npm run dev",
+    "dev:renderer": "vite",
+    "build": "tauri build",
+    "build:renderer": "vite build",
+    "build:main": "tauri build",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml -- --test-threads=1",
+    "clean:release": "node ./scripts/clean-release.mjs",
+    "release:mac": "tauri build --target aarch64-apple-darwin",
+    "release:win": "tauri build --target x86_64-pc-windows-msvc"
+  },
+  "dependencies": {
+    "@fileterm/core": "1.2.1",
+    "@fileterm/shared": "1.2.1",
+    "@monaco-editor/react": "4.7.0",
+    "@tanstack/react-virtual": "^3.14.3",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "@tauri-apps/api": "^2.5.0",
+    "monaco-editor": "0.55.1",
+    "opencc-js": "1.3.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "@tauri-apps/cli": "^2.5.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16"
+  }
+}
