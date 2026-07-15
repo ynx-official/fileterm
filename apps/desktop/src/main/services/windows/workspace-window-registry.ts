@@ -69,8 +69,7 @@ export class WorkspaceWindowRegistry {
 
     const existing = this.detachedByTabId.get(input.tabId)
     if (existing && !existing.window.isDestroyed()) {
-      existing.window.show()
-      existing.window.focus()
+      this.activateWindow(existing.window)
       return
     }
 
@@ -128,6 +127,7 @@ export class WorkspaceWindowRegistry {
     if (detached && detached.window.webContents === sender && !detached.ready) {
       detached.ready = true
       this.emitPlacements()
+      this.activateWindow(detached.window)
     }
   }
 
@@ -143,8 +143,7 @@ export class WorkspaceWindowRegistry {
     const mainWindow = this.options.getMainWindow()
     if (mainWindow && !mainWindow.isDestroyed()) {
       this.options.claimTabRenderer(tabId, mainWindow.webContents)
-      mainWindow.show()
-      mainWindow.focus()
+      this.activateWindow(mainWindow)
     }
 
     this.emitPlacements()
@@ -181,6 +180,14 @@ export class WorkspaceWindowRegistry {
 
   getDetachedWindows(): BrowserWindow[] {
     return [...this.detachedByTabId.values()].map((record) => record.window).filter((window) => !window.isDestroyed())
+  }
+
+  private activateWindow(window: BrowserWindow) {
+    if (window.isMinimized()) {
+      window.restore()
+    }
+    window.show()
+    window.focus()
   }
 
   private emitPlacements() {

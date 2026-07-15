@@ -9,6 +9,7 @@ import type {
   WorkspaceWindowContext
 } from '@fileterm/core'
 import { homeTabKey, insertTabKeyAfter, reorderTabKeys, sessionTabKey } from '../app/app-utils'
+import { findTabMovedToWindow } from '../app/workspace-tab-placement'
 import { resolveSelectedTabIds, type SendScope, type SessionSendTarget } from '../features/common/session-send-targets'
 import type { OrderedTabEntry, TabContextTarget, TabDragFeedback } from '../features/layout/TabBar'
 import { isTabDragReleasedOutsideWindow } from '../features/layout/tab-drag'
@@ -250,6 +251,7 @@ export function useWorkspaceTabs({
   )
 
   const localTabsRef = useRef(localTabs)
+  const previousWorkspaceTabPlacementsRef = useRef(workspaceTabPlacements)
   const tabDragDetachReadyRef = useRef(false)
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
   const pendingProfileOpenIdRef = useRef<string | null>(null)
@@ -548,6 +550,22 @@ export function useWorkspaceTabs({
       return visibleWorkspaceTabs.at(-1)?.id ?? null
     })
   }, [visibleWorkspaceTabs, windowContext, workspace.activeTabId])
+
+  useEffect(() => {
+    const movedTabId = findTabMovedToWindow(
+      previousWorkspaceTabPlacementsRef.current,
+      workspaceTabPlacements,
+      windowContext.windowId
+    )
+    previousWorkspaceTabPlacementsRef.current = workspaceTabPlacements
+
+    if (!movedTabId || !visibleWorkspaceTabs.some((tab) => tab.id === movedTabId)) {
+      return
+    }
+
+    setActiveSessionTabId(movedTabId)
+    setActiveLocalTabId(null)
+  }, [visibleWorkspaceTabs, windowContext.windowId, workspaceTabPlacements])
 
   useEffect(() => {
     if (!desktopApi || (!isMainWorkspaceWindow && windowContext.kind !== 'detached-session')) {

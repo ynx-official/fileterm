@@ -36,11 +36,22 @@ class FakeBrowserWindow extends EventEmitter {
     this.webContents = new FakeWebContents(id)
     this.shown = false
     this.focused = false
+    this.minimized = false
+    this.restored = false
     this.closed = false
   }
 
   isDestroyed() {
     return this.closed
+  }
+
+  isMinimized() {
+    return this.minimized
+  }
+
+  restore() {
+    this.minimized = false
+    this.restored = true
   }
 
   show() {
@@ -119,6 +130,8 @@ test('detached tab ownership moves only after its renderer claims the tab', () =
   registry.claim('tab-a', detached.webContents)
 
   assert.deepEqual(claims, [{ tabId: 'tab-a', senderId: detached.webContents.id }])
+  assert.equal(detached.shown, true)
+  assert.equal(detached.focused, true)
   assert.deepEqual(registry.listPlacements(), [
     { tabId: 'tab-a', ownerWindowId: 'detached-1', ownerKind: 'detached-session' }
   ])
@@ -129,10 +142,12 @@ test('closing a detached window returns the tab to the main renderer', () => {
   registry.detach({ tabId: 'tab-a' })
   const detached = detachedWindows[0]
   registry.claim('tab-a', detached.webContents)
+  mainWindow.minimized = true
 
   detached.close()
 
   assert.equal(detached.closed, true)
+  assert.equal(mainWindow.restored, true)
   assert.equal(mainWindow.shown, true)
   assert.equal(mainWindow.focused, true)
   assert.deepEqual(releases, [{ tabId: 'tab-a', senderId: detached.webContents.id }])
