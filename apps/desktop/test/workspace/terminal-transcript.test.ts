@@ -3,9 +3,43 @@ import test from 'node:test'
 import {
   CLINK_AUTOSUGGEST_HELP_URL,
   isClinkAutosuggestHelpUrl,
+  resolveTerminalTranscriptHydration,
   stripClinkAutosuggestPrompt,
   trimHydratedTerminalChunk
 } from '../../src/renderer/app/terminal-transcript.ts'
+
+test('appends a newer authoritative transcript while the session stays connected', () => {
+  assert.deepEqual(
+    resolveTerminalTranscriptHydration({
+      currentTranscript: 'prompt$ ',
+      nextTranscript: 'prompt$ typed command',
+      connected: true
+    }),
+    { mode: 'append', text: 'typed command' }
+  )
+})
+
+test('hydrates an empty terminal after renderer ownership moves', () => {
+  assert.deepEqual(
+    resolveTerminalTranscriptHydration({
+      currentTranscript: '',
+      nextTranscript: 'login\r\nprompt$ command\r\nresult\r\n',
+      connected: true
+    }),
+    { mode: 'replace', text: 'login\r\nprompt$ command\r\nresult\r\n' }
+  )
+})
+
+test('does not overwrite divergent live output while connected', () => {
+  assert.equal(
+    resolveTerminalTranscriptHydration({
+      currentTranscript: 'prompt$ current output',
+      nextTranscript: 'prompt$ stale snapshot',
+      connected: true
+    }),
+    null
+  )
+})
 
 test('removes a fully hydrated terminal chunk', () => {
   assert.equal(trimHydratedTerminalChunk('banner\r\nprompt$ ', 'prompt$ '), '')

@@ -9,6 +9,11 @@ class FakeWebContents extends EventEmitter {
     super()
     this.id = id
     this.destroyed = false
+    this.sent = []
+    this.mainFrame = {
+      detached: false,
+      isDestroyed: () => this.destroyed
+    }
   }
 
   isDestroyed() {
@@ -20,7 +25,9 @@ class FakeWebContents extends EventEmitter {
     this.emit('destroyed')
   }
 
-  send() {}
+  send(channel, payload) {
+    this.sent.push({ channel, payload })
+  }
 }
 
 class FakeBrowserWindow extends EventEmitter {
@@ -146,6 +153,31 @@ test('closing the connection window does not claim the removed tab in main', () 
     claims.some((claim) => claim.senderId === mainWindow.webContents.id),
     false
   )
+})
+
+test('claiming a replacement renderer immediately restores the terminal transcript', () => {
+  const runtime = createRuntime()
+  const sender = new FakeWebContents(2)
+  runtime.set('tab-a', {
+    profileId: 'profile-a',
+    summary: 'SSH connected',
+    terminalTranscript: 'login\r\nprompt$ command\r\nresult\r\n',
+    remotePath: '/',
+    remoteFiles: [],
+    connected: true
+  })
+
+  runtime.claimTabRenderer('tab-a', sender)
+
+  assert.deepEqual(sender.sent[0], {
+    channel: 'terminal:state',
+    payload: {
+      tabId: 'tab-a',
+      summary: 'SSH connected',
+      transcript: 'login\r\nprompt$ command\r\nresult\r\n',
+      connected: true
+    }
+  })
 })
 
 test('late cleanup of an old renderer preserves the replacement owner', () => {

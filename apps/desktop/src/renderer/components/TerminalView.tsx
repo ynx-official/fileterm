@@ -8,6 +8,7 @@ import '@xterm/xterm/css/xterm.css'
 import { copyText } from '../app/app-utils'
 import {
   isClinkAutosuggestHelpUrl,
+  resolveTerminalTranscriptHydration,
   stripClinkAutosuggestPrompt,
   trimHydratedTerminalChunk
 } from '../app/terminal-transcript'
@@ -423,32 +424,25 @@ export const TerminalView = memo(function TerminalView({
     suppressHydratedChunksUntilRef.current = Date.now() + 1500
   }
 
-  const shouldHydrateTranscript = (currentTranscript: string, nextTranscript: string, connected: boolean) => {
-    if (!nextTranscript || nextTranscript === currentTranscript) {
-      return false
+  const hydrateTerminalTranscript = (terminal: Terminal, nextTranscript: string, connected: boolean) => {
+    const hydration = resolveTerminalTranscriptHydration({
+      currentTranscript: renderedTranscriptRef.current,
+      nextTranscript,
+      connected,
+      preserveVisibleBuffer: preserveVisibleBufferRef.current
+    })
+    if (!hydration) {
+      return
     }
 
-    if (preserveVisibleBufferRef.current && currentTranscript) {
-      return false
+    if (hydration.mode === 'replace') {
+      replaceTerminalWithTranscript(terminal, hydration.text)
+      return
     }
 
-    if (!currentTranscript) {
-      return true
-    }
-
-    if (connected) {
-      return false
-    }
-
-    if (nextTranscript.length < currentTranscript.length) {
-      return true
-    }
-
-    if (!nextTranscript.startsWith(currentTranscript)) {
-      return true
-    }
-
-    return true
+    renderedTranscriptRef.current = trimTranscript(nextTranscript)
+    suppressHydratedChunksUntilRef.current = Date.now() + 1500
+    scheduleTerminalWrite(formatTerminalChunk(terminal, hydration.text))
   }
 
   const syncTerminalSize = (
@@ -800,9 +794,7 @@ export const TerminalView = memo(function TerminalView({
         if (isDisconnecting) {
           preserveVisibleBufferRef.current = true
         }
-        if (shouldHydrateTranscript(renderedTranscriptRef.current, transcript, connected)) {
-          replaceTerminalWithTranscript(terminal, transcript)
-        }
+        hydrateTerminalTranscript(terminal, transcript, connected)
         if (!wasConnectedRef.current && connected) {
           lastSyncedSizeRef.current = null
           preserveVisibleBufferRef.current = false
@@ -1023,15 +1015,11 @@ export const TerminalView = memo(function TerminalView({
   useEffect(() => {
     bootTextRef.current = bootText
     const terminal = terminalRef.current
-    if (
-      !terminal ||
-      connected ||
-      !shouldHydrateTranscript(renderedTranscriptRef.current, bootText, wasConnectedRef.current)
-    ) {
+    if (!terminal) {
       return
     }
 
-    replaceTerminalWithTranscript(terminal, bootText)
+    hydrateTerminalTranscript(terminal, bootText, connected)
   }, [bootText, connected])
 
   useEffect(() => {

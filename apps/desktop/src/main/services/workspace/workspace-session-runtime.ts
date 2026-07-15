@@ -109,6 +109,17 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
 
     const controller = this.liveControllers.get(tabId)
     const session = this.sessions.get(tabId)
+    const liveSession = session ? this.withLiveTerminalTranscript(tabId, session) : undefined
+    if (liveSession?.terminalTranscript !== undefined) {
+      this.sendToTab(tabId, 'terminal:state', {
+        tabId,
+        summary: liveSession.summary,
+        transcript: liveSession.terminalTranscript,
+        connected: liveSession.connected
+      })
+    }
+    void this.emitSnapshotForTab(tabId)
+
     if (
       controller?.type === 'ssh' &&
       session?.connected &&
