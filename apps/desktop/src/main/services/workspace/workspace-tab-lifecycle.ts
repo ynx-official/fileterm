@@ -27,13 +27,6 @@ export interface WorkspaceTabLifecycleOptions {
 export class WorkspaceTabLifecycleService {
   constructor(private readonly options: WorkspaceTabLifecycleOptions) {}
 
-  bindWorkspaceSender(sender: WebContents) {
-    for (const tab of this.options.tabs.list()) {
-      this.options.sessionRuntime.setSender(tab.id, sender)
-      void this.options.sessionRuntime.restoreTabData(tab.id)
-    }
-  }
-
   async openProfile(profileId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
     const profile = await this.options.profileRepository.getById(profileId)
     if (!profile) {
@@ -42,7 +35,7 @@ export class WorkspaceTabLifecycleService {
 
     const tabId = randomUUID()
     this.options.tabs.open(tabId, profile)
-    this.options.sessionRuntime.setSender(tabId, sender)
+    this.options.sessionRuntime.claimTabRenderer(tabId, sender)
     const controller = this.options.createController(tabId, profile)
 
     this.options.sessionRuntime.set(tabId, createInitialSessionSnapshot(profile, controller))
@@ -60,12 +53,12 @@ export class WorkspaceTabLifecycleService {
       throw new Error(`Tab not found: ${tabId}`)
     }
 
-    const currentSender = this.options.sessionRuntime.getSender(tabId)
+    const currentSender = this.options.sessionRuntime.getTabRenderer(tabId)
     const reusableSender = currentSender && !currentSender.isDestroyed() ? currentSender : sender
     if (!reusableSender || reusableSender.isDestroyed()) {
       throw new Error(`Tab sender unavailable: ${tabId}`)
     }
-    this.options.sessionRuntime.setSender(tabId, reusableSender)
+    this.options.sessionRuntime.claimTabRenderer(tabId, reusableSender)
 
     await this.options.finalizeTransfersForTab(tabId, this.options.getDisconnectedTransferMessage())
     await this.options.sessionRuntime.disconnect(tabId)

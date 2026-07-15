@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, type WebContents } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -19,7 +19,7 @@ import { exportProfiles, previewExternalConnectionJson, previewSshConfig } from 
 import { WebDavSyncService } from '../services/webdav-sync-service.js'
 
 export function registerWorkspaceHandlers(services: IpcServices, options: IpcWindowOptions) {
-  const { workspaceService, broadcastSnapshot } = services
+  const { workspaceService, workspaceWindowRegistry, broadcastSnapshot } = services
   const webDavSync = new WebDavSyncService(
     app.getPath('userData'),
     async () => (await workspaceService.getConnectionLibrary()).profiles,
@@ -27,12 +27,7 @@ export function registerWorkspaceHandlers(services: IpcServices, options: IpcWin
   )
   const connectionImportPlans = new Map<string, ConnectionImportPreviewItem[]>()
 
-  ipcMain.handle('workspace:getSnapshot', (event) => {
-    if (isWorkspaceWindow(event.sender)) {
-      workspaceService.bindWorkspaceSender(event.sender)
-    }
-    return workspaceService.getSnapshot()
-  })
+  ipcMain.handle('workspace:getSnapshot', () => workspaceService.getSnapshot())
 
   ipcMain.handle('workspace:getConnectionLibrary', () => {
     return workspaceService.getConnectionLibrary()
@@ -272,6 +267,7 @@ export function registerWorkspaceHandlers(services: IpcServices, options: IpcWin
 
   ipcMain.handle('workspace:closeTab', async (_, tabId: string) => {
     const snapshot = await workspaceService.closeTab(tabId)
+    workspaceWindowRegistry.closeTabWindow(tabId)
     broadcastSnapshot(snapshot)
     return snapshot
   })
@@ -371,14 +367,4 @@ function safeExportFilename(name: string, id: string, usedNames: Set<string>) {
   while (usedNames.has(candidate.toLowerCase())) candidate = `${stem}-${counter++}`
   usedNames.add(candidate.toLowerCase())
   return `${candidate}-${id.slice(0, 8)}`
-}
-
-function isWorkspaceWindow(sender: WebContents) {
-  try {
-    const url = new URL(sender.getURL())
-    const windowMode = url.searchParams.get('window')
-    return !windowMode || windowMode === 'main'
-  } catch {
-    return false
-  }
 }

@@ -1,4 +1,5 @@
-import { app, BrowserWindow, nativeTheme, Tray, Menu, nativeImage, shell, session } from 'electron'
+import { app, BrowserWindow, nativeTheme, Tray, Menu, nativeImage, shell, session, screen } from 'electron'
+import type { DetachWorkspaceTabInput, WorkspaceWindowContext } from '@fileterm/core'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -91,6 +92,12 @@ const DEFAULT_WINDOW_BOUNDS = {
     height: 780,
     minWidth: 1040,
     minHeight: 640
+  },
+  detachedSession: {
+    width: 1180,
+    height: 760,
+    minWidth: 900,
+    minHeight: 620
   }
 } as const
 const DEFAULT_UI_PREFERENCES = {
@@ -346,7 +353,8 @@ function getOpenChildWindows() {
     connectionFormWindow,
     commandManagerWindow,
     commandFormWindow,
-    ...fileEditorWindows
+    ...fileEditorWindows,
+    ...(ipcServices?.workspaceWindowRegistry.getDetachedWindows() ?? [])
   ].filter((window): window is BrowserWindow => Boolean(window && !window.isDestroyed()))
 }
 
@@ -400,6 +408,7 @@ function quitApplication(applyUpdate = false): Promise<void> {
 
     await shutdownWorkspace()
     isQuitting = true
+    ipcServices?.workspaceWindowRegistry.closeAll()
 
     for (const child of getOpenChildWindows()) {
       if (!child.isDestroyed()) {
@@ -607,6 +616,7 @@ function createMainWindow() {
   })
 
   mainWindow = win
+  ipcServices?.workspaceWindowRegistry.registerMainWindow(win)
   attachWindowDiagnostics(win, 'main')
   registerWindowStateListeners(win)
   if (isWindows) {
@@ -669,6 +679,61 @@ function createMainWindow() {
   }
 
   loadAppWindow(win, undefined, uiPreferences)
+  return win
+}
+
+function createDetachedWorkspaceWindow(context: WorkspaceWindowContext, input: DetachWorkspaceTabInput) {
+  const bounds = DEFAULT_WINDOW_BOUNDS.detachedSession
+  const display = input.screenPoint ? screen.getDisplayNearestPoint(input.screenPoint) : screen.getPrimaryDisplay()
+  const x = input.screenPoint
+    ? Math.min(
+        Math.max(Math.round(input.screenPoint.x - bounds.width / 2), display.workArea.x),
+        display.workArea.x + display.workArea.width - bounds.width
+      )
+    : undefined
+  const y = input.screenPoint
+    ? Math.min(
+        Math.max(Math.round(input.screenPoint.y - 28), display.workArea.y),
+        display.workArea.y + display.workArea.height - bounds.height
+      )
+    : undefined
+  const win = new BrowserWindow({
+    width: bounds.width,
+    height: bounds.height,
+    minWidth: bounds.minWidth,
+    minHeight: bounds.minHeight,
+    ...(x === undefined || y === undefined ? { center: true } : { x, y }),
+    title: 'FileTerm',
+    autoHideMenuBar: true,
+    frame: isWindows ? false : isMac ? undefined : true,
+    titleBarStyle: isMac ? 'hiddenInset' : 'default',
+    trafficLightPosition: isMac ? { x: 20, y: 18 } : undefined,
+    backgroundColor: getWindowBackgroundColor(uiPreferences.theme),
+    ...getWindowIconOptions(),
+    webPreferences: {
+      preload: path.join(__dirname, '../preload/preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      partition: APP_SESSION_PARTITION
+    }
+  })
+
+  attachWindowDiagnostics(win, `detached-session:${input.tabId}`)
+  registerWindowStateListeners(win)
+  if (isWindows) {
+    win.setMenuBarVisibility(false)
+  }
+  win.once('ready-to-show', () => win.show())
+  loadAppWindow(
+    win,
+    {
+      window: 'detached-session',
+      windowId: context.windowId,
+      tabId: input.tabId
+    },
+    uiPreferences
+  )
   return win
 }
 
@@ -1058,6 +1123,8 @@ app.whenReady().then(() => {
     removeUiStateItem: async (key) => {
       await getUiStateStore().removeItem(key)
     },
+    createDetachedWorkspaceWindow,
+    isQuitting: () => isQuitting,
     openConnectionManagerWindow,
     openCommandManagerWindow,
     openConnectionFormWindow,

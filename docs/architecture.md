@@ -175,6 +175,30 @@ platform probe
 - 主题和语言属于主进程持久化的 UI preferences；资源监控是 SSH 连接配置，关闭后该连接不采集资源数据，工作区仅保留窄侧栏。
 - 产品更名后，main process 首次启动只迁移旧用户目录中的应用自有 JSON 数据；Chromium session、缓存与日志不迁移。
 
+### 4.2.1 可拆分会话窗口 ownership
+
+会话独立窗口采用“移动展示所有权”，不迁移或重建协议连接：
+
+```txt
+WorkspaceSessionRuntime
+  └─ 持有 tabId -> controller/session
+
+WorkspaceWindowRegistry
+  └─ 持有 tabId -> workspace window placement
+
+Renderer
+  └─ 只渲染 placement 归属于当前 windowId 的 tabs
+```
+
+边界约束：
+
+- `WorkspaceWindowRegistry` 只管理主窗口、独立会话窗口和 placement，不管理连接状态。
+- `WorkspaceSessionRuntime` 只维护 `tabId -> WebContents` 输出 owner；`releaseTabRenderer(tabId, sender)` 必须 compare-and-release，旧 renderer 的延迟销毁不能清掉新 owner。
+- `workspace:getSnapshot` 是纯读取；renderer 通过 `claimWorkspaceTab(tabId)` 显式认领当前展示的会话。
+- `WorkspaceSnapshot.activeTabId` 保留用于现有 main 服务兼容，但 renderer 的活动标签属于窗口本地状态；独立窗口固定展示其 context `tabId`。
+- 关闭独立窗口只执行 attach，连接继续运行；关闭标签先销毁连接，再通过 registry 关闭对应窗口；退出应用才统一 shutdown runtime。
+- placement 只在独立 renderer 成功 claim 后切换，避免窗口尚未可用时主窗口提前丢失会话展示。
+
 ## 4.3 传输暂停与恢复边界
 
 - `packages/core` 的 `TransferTask.tabId` 记录任务创建时所属的连接标签，renderer 据此隔离同一 profile 下的并行标签任务。

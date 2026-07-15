@@ -54,6 +54,7 @@ import { defaultLocale, setLocale, t, type AppLocale } from './i18n'
 
 import { useWorkspaceIpcSync } from './hooks/useWorkspaceIpcSync'
 import { useWorkspaceTabs } from './hooks/useWorkspaceTabs'
+import { useWorkspaceWindowContext } from './hooks/useWorkspaceWindowContext'
 import { useWorkspaceModals } from './hooks/useWorkspaceModals'
 import { useFileOperations } from './hooks/useFileOperations'
 import { useSshInteractions } from './hooks/useSshInteractions'
@@ -94,12 +95,9 @@ export function App() {
   const isConnectionFormWindow = windowMode === 'connection-form'
   const isCommandFormWindow = windowMode === 'command-form'
   const isFileEditorWindow = windowMode === 'file-editor'
-  const isMainWorkspaceWindow =
-    !isConnectionManagerWindow &&
-    !isCommandManagerWindow &&
-    !isConnectionFormWindow &&
-    !isCommandFormWindow &&
-    !isFileEditorWindow
+  const isDetachedSessionWindow = windowMode === 'detached-session'
+  const isMainWorkspaceWindow = windowMode === 'main'
+  const isWorkspaceWindow = isMainWorkspaceWindow || isDetachedSessionWindow
 
   const formWindowMode = (searchParams.get('mode') as ConnectionFormMode | null) ?? 'create'
   const formWindowProfileId = searchParams.get('profileId')
@@ -127,6 +125,10 @@ export function App() {
 
   const desktopApi = window.fileterm
   const isWindowsDesktop = desktopApi?.platform === 'win32'
+  const workspaceWindow = useWorkspaceWindowContext({
+    desktopApi,
+    enabled: isWorkspaceWindow
+  })
 
   const openConnectionImportPreview = () => {
     void desktopApi
@@ -219,6 +221,7 @@ export function App() {
     startTabDrag,
     enterDraggedTab,
     endTabDrag,
+    tabDragFeedback,
     setIsSystemSidebarCollapsed,
     dismissShortcutCloseConfirm,
     activateHomeTab,
@@ -228,6 +231,8 @@ export function App() {
   } = useWorkspaceTabs({
     desktopApi,
     workspace,
+    windowContext: workspaceWindow.context,
+    workspaceTabPlacements: workspaceWindow.placements,
     isMainWorkspaceWindow,
     hasLoadedInitialSnapshot,
     locale,
@@ -1082,6 +1087,8 @@ export function App() {
   const tabBarProps: Omit<TabBarProps, 'homeBrandContent'> = {
     activeHomeTabId: effectiveActiveLocalTabId,
     activeSessionTabId: visibleActiveSessionTabId,
+    canAddHomeTab: isMainWorkspaceWindow,
+    dragFeedback: tabDragFeedback,
     isWorkspaceFocusMode,
     onAddHomeTab: addHomeTab,
     onActivateHome: activateHomeTab,
@@ -1113,7 +1120,8 @@ export function App() {
         setSidebarWidth(214)
       }
     },
-    orderedTabs
+    orderedTabs,
+    showWorkspaceTools: isMainWorkspaceWindow
   }
 
   return (
@@ -1508,6 +1516,8 @@ export function App() {
                 canCloseCurrent:
                   tabContextMenu.target.kind === 'session' ? true : localTabs.length + visibleWorkspaceTabs.length > 1,
                 canCloseOthers: localTabs.length + visibleWorkspaceTabs.length > 1,
+                canDetach: isMainWorkspaceWindow && tabContextMenu.target.kind === 'session',
+                canAttach: isDetachedSessionWindow && tabContextMenu.target.kind === 'session',
                 isSessionTab: tabContextMenu.target.kind === 'session',
                 onAction: (action) => {
                   void handleTabContextAction(action)

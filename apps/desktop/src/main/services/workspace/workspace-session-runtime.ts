@@ -38,6 +38,15 @@ type WorkspaceSessionRuntimeEvents = {
   'tab-event': [event: WorkspaceSessionTabEvent]
 }
 
+export interface WorkspaceSessionRuntimeOptions {
+  getSnapshot(): Promise<WorkspaceSnapshot>
+  getTabStatus(tabId: string): WorkspaceTab['status'] | undefined
+  resolveProfile(profileId: string): Promise<ConnectionProfile | null>
+  rememberTrustedHostFingerprint(profileId: string, fingerprint: string): Promise<void>
+  resolveSshKey(keyId: string): Promise<ResolvedSshKey>
+  setSshKeyPassphrase(keyId: string, passphrase: string | undefined): Promise<void>
+}
+
 export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntimeEvents> {
   private readonly sessions = new Map<string, SessionSnapshot>()
   private readonly liveControllers = new Map<string, LiveSessionController>()
@@ -68,18 +77,11 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
       reject(error: Error): void
     }
   >()
+  private readonly options: WorkspaceSessionRuntimeOptions
 
-  constructor(
-    private readonly options: {
-      getSnapshot(): Promise<WorkspaceSnapshot>
-      getTabStatus(tabId: string): WorkspaceTab['status'] | undefined
-      resolveProfile(profileId: string): Promise<ConnectionProfile | null>
-      rememberTrustedHostFingerprint(profileId: string, fingerprint: string): Promise<void>
-      resolveSshKey(keyId: string): Promise<ResolvedSshKey>
-      setSshKeyPassphrase(keyId: string, passphrase: string | undefined): Promise<void>
-    }
-  ) {
+  constructor(options: WorkspaceSessionRuntimeOptions) {
     super()
+    this.options = options
     this.terminalOutputBatcher = new TerminalOutputBatcher((tabId, chunk) => {
       this.sendToTab(tabId, 'terminal:data', { tabId, chunk })
     })
@@ -100,7 +102,7 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
     this.sessions.set(tabId, snapshot)
   }
 
-  setSender(tabId: string, sender: WebContents) {
+  claimTabRenderer(tabId: string, sender: WebContents) {
     this.invalidSenders.delete(sender)
     this.tabSenders.set(tabId, sender)
     this.attachSenderLifecycleListeners(sender)
@@ -117,7 +119,17 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
     }
   }
 
-  getSender(tabId: string) {
+  releaseTabRenderer(tabId: string, sender: WebContents) {
+    if (this.tabSenders.get(tabId) !== sender) {
+      return
+    }
+
+    this.tabSenders.delete(tabId)
+    this.stopMetricsPolling(tabId)
+    this.rejectPendingSshInteractionsForTab(tabId, new Error('SSH interaction window was closed'))
+  }
+
+  getTabRenderer(tabId: string) {
     return this.tabSenders.get(tabId)
   }
 

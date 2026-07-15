@@ -755,7 +755,36 @@ export interface CommandTemplateInput {
 
 export type ConnectionFormMode = 'create' | 'edit'
 
-export type AppWindowMode = 'main' | 'connection-manager' | 'connection-form' | 'command-manager' | 'command-form'
+export type WorkspaceWindowKind = 'main' | 'detached-session'
+
+export interface WorkspaceWindowContext {
+  windowId: string
+  kind: WorkspaceWindowKind
+  tabId?: string
+}
+
+export interface WorkspaceTabPlacement {
+  tabId: string
+  ownerWindowId: string
+  ownerKind: WorkspaceWindowKind
+}
+
+export interface DetachWorkspaceTabInput {
+  tabId: string
+  screenPoint?: {
+    x: number
+    y: number
+  }
+}
+
+export type AppWindowMode =
+  | 'main'
+  | 'detached-session'
+  | 'connection-manager'
+  | 'connection-form'
+  | 'command-manager'
+  | 'command-form'
+  | 'file-editor'
 
 export interface CommandExecutionResult {
   renderedCommand: string
@@ -834,6 +863,12 @@ export interface FileTermDesktopApi {
   ): () => void
   onFileEditorCloseRequest(listener: () => void): () => void
   requestQuitApp(): Promise<void>
+  getWorkspaceWindowContext(): Promise<WorkspaceWindowContext>
+  getWorkspaceTabPlacements(): Promise<WorkspaceTabPlacement[]>
+  detachWorkspaceTab(input: DetachWorkspaceTabInput): Promise<void>
+  attachWorkspaceTab(tabId: string): Promise<void>
+  claimWorkspaceTab(tabId: string): Promise<void>
+  onWorkspaceTabPlacementChanged(listener: (placements: WorkspaceTabPlacement[]) => void): () => void
   getSnapshot(): Promise<WorkspaceSnapshot>
   getConnectionLibrary(): Promise<ConnectionLibrarySnapshot>
   listSshKeys(): Promise<SshKeyMetadata[]>

@@ -74,7 +74,7 @@ export class WorkspaceService {
             this.autoReconnectingTabs.delete(event.tabId)
             return
           }
-          const sender = this.sessionRuntime.getSender(event.tabId)
+          const sender = this.sessionRuntime.getTabRenderer(event.tabId)
           if (!sender || sender.isDestroyed()) {
             this.autoReconnectingTabs.delete(event.tabId)
             return
@@ -171,8 +171,20 @@ export class WorkspaceService {
     }
   }
 
-  bindWorkspaceSender(sender: WebContents) {
-    this.tabLifecycle.bindWorkspaceSender(sender)
+  listWorkspaceTabIds() {
+    return this.tabs.list().map((tab) => tab.id)
+  }
+
+  claimTabRenderer(tabId: string, sender: WebContents) {
+    if (!this.tabs.has(tabId)) {
+      throw new Error(`Tab not found: ${tabId}`)
+    }
+    this.sessionRuntime.claimTabRenderer(tabId, sender)
+    void this.sessionRuntime.restoreTabData(tabId)
+  }
+
+  releaseTabRenderer(tabId: string, sender: WebContents) {
+    this.sessionRuntime.releaseTabRenderer(tabId, sender)
   }
 
   async createProfile(input: CreateProfileInput): Promise<WorkspaceSnapshot> {

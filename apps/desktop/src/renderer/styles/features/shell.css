@@ -713,6 +713,53 @@
   grid-row: 2;
 }
 
+.tab-drag-feedback {
+  position: fixed;
+  top: 58px;
+  left: 50%;
+  z-index: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 9px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent-primary) 52%, var(--border-light));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg-main) 90%, transparent);
+  color: var(--accent-primary);
+  box-shadow: 0 10px 30px color-mix(in srgb, var(--text-main) 16%, transparent);
+  backdrop-filter: blur(14px);
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.fs-shell.has-window-menubar .tab-drag-feedback {
+  top: 90px;
+}
+
+.tab-drag-feedback .material-symbols-outlined {
+  font-size: 18px;
+}
+
+.tab-drag-feedback strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-drag-feedback.is-detach,
+.tab-drag-feedback.is-attach {
+  border-color: color-mix(in srgb, var(--success) 52%, var(--border-light));
+  color: var(--success);
+}
+
+.tab-drag-feedback.is-blocked {
+  border-color: color-mix(in srgb, var(--danger) 52%, var(--border-light));
+  color: var(--danger);
+}
+
 .fs-tabbar::after {
   content: '';
   position: absolute;

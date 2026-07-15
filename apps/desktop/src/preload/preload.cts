@@ -34,6 +34,9 @@ import type {
   TransferTask,
   TransferTargetOptions,
   FileTermDesktopApi,
+  DetachWorkspaceTabInput,
+  WorkspaceTabPlacement,
+  WorkspaceWindowContext,
   TerminalDataPayload,
   TerminalStatePayload,
   WorkspaceSnapshot
@@ -102,6 +105,18 @@ const api: FileTermDesktopApi = {
   },
 
   requestQuitApp: (): Promise<void> => ipcRenderer.invoke('app:requestQuitApp'),
+  getWorkspaceWindowContext: (): Promise<WorkspaceWindowContext> => ipcRenderer.invoke('workspaceWindow:getContext'),
+  getWorkspaceTabPlacements: (): Promise<WorkspaceTabPlacement[]> =>
+    ipcRenderer.invoke('workspaceWindow:getPlacements'),
+  detachWorkspaceTab: (input: DetachWorkspaceTabInput): Promise<void> =>
+    ipcRenderer.invoke('workspaceWindow:detachTab', input),
+  attachWorkspaceTab: (tabId: string): Promise<void> => ipcRenderer.invoke('workspaceWindow:attachTab', tabId),
+  claimWorkspaceTab: (tabId: string): Promise<void> => ipcRenderer.invoke('workspaceWindow:claimTab', tabId),
+  onWorkspaceTabPlacementChanged: (listener: (placements: WorkspaceTabPlacement[]) => void) => {
+    const wrapped = (_event: unknown, placements: WorkspaceTabPlacement[]) => listener(placements)
+    ipcRenderer.on('workspaceWindow:placementsChanged', wrapped)
+    return () => ipcRenderer.off('workspaceWindow:placementsChanged', wrapped)
+  },
   getSnapshot: (): Promise<WorkspaceSnapshot> => ipcRenderer.invoke('workspace:getSnapshot'),
   getConnectionLibrary: (): Promise<ConnectionLibrarySnapshot> => ipcRenderer.invoke('workspace:getConnectionLibrary'),
   listSshKeys: (): Promise<SshKeyMetadata[]> => ipcRenderer.invoke('sshKeys:list'),
