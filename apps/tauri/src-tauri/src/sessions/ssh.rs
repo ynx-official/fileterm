@@ -2481,20 +2481,19 @@ while ($true) {{
             tokio::time::Instant::from_std(last_emit + Duration::from_millis(16));
 
         tokio::select! {
-            biased;
             _ = cancellation.cancelled() => {
                 flush_batch(&mut batch_buffer, app, tab_id).await;
                 metrics_shutdown.notify_waiters();
                 tunnel_manager.stop_all().await;
                 return Ok(());
             }
-            // 1. Drain pending IPC commands first so user input never waits
-            //    on the network. When the sender is dropped (reconnect /
-            //    disconnect / close), `recv()` returns None and we must
-            //    exit — otherwise the old worker keeps emitting
-            //    `terminal:data` alongside the new worker, producing
-            //    duplicated echo ("clear" → "clearclear") and double
-            //    newlines.
+            // Commands and shell output intentionally share Tokio's fair
+            // selection. Making this branch unconditionally preferred lets a
+            // stream of Enter keypresses starve both shell reads and the 16ms
+            // output flush, so the terminal appears to freeze and then jumps.
+            // When the sender is dropped (reconnect / disconnect / close),
+            // `recv()` returns None and we must exit — otherwise the old
+            // worker keeps emitting `terminal:data` alongside the new worker.
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(cmd) => {
@@ -2597,12 +2596,14 @@ while ($true) {{
                         let (new_cwd, new_user) = track_cwd_and_user(&text, &mut cwd_buffer);
                         let mut cwd_to_follow = None;
                         let mut file_mode_switch: Option<(String, Option<String>)> = None;
+                        let mut session_state_changed = false;
                         if new_cwd.is_some() || new_user.is_some() {
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.get_mut(tab_id) {
                                 if let Some(cwd) = new_cwd {
                                     if s.shell_cwd.as_deref() != Some(cwd.as_str()) {
                                         s.shell_cwd = Some(cwd.clone());
+                                        session_state_changed = true;
                                         if s.follow_shell_cwd {
                                             cwd_to_follow = Some(cwd);
                                         }
@@ -2617,6 +2618,7 @@ while ($true) {{
                                     // shell_user 始终更新为最新观察值
                                     if s.shell_user.as_deref() != Some(user.as_str()) {
                                         s.shell_user = Some(user.clone());
+                                        session_state_changed = true;
                                         // 对照 Electron resolveShellFileAccess：
                                         // shell user != login user ⇒ 自动切 root 视角
                                         // shell user == login user ⇒ 切回 user 视角
@@ -2663,8 +2665,12 @@ while ($true) {{
                                     sudo_user.clone(),
                                     sudo_password.clone(),
                                 ));
-                            } else if let Ok(snap) = crate::commands::get_workspace_snapshot(app.clone()).await {
-                                let _ = app.emit("workspace:snapshot", snap);
+                            } else if session_state_changed {
+                                if let Ok(snap) =
+                                    crate::commands::get_workspace_snapshot(app.clone()).await
+                                {
+                                    let _ = app.emit("workspace:snapshot", snap);
+                                }
                             }
                         }
 
