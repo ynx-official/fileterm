@@ -536,6 +536,33 @@ export interface ConnectionLibrarySnapshot {
   folders: ConnectionFolder[]
 }
 
+export interface SshKeyMetadata {
+  id: string
+  name: string
+  note?: string
+  algorithm: string
+  fingerprint: string
+  encrypted: boolean
+  importedAt: number
+  usageCount: number
+}
+
+export interface ImportSshKeyInput {
+  sourcePath?: string
+  note?: string
+}
+
+export interface SshKeyFileSelection {
+  sourcePath: string
+  fileName: string
+  existingKey?: SshKeyMetadata
+}
+
+export interface SshKeyImportResult {
+  key: SshKeyMetadata
+  duplicate: boolean
+}
+
 export interface ConnectionImportPreviewItem {
   id?: string
   sourceLabel?: string
@@ -676,6 +703,16 @@ export interface SshCredentialsPromptRequest {
   reason: 'missing-username' | 'missing-password'
 }
 
+export interface SshKeyPassphrasePromptRequest {
+  requestId: string
+  tabId: string
+  kind: 'key-passphrase'
+  profileId: string
+  keyId: string
+  keyName: string
+  reason: 'required' | 'invalid-saved'
+}
+
 export interface SshKeyboardInteractivePrompt {
   prompt: string
   echo: boolean
@@ -731,10 +768,6 @@ export type SshCredentialsPromptResponse =
       password: string
     }
 
-export type SshKeyboardInteractiveResponse =
-  | { kind: 'keyboard-interactive'; canceled: true }
-  | { kind: 'keyboard-interactive'; canceled: false; answers: string[] }
-
 export type SshKeyPassphrasePromptResponse =
   | {
       kind: 'key-passphrase'
@@ -746,6 +779,10 @@ export type SshKeyPassphrasePromptResponse =
       passphrase: string
       savePassphrase: boolean
     }
+
+export type SshKeyboardInteractiveResponse =
+  | { kind: 'keyboard-interactive'; canceled: true }
+  | { kind: 'keyboard-interactive'; canceled: false; answers: string[] }
 
 export type SshInteractionResponse =
   | SshHostVerificationResponse

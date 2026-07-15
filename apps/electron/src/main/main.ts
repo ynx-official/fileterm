@@ -7,11 +7,11 @@ import { appError, appLog, getAppLogDirectory, initAppLogger } from './services/
 import { AppUiStateStore } from './services/app-ui-state-store.js'
 import { AppUpdateService } from './services/app-update-service.js'
 
-// Keep Electron's parallel runtime isolated from Tauri: it needs its own
-// bundle identity, writable data root and Chromium session storage.
-app.setName('FileTerm Electron')
-app.setPath('userData', path.join(app.getPath('appData'), 'FileTerm Electron'))
-app.setPath('sessionData', path.join(app.getPath('temp'), 'FileTerm-Electron-session-data'))
+// Electron remains FileTerm's default runtime. Keep its established app
+// identity and user-data root so updates retain existing profiles, settings
+// and transfer history; Tauri owns a separate runtime identity on its side.
+app.setName('FileTerm')
+app.setPath('sessionData', path.join(app.getPath('temp'), 'FileTerm-session-data'))
 if (process.platform === 'darwin') {
   // Keep Chromium/Electron away from macOS Keychain so both dev and packaged builds
   // avoid triggering Safe Storage authorization prompts.

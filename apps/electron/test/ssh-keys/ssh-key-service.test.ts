@@ -23,7 +23,9 @@ async function withService(
       directory
     })
   } finally {
-    await rm(directory, { recursive: true, force: true })
+    // macOS may briefly retain directory entries after ssh2 parses a key. Retry
+    // removal so teardown does not turn a successful assertion into a flaky test.
+    await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
   }
 }
 

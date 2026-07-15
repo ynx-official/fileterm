@@ -1,6 +1,6 @@
 {
   "name": "@fileterm/electron",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": true,
   "type": "module",
   "main": "dist-electron/main/main.js",
@@ -38,9 +38,9 @@
     "release:win": "npm run build && npm run package:win"
   },
   "dependencies": {
-    "@fileterm/core": "1.2.1",
-    "@fileterm/shared": "1.2.1",
-    "@fileterm/storage": "1.2.1",
+    "@fileterm/core": "1.2.2",
+    "@fileterm/shared": "1.2.2",
+    "@fileterm/storage": "1.2.2",
     "@monaco-editor/react": "4.7.0",
     "@tanstack/react-virtual": "^3.14.3",
     "@xterm/addon-fit": "^0.11.0",
@@ -72,8 +72,8 @@
     "wait-on": "^9.0.10"
   },
   "build": {
-    "appId": "com.fileterm.electron",
-    "productName": "FileTerm Electron",
+    "appId": "com.fileterm.desktop",
+    "productName": "FileTerm",
     "asar": true,
     "directories": {
       "output": "release"
@@ -100,7 +100,7 @@
         "dmg",
         "zip"
       ],
-      "artifactName": "FileTerm-Electron-${version}-macos-${arch}.${ext}"
+      "artifactName": "FileTerm-${version}-macos-${arch}.${ext}"
     },
     "win": {
       "icon": "build/icon.ico",
@@ -118,14 +118,14 @@
           ]
         }
       ],
-      "artifactName": "FileTerm-Electron-${version}-windows-${arch}-setup.${ext}"
+      "artifactName": "FileTerm-${version}-windows-${arch}-setup.${ext}"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     },
     "portable": {
-      "artifactName": "FileTerm-Electron-${version}-windows-${arch}-portable.${ext}"
+      "artifactName": "FileTerm-${version}-windows-${arch}-portable.${ext}"
     }
   }
 }
