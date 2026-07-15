@@ -35,6 +35,10 @@ import type {
   TransferTargetOptions,
   FileTermDesktopApi,
   DetachWorkspaceTabInput,
+  DropWorkspaceTabInput,
+  FinishWorkspaceTabDragInput,
+  MoveWorkspaceTabInput,
+  WorkspaceTabDragInput,
   WorkspaceTabPlacement,
   WorkspaceWindowContext,
   TerminalDataPayload,
@@ -111,6 +115,14 @@ const api: FileTermDesktopApi = {
   detachWorkspaceTab: (input: DetachWorkspaceTabInput): Promise<void> =>
     ipcRenderer.invoke('workspaceWindow:detachTab', input),
   attachWorkspaceTab: (tabId: string): Promise<void> => ipcRenderer.invoke('workspaceWindow:attachTab', tabId),
+  moveWorkspaceTab: (input: MoveWorkspaceTabInput): Promise<void> =>
+    ipcRenderer.invoke('workspaceWindow:moveTab', input),
+  startWorkspaceTabDrag: (input: WorkspaceTabDragInput): Promise<void> =>
+    ipcRenderer.invoke('workspaceWindow:startTabDrag', input),
+  dropWorkspaceTab: (input: DropWorkspaceTabInput): Promise<void> =>
+    ipcRenderer.invoke('workspaceWindow:dropTab', input),
+  finishWorkspaceTabDrag: (input: FinishWorkspaceTabDragInput): Promise<void> =>
+    ipcRenderer.invoke('workspaceWindow:finishTabDrag', input),
   claimWorkspaceTab: (tabId: string): Promise<void> => ipcRenderer.invoke('workspaceWindow:claimTab', tabId),
   onWorkspaceTabPlacementChanged: (listener: (placements: WorkspaceTabPlacement[]) => void) => {
     const wrapped = (_event: unknown, placements: WorkspaceTabPlacement[]) => listener(placements)

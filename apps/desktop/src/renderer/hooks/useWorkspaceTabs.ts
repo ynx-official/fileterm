@@ -41,6 +41,31 @@ export type WorkspaceTabContextMenu = {
   target: TabContextTarget
 }
 
+type WorkspaceTabDragPayload = {
+  dragId: string
+  tabId: string
+  sourceWindowId: string
+}
+
+const WORKSPACE_TAB_DRAG_MIME = 'application/x-fileterm-workspace-tab'
+
+function createWorkspaceTabDragId() {
+  return globalThis.crypto?.randomUUID?.() ?? `tab-drag-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+function parseWorkspaceTabDragPayload(raw: string): WorkspaceTabDragPayload | null {
+  try {
+    const payload = JSON.parse(raw) as Partial<WorkspaceTabDragPayload>
+    return typeof payload.dragId === 'string' &&
+      typeof payload.tabId === 'string' &&
+      typeof payload.sourceWindowId === 'string'
+      ? { dragId: payload.dragId, tabId: payload.tabId, sourceWindowId: payload.sourceWindowId }
+      : null
+  } catch {
+    return null
+  }
+}
+
 export type ShortcutCloseConfirm = {
   tabId: string
   title: string
@@ -234,7 +259,7 @@ export function useWorkspaceTabs({
   const initialMainTabUiState = createInitialMainTabUiState(isMainWorkspaceWindow, null)
   const [localTabs, setLocalTabs] = useState<LocalTab[]>(() => initialMainTabUiState.localTabs)
   const [activeLocalTabId, setActiveLocalTabId] = useState<string | null>(() => initialMainTabUiState.activeLocalTabId)
-  const [activeSessionTabId, setActiveSessionTabId] = useState<string | null>(() => windowContext.tabId ?? null)
+  const [activeSessionTabId, setActiveSessionTabId] = useState<string | null>(() => windowContext.initialTabId ?? null)
   const [nextHomeTabNumber, setNextHomeTabNumber] = useState(() => initialMainTabUiState.nextHomeTabNumber)
   const [tabOrder, setTabOrder] = useState<string[]>(() => initialMainTabUiState.tabOrder)
   const [hasHydratedMainTabUiState, setHasHydratedMainTabUiState] = useState(!isMainWorkspaceWindow)
@@ -252,6 +277,7 @@ export function useWorkspaceTabs({
 
   const localTabsRef = useRef(localTabs)
   const previousWorkspaceTabPlacementsRef = useRef(workspaceTabPlacements)
+  const activeWorkspaceTabDragRef = useRef<WorkspaceTabDragPayload | null>(null)
   const tabDragDetachReadyRef = useRef(false)
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
   const pendingProfileOpenIdRef = useRef<string | null>(null)
@@ -268,7 +294,7 @@ export function useWorkspaceTabs({
     }
 
     const isSessionTab = draggingTabKey.startsWith('session:')
-    const detachableFeedback: TabDragFeedback = windowContext.kind === 'detached-session' ? 'attach' : 'detach'
+    const detachableFeedback: TabDragFeedback = 'detach'
 
     const updateDragFeedback = (event: globalThis.DragEvent) => {
       event.preventDefault()
@@ -354,11 +380,11 @@ export function useWorkspaceTabs({
           if (closingSessionTabIdSet.has(tab.id)) {
             return false
           }
-          if (windowContext.kind === 'detached-session') {
-            return tab.id === windowContext.tabId
-          }
           const placement = workspaceTabPlacementById.get(tab.id)
-          return !placement || placement.ownerWindowId === windowContext.windowId
+          if (windowContext.kind === 'detached-session' && tab.id === windowContext.initialTabId) {
+            return true
+          }
+          return (placement?.ownerWindowId ?? 'main') === windowContext.windowId
         })
       ),
     [closingSessionTabIdSet, windowContext, workspace.tabs, workspaceTabPlacementById]
@@ -537,10 +563,6 @@ export function useWorkspaceTabs({
   useEffect(() => {
     const visibleTabIds = new Set(visibleWorkspaceTabs.map((tab) => tab.id))
     setActiveSessionTabId((current) => {
-      if (windowContext.kind === 'detached-session') {
-        const detachedTabId = windowContext.tabId
-        return detachedTabId && visibleTabIds.has(detachedTabId) ? detachedTabId : null
-      }
       if (current && visibleTabIds.has(current)) {
         return current
       }
@@ -637,7 +659,13 @@ export function useWorkspaceTabs({
   const orderedTabs = useMemo<OrderedTabEntry[]>(() => {
     const orderedKeys = isMainWorkspaceWindow
       ? uniqueStrings(tabOrder)
-      : visibleWorkspaceTabs.map((tab) => sessionTabKey(tab.id))
+      : uniqueStrings([
+          ...workspaceTabPlacements
+            .filter((placement) => placement.ownerWindowId === windowContext.windowId)
+            .sort((left, right) => left.order - right.order)
+            .map((placement) => sessionTabKey(placement.tabId)),
+          ...visibleWorkspaceTabs.map((tab) => sessionTabKey(tab.id))
+        ])
     return orderedKeys
       .map((key) => {
         if (key.startsWith('home:')) {
@@ -659,7 +687,7 @@ export function useWorkspaceTabs({
         return sessionTab ? { key, kind: 'session' as const, tab: sessionTab } : null
       })
       .filter((item): item is OrderedTabEntry => item !== null)
-  }, [isMainWorkspaceWindow, localTabs, tabOrder, visibleWorkspaceTabs])
+  }, [isMainWorkspaceWindow, localTabs, tabOrder, visibleWorkspaceTabs, windowContext.windowId, workspaceTabPlacements])
 
   const sessionSendTargets = useMemo<SessionSendTarget[]>(
     () =>
@@ -1314,51 +1342,113 @@ export function useWorkspaceTabs({
 
   const startTabDrag = (event: DragEvent<HTMLElement>, tabKey: string) => {
     event.dataTransfer.effectAllowed = 'move'
-    event.dataTransfer.setData('application/x-fileterm-tab', tabKey)
     tabDragDetachReadyRef.current = false
     setTabDragFeedback('sort')
     setDraggingTabKey(tabKey)
+
+    if (!tabKey.startsWith('session:')) {
+      event.dataTransfer.setData('application/x-fileterm-tab', tabKey)
+      return
+    }
+
+    const payload: WorkspaceTabDragPayload = {
+      dragId: createWorkspaceTabDragId(),
+      tabId: tabKey.slice('session:'.length),
+      sourceWindowId: windowContext.windowId
+    }
+    const serializedPayload = JSON.stringify(payload)
+    activeWorkspaceTabDragRef.current = payload
+    event.dataTransfer.setData(WORKSPACE_TAB_DRAG_MIME, serializedPayload)
+    event.dataTransfer.setData('text/plain', serializedPayload)
+    event.dataTransfer.setData('application/x-fileterm-tab', tabKey)
+    void desktopApi?.startWorkspaceTabDrag(payload).catch((error) => {
+      onError('开始移动标签页', error)
+    })
   }
 
   const enterDraggedTab = (targetKey: string) => {
     setTabOrder((current) => reorderTabKeys(current, draggingTabKey, targetKey))
   }
 
-  const endTabDrag = (event: DragEvent<HTMLElement>) => {
-    const draggedTabKey = draggingTabKey
-    const isDetachReady = tabDragDetachReadyRef.current
-    tabDragDetachReadyRef.current = false
-    setDraggingTabKey(null)
-    setTabDragFeedback(null)
-    if (
-      !desktopApi ||
-      !draggedTabKey?.startsWith('session:') ||
-      (!isDetachReady &&
-        !isTabDragReleasedOutsideWindow(
-          { screenX: event.screenX, screenY: event.screenY },
-          {
-            x: window.screenX,
-            y: window.screenY,
-            width: window.outerWidth,
-            height: window.outerHeight
-          }
-        ))
-    ) {
+  const dropDraggedTab = (event: DragEvent<HTMLElement>, targetKey?: string) => {
+    event.preventDefault()
+    if (!desktopApi) {
       return
     }
 
-    const tabId = draggedTabKey.slice('session:'.length)
+    const rawPayload = event.dataTransfer.getData(WORKSPACE_TAB_DRAG_MIME) || event.dataTransfer.getData('text/plain')
+    const payload = parseWorkspaceTabDragPayload(rawPayload)
+    if (!payload) {
+      return
+    }
+
+    const sessionTabIds = orderedTabs.flatMap((entry) => (entry.kind === 'session' ? [entry.tab.id] : []))
+    const targetTabId = targetKey?.startsWith('session:') ? targetKey.slice('session:'.length) : null
+    let targetIndex = targetTabId ? sessionTabIds.indexOf(targetTabId) : sessionTabIds.length
+    const sourceIndex = payload.sourceWindowId === windowContext.windowId ? sessionTabIds.indexOf(payload.tabId) : -1
+    if (sourceIndex >= 0 && targetIndex > sourceIndex) {
+      targetIndex -= 1
+    }
+    targetIndex = Math.max(0, targetIndex)
+
+    if (isMainWorkspaceWindow) {
+      const movedKey = sessionTabKey(payload.tabId)
+      setTabOrder((current) => {
+        const next = current.filter((key) => key !== movedKey)
+        if (!targetKey) {
+          return [...next, movedKey]
+        }
+        const insertionIndex = next.indexOf(targetKey)
+        if (insertionIndex === -1) {
+          return [...next, movedKey]
+        }
+        next.splice(insertionIndex, 0, movedKey)
+        return next
+      })
+    }
+
+    void desktopApi
+      .dropWorkspaceTab({
+        ...payload,
+        targetWindowId: windowContext.windowId,
+        targetIndex
+      })
+      .catch((error) => {
+        onError('移动标签页', error)
+      })
+  }
+
+  const endTabDrag = (event: DragEvent<HTMLElement>) => {
+    const draggedTabKey = draggingTabKey
+    const activeDrag = activeWorkspaceTabDragRef.current
+    const isDetachReady = tabDragDetachReadyRef.current
+    tabDragDetachReadyRef.current = false
+    activeWorkspaceTabDragRef.current = null
+    setDraggingTabKey(null)
+    setTabDragFeedback(null)
+    if (!desktopApi || !activeDrag || !draggedTabKey?.startsWith('session:')) {
+      return
+    }
+
+    const releasedOutsideWindow = isTabDragReleasedOutsideWindow(
+      { screenX: event.screenX, screenY: event.screenY },
+      {
+        x: window.screenX,
+        y: window.screenY,
+        width: window.outerWidth,
+        height: window.outerHeight
+      }
+    )
     const hasScreenPoint = event.screenX !== 0 || event.screenY !== 0
-    const request =
-      windowContext.kind === 'detached-session'
-        ? desktopApi.attachWorkspaceTab(tabId)
-        : desktopApi.detachWorkspaceTab({
-            tabId,
-            ...(hasScreenPoint ? { screenPoint: { x: event.screenX, y: event.screenY } } : {})
-          })
-    void request.catch((error) => {
-      onError(windowContext.kind === 'detached-session' ? '收回标签页' : '拆分标签页', error)
-    })
+    void desktopApi
+      .finishWorkspaceTabDrag({
+        dragId: activeDrag.dragId,
+        detachIfUnhandled: isDetachReady || releasedOutsideWindow,
+        ...(hasScreenPoint ? { screenPoint: { x: event.screenX, y: event.screenY } } : {})
+      })
+      .catch((error) => {
+        onError('完成标签页移动', error)
+      })
   }
 
   return {
@@ -1409,6 +1499,7 @@ export function useWorkspaceTabs({
     closeTabContextMenu,
     startTabDrag,
     enterDraggedTab,
+    dropDraggedTab,
     endTabDrag,
     updateTerminalDockSendState,
     updateTerminalDockSendScope,

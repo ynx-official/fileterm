@@ -31,6 +31,7 @@ export interface TabBarProps {
   onDragEnd(event: DragEvent<HTMLElement>): void
   onDragEnter(targetKey: string): void
   onDragStart(event: DragEvent<HTMLElement>, tabKey: string): void
+  onDrop(event: DragEvent<HTMLElement>, targetKey?: string): void
   onOpenTabContext(event: MouseEvent<HTMLDivElement>, target: TabContextTarget): void
   onOpenSettings(): void
   onToggleWorkspaceFocus(): void
@@ -53,6 +54,7 @@ export function TabBar({
   onDragEnd,
   onDragEnter,
   onDragStart,
+  onDrop,
   onOpenTabContext,
   onOpenSettings,
   onToggleWorkspaceFocus,
@@ -88,7 +90,12 @@ export function TabBar({
         )}
       </div>
       <div className="titlebar-tabarea">
-        <div className="fs-tabs" onWheel={handleHorizontalWheelScroll}>
+        <div
+          className="fs-tabs"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => onDrop(event)}
+          onWheel={handleHorizontalWheelScroll}
+        >
           {orderedTabs.map((entry, index) =>
             entry.kind === 'local' ? (
               <div
@@ -109,6 +116,10 @@ export function TabBar({
                 onDragEnd={onDragEnd}
                 onDragEnter={() => onDragEnter(entry.key)}
                 onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.stopPropagation()
+                  onDrop(event, entry.key)
+                }}
                 onDragStart={(event) => onDragStart(event, entry.key)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
@@ -146,6 +157,10 @@ export function TabBar({
                 onDragEnd={onDragEnd}
                 onDragEnter={() => onDragEnter(entry.key)}
                 onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.stopPropagation()
+                  onDrop(event, entry.key)
+                }}
                 onDragStart={(event) => onDragStart(event, entry.key)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {

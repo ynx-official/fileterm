@@ -220,6 +220,7 @@ export function App() {
     closeTabContextMenu,
     startTabDrag,
     enterDraggedTab,
+    dropDraggedTab,
     endTabDrag,
     tabDragFeedback,
     setIsSystemSidebarCollapsed,
@@ -1102,6 +1103,7 @@ export function App() {
     onDragEnd: endTabDrag,
     onDragEnter: enterDraggedTab,
     onDragStart: startTabDrag,
+    onDrop: dropDraggedTab,
     onOpenSettings: () => setShowSettings(true),
     onOpenTabContext: (event: React.MouseEvent<HTMLDivElement>, target: TabContextTarget) => {
       openTabContextMenu(event, target)
@@ -1516,7 +1518,7 @@ export function App() {
                 canCloseCurrent:
                   tabContextMenu.target.kind === 'session' ? true : localTabs.length + visibleWorkspaceTabs.length > 1,
                 canCloseOthers: localTabs.length + visibleWorkspaceTabs.length > 1,
-                canDetach: isMainWorkspaceWindow && tabContextMenu.target.kind === 'session',
+                canDetach: tabContextMenu.target.kind === 'session',
                 canAttach: isDetachedSessionWindow && tabContextMenu.target.kind === 'session',
                 isSessionTab: tabContextMenu.target.kind === 'session',
                 onAction: (action) => {

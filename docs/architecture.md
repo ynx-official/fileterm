@@ -175,29 +175,35 @@ platform probe
 - 主题和语言属于主进程持久化的 UI preferences；资源监控是 SSH 连接配置，关闭后该连接不采集资源数据，工作区仅保留窄侧栏。
 - 产品更名后，main process 首次启动只迁移旧用户目录中的应用自有 JSON 数据；Chromium session、缓存与日志不迁移。
 
-### 4.2.1 可拆分会话窗口 ownership
+### 4.2.1 可组合会话窗口 ownership
 
-会话独立窗口采用“移动展示所有权”，不迁移或重建协议连接：
+会话窗口采用“移动展示所有权”，不迁移或重建协议连接。主窗口和独立窗口都是 workspace tab 容器，区别仅在窗口壳与是否允许本地首页标签：
 
 ```txt
 WorkspaceSessionRuntime
-  └─ 持有 tabId -> controller/session
+  └─ 持有 tabId -> controller/session/WebContents owner
 
 WorkspaceWindowRegistry
-  └─ 持有 tabId -> workspace window placement
+  ├─ 持有 windowId -> ordered tabIds
+  └─ 持有 tabId -> ownerWindowId
 
 Renderer
-  └─ 只渲染 placement 归属于当前 windowId 的 tabs
+  ├─ 按 placement.ownerWindowId 过滤当前窗口标签
+  └─ 每个窗口维护自己的 activeTabId
 ```
 
 边界约束：
 
-- `WorkspaceWindowRegistry` 只管理主窗口、独立会话窗口和 placement，不管理连接状态。
-- `WorkspaceSessionRuntime` 只维护 `tabId -> WebContents` 输出 owner；`releaseTabRenderer(tabId, sender)` 必须 compare-and-release，旧 renderer 的延迟销毁不能清掉新 owner。
-- `workspace:getSnapshot` 是纯读取；renderer 通过 `claimWorkspaceTab(tabId)` 显式认领当前展示的会话。
-- `WorkspaceSnapshot.activeTabId` 保留用于现有 main 服务兼容，但 renderer 的活动标签属于窗口本地状态；独立窗口固定展示其 context `tabId`。
-- 关闭独立窗口只执行 attach，连接继续运行；关闭标签先销毁连接，再通过 registry 关闭对应窗口；退出应用才统一 shutdown runtime。
-- placement 只在独立 renderer 成功 claim 后切换，避免窗口尚未可用时主窗口提前丢失会话展示。
+- `WorkspaceWindowRegistry` 只管理主窗口、独立 workspace 窗口、标签顺序和 placement，不管理协议连接实现。
+- 一个独立窗口可承载多个 SSH、FTP、Telnet、Serial 标签；标签可在主窗口与任意独立窗口之间移动，也可在窗口内排序。
+- 跨窗口拖放由 main process 结算：目标窗口提交 `tabId + targetWindowId + targetIndex`；未被任何 FileTerm 窗口接收的拖放才创建新窗口。
+- `WorkspaceSessionRuntime` 维护 `tabId -> WebContents` 输出 owner；`releaseTabRenderer(tabId, sender)` 必须 compare-and-release，旧 renderer 的延迟销毁不能清掉新 owner。
+- `workspace:getSnapshot` 是纯读取；窗口移动后 registry 将 tab owner 切到目标 `WebContents`，renderer 根据 placement 选择刚移入的标签。
+- 新独立窗口在 renderer 成功 claim 初始标签前仍保持原 placement，避免窗口尚未可用时源窗口提前丢失会话。
+- 标签移出后若源独立窗口为空，只销毁空窗口，不关闭已移动的连接。
+- 用户关闭独立窗口时，逐个关闭其中全部标签并断开连接；任一关闭失败时保留窗口和剩余标签，避免半完成状态失去承载窗口。
+- 独立 renderer 崩溃不视为用户关闭：其中标签恢复到主窗口，连接继续运行。
+- 退出应用走统一 shutdown，不重复触发独立窗口的逐标签关闭流程。
 
 ## 4.3 传输暂停与恢复边界
 

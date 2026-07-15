@@ -54,6 +54,10 @@ export function registerIpcHandlers(userDataPath: string, options: IpcWindowOpti
     createDetachedWindow: options.createDetachedWorkspaceWindow,
     claimTabRenderer: (tabId, sender) => workspaceService.claimTabRenderer(tabId, sender),
     releaseTabRenderer: (tabId, sender) => workspaceService.releaseTabRenderer(tabId, sender),
+    closeTab: async (tabId) => {
+      const snapshot = await workspaceService.closeTab(tabId)
+      broadcastToWindows('workspace:snapshot', snapshot)
+    },
     broadcastPlacements: (placements) => broadcastToWindows('workspaceWindow:placementsChanged', placements),
     isQuitting: options.isQuitting
   })

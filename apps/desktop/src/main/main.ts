@@ -719,7 +719,7 @@ function createDetachedWorkspaceWindow(context: WorkspaceWindowContext, input: D
     }
   })
 
-  attachWindowDiagnostics(win, `detached-session:${input.tabId}`)
+  attachWindowDiagnostics(win, `detached-session:${context.windowId}`)
   registerWindowStateListeners(win)
   if (isWindows) {
     win.setMenuBarVisibility(false)
@@ -730,7 +730,7 @@ function createDetachedWorkspaceWindow(context: WorkspaceWindowContext, input: D
     {
       window: 'detached-session',
       windowId: context.windowId,
-      tabId: input.tabId
+      initialTabId: context.initialTabId ?? input.tabId
     },
     uiPreferences
   )

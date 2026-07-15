@@ -77,14 +77,16 @@ class FakeBrowserWindow extends EventEmitter {
   }
 }
 
-function createRegistry() {
+function createRegistry(initialTabIds = ['tab-a', 'tab-b'], failCloseTabId = null) {
   const mainWindow = new FakeBrowserWindow(1)
   const detachedWindows = []
   const claims = []
   const releases = []
+  const closeCalls = []
+  let tabIds = [...initialTabIds]
   const registry = new WorkspaceWindowRegistry({
     getMainWindow: () => mainWindow,
-    listTabIds: () => ['tab-a'],
+    listTabIds: () => tabIds,
     createDetachedWindow: () => {
       const window = new FakeBrowserWindow(100 + detachedWindows.length)
       detachedWindows.push(window)
@@ -92,11 +94,18 @@ function createRegistry() {
     },
     claimTabRenderer: (tabId, sender) => claims.push({ tabId, senderId: sender.id }),
     releaseTabRenderer: (tabId, sender) => releases.push({ tabId, senderId: sender.id }),
+    closeTab: async (tabId) => {
+      if (tabId === failCloseTabId) {
+        throw new Error(`close failed: ${tabId}`)
+      }
+      closeCalls.push(tabId)
+      tabIds = tabIds.filter((entry) => entry !== tabId)
+    },
     broadcastPlacements: () => undefined,
     isQuitting: () => false
   })
   registry.registerMainWindow(mainWindow)
-  return { claims, detachedWindows, mainWindow, registry, releases }
+  return { claims, closeCalls, detachedWindows, mainWindow, registry, releases }
 }
 
 function createRuntime() {
@@ -121,10 +130,12 @@ function createRuntime() {
   })
 }
 
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve))
+
 test('detached tab ownership moves only after its renderer claims the tab', () => {
-  const { claims, detachedWindows, registry } = createRegistry()
+  const { claims, detachedWindows, registry } = createRegistry(['tab-a'])
   registry.detach({ tabId: 'tab-a' })
-  assert.deepEqual(registry.listPlacements(), [{ tabId: 'tab-a', ownerWindowId: 'main', ownerKind: 'main' }])
+  assert.deepEqual(registry.listPlacements(), [{ tabId: 'tab-a', ownerWindowId: 'main', ownerKind: 'main', order: 0 }])
 
   const detached = detachedWindows[0]
   registry.claim('tab-a', detached.webContents)
@@ -133,29 +144,139 @@ test('detached tab ownership moves only after its renderer claims the tab', () =
   assert.equal(detached.shown, true)
   assert.equal(detached.focused, true)
   assert.deepEqual(registry.listPlacements(), [
-    { tabId: 'tab-a', ownerWindowId: 'detached-1', ownerKind: 'detached-session' }
+    { tabId: 'tab-a', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 0 }
   ])
 })
 
-test('closing a detached window returns the tab to the main renderer', () => {
-  const { claims, detachedWindows, mainWindow, registry, releases } = createRegistry()
+test('a detached workspace window accepts multiple ordered tabs', () => {
+  const { claims, detachedWindows, registry } = createRegistry()
   registry.detach({ tabId: 'tab-a' })
   const detached = detachedWindows[0]
   registry.claim('tab-a', detached.webContents)
-  mainWindow.minimized = true
 
-  detached.close()
+  registry.move({ tabId: 'tab-b', targetWindowId: 'detached-1', targetIndex: 0 })
 
-  assert.equal(detached.closed, true)
-  assert.equal(mainWindow.restored, true)
-  assert.equal(mainWindow.shown, true)
-  assert.equal(mainWindow.focused, true)
-  assert.deepEqual(releases, [{ tabId: 'tab-a', senderId: detached.webContents.id }])
-  assert.deepEqual(claims.at(-1), { tabId: 'tab-a', senderId: mainWindow.webContents.id })
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-a', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 1 },
+    { tabId: 'tab-b', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 0 }
+  ])
+  assert.deepEqual(claims.at(-1), { tabId: 'tab-b', senderId: detached.webContents.id })
 })
 
-test('closing the connection window does not claim the removed tab in main', () => {
-  const { claims, detachedWindows, mainWindow, registry, releases } = createRegistry()
+test('moving one grouped tab to a new window preserves the other tabs', () => {
+  const { detachedWindows, registry } = createRegistry()
+  registry.detach({ tabId: 'tab-a' })
+  registry.claim('tab-a', detachedWindows[0].webContents)
+  registry.move({ tabId: 'tab-b', targetWindowId: 'detached-1' })
+
+  registry.detach({ tabId: 'tab-b' })
+  assert.equal(detachedWindows.length, 2)
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-a', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 0 },
+    { tabId: 'tab-b', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 1 }
+  ])
+
+  registry.claim('tab-b', detachedWindows[1].webContents)
+
+  assert.equal(detachedWindows[0].closed, false)
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-a', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 0 },
+    { tabId: 'tab-b', ownerWindowId: 'detached-2', ownerKind: 'detached-session', order: 0 }
+  ])
+})
+
+test('tabs move between detached windows and the empty source window closes', () => {
+  const { detachedWindows, registry } = createRegistry()
+  registry.detach({ tabId: 'tab-a' })
+  registry.claim('tab-a', detachedWindows[0].webContents)
+  registry.detach({ tabId: 'tab-b' })
+  registry.claim('tab-b', detachedWindows[1].webContents)
+
+  registry.move({ tabId: 'tab-a', targetWindowId: 'detached-2', targetIndex: 1 })
+
+  assert.equal(detachedWindows[0].closed, true)
+  assert.equal(detachedWindows[1].closed, false)
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-a', ownerWindowId: 'detached-2', ownerKind: 'detached-session', order: 1 },
+    { tabId: 'tab-b', ownerWindowId: 'detached-2', ownerKind: 'detached-session', order: 0 }
+  ])
+})
+
+test('moving the final detached tab to main closes only the empty window', () => {
+  const { claims, detachedWindows, mainWindow, registry } = createRegistry(['tab-a'])
+  registry.detach({ tabId: 'tab-a' })
+  registry.claim('tab-a', detachedWindows[0].webContents)
+  mainWindow.minimized = true
+
+  registry.attach('tab-a')
+
+  assert.equal(detachedWindows[0].closed, true)
+  assert.equal(mainWindow.restored, true)
+  assert.equal(mainWindow.focused, true)
+  assert.deepEqual(claims.at(-1), { tabId: 'tab-a', senderId: mainWindow.webContents.id })
+  assert.deepEqual(registry.listPlacements(), [{ tabId: 'tab-a', ownerWindowId: 'main', ownerKind: 'main', order: 0 }])
+})
+
+test('closing a grouped detached window closes every contained connection', async () => {
+  const { claims, closeCalls, detachedWindows, mainWindow, registry } = createRegistry()
+  registry.detach({ tabId: 'tab-a' })
+  const detached = detachedWindows[0]
+  registry.claim('tab-a', detached.webContents)
+  registry.move({ tabId: 'tab-b', targetWindowId: 'detached-1' })
+
+  detached.close()
+  await nextTurn()
+
+  assert.equal(detached.closed, true)
+  assert.deepEqual(closeCalls, ['tab-a', 'tab-b'])
+  assert.equal(
+    claims.some((claim) => claim.senderId === mainWindow.webContents.id),
+    false
+  )
+})
+
+test('a grouped window stays open with remaining tabs when one connection fails to close', async () => {
+  const { closeCalls, detachedWindows, registry } = createRegistry(['tab-a', 'tab-b'], 'tab-b')
+  registry.detach({ tabId: 'tab-a' })
+  const detached = detachedWindows[0]
+  registry.claim('tab-a', detached.webContents)
+  registry.move({ tabId: 'tab-b', targetWindowId: 'detached-1' })
+
+  detached.close()
+  await nextTurn()
+
+  assert.equal(detached.closed, false)
+  assert.deepEqual(closeCalls, ['tab-a'])
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-b', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 0 }
+  ])
+})
+
+test('renderer failure restores every grouped tab to main without closing connections', () => {
+  const { claims, closeCalls, detachedWindows, mainWindow, registry } = createRegistry()
+  registry.detach({ tabId: 'tab-a' })
+  const detached = detachedWindows[0]
+  registry.claim('tab-a', detached.webContents)
+  registry.move({ tabId: 'tab-b', targetWindowId: 'detached-1' })
+
+  detached.webContents.emit('render-process-gone')
+
+  assert.deepEqual(closeCalls, [])
+  assert.deepEqual(
+    claims.filter((claim) => claim.senderId === mainWindow.webContents.id),
+    [
+      { tabId: 'tab-a', senderId: mainWindow.webContents.id },
+      { tabId: 'tab-b', senderId: mainWindow.webContents.id }
+    ]
+  )
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-a', ownerWindowId: 'main', ownerKind: 'main', order: 0 },
+    { tabId: 'tab-b', ownerWindowId: 'main', ownerKind: 'main', order: 1 }
+  ])
+})
+
+test('closing the last connection tab destroys its detached window without claiming main', () => {
+  const { claims, detachedWindows, mainWindow, registry } = createRegistry(['tab-a'])
   registry.detach({ tabId: 'tab-a' })
   const detached = detachedWindows[0]
   registry.claim('tab-a', detached.webContents)
@@ -163,7 +284,6 @@ test('closing the connection window does not claim the removed tab in main', () 
   registry.closeTabWindow('tab-a')
 
   assert.equal(detached.closed, true)
-  assert.deepEqual(releases, [{ tabId: 'tab-a', senderId: detached.webContents.id }])
   assert.equal(
     claims.some((claim) => claim.senderId === mainWindow.webContents.id),
     false

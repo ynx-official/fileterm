@@ -760,17 +760,44 @@ export type WorkspaceWindowKind = 'main' | 'detached-session'
 export interface WorkspaceWindowContext {
   windowId: string
   kind: WorkspaceWindowKind
-  tabId?: string
+  initialTabId?: string
 }
 
 export interface WorkspaceTabPlacement {
   tabId: string
   ownerWindowId: string
   ownerKind: WorkspaceWindowKind
+  order: number
 }
 
 export interface DetachWorkspaceTabInput {
   tabId: string
+  screenPoint?: {
+    x: number
+    y: number
+  }
+}
+
+export interface MoveWorkspaceTabInput {
+  tabId: string
+  targetWindowId: string
+  targetIndex?: number
+}
+
+export interface WorkspaceTabDragInput {
+  dragId: string
+  tabId: string
+  sourceWindowId: string
+}
+
+export interface DropWorkspaceTabInput extends MoveWorkspaceTabInput {
+  dragId: string
+  sourceWindowId: string
+}
+
+export interface FinishWorkspaceTabDragInput {
+  dragId: string
+  detachIfUnhandled: boolean
   screenPoint?: {
     x: number
     y: number
@@ -867,6 +894,10 @@ export interface FileTermDesktopApi {
   getWorkspaceTabPlacements(): Promise<WorkspaceTabPlacement[]>
   detachWorkspaceTab(input: DetachWorkspaceTabInput): Promise<void>
   attachWorkspaceTab(tabId: string): Promise<void>
+  moveWorkspaceTab(input: MoveWorkspaceTabInput): Promise<void>
+  startWorkspaceTabDrag(input: WorkspaceTabDragInput): Promise<void>
+  dropWorkspaceTab(input: DropWorkspaceTabInput): Promise<void>
+  finishWorkspaceTabDrag(input: FinishWorkspaceTabDragInput): Promise<void>
   claimWorkspaceTab(tabId: string): Promise<void>
   onWorkspaceTabPlacementChanged(listener: (placements: WorkspaceTabPlacement[]) => void): () => void
   getSnapshot(): Promise<WorkspaceSnapshot>

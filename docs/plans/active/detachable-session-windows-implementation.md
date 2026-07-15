@@ -1,263 +1,177 @@
-# 可拆分会话窗口实施计划
+# 可拆分会话窗口实施记录
 
-> **执行要求：** 按任务顺序实施，每一步完成后运行对应验证。当前会话采用 inline execution，不使用 subagent，不自动创建 Git 提交。
+> 执行状态：多标签独立窗口重构已完成；不自动创建 Git 提交。
 
-**目标：** 让远程会话标签以移动模式拆出为独立 Electron 窗口，关闭独立窗口后无断连地返回主窗口。
+## 1. 实施结果
 
-**架构：** `WorkspaceWindowRegistry` 在 main process 中维护 `tabId -> BrowserWindow` 展示归属；`WorkspaceSessionRuntime` 保持 controller 不动，只安全切换终端事件 sender。Renderer 根据类型化窗口上下文渲染主窗口或单会话窗口，通过 preload IPC 请求拆出、认领和收回。
+主窗口和独立窗口已统一为有序标签容器。会话可浏览器式跨窗口移动、组合和排序；连接与 controller 始终由 main process 的 `WorkspaceSessionRuntime` 持有。
 
-**技术栈：** Electron 42、React 19、TypeScript 6、Node test runner、现有 workspace snapshot/runtime/IPC 分层。
+已实现：
 
----
+- `WorkspaceWindowContext` 以 `windowId/kind` 表示稳定窗口身份，`initialTabId` 仅用于新窗口首次认领。
+- `WorkspaceTabPlacement` 包含窗口内 `order`。
+- `WorkspaceWindowRegistry` 维护 `windowId -> ordered tabIds` 和 `tabId -> ownerWindowId` 两张索引。
+- 主窗口、任意独立窗口之间可移动标签并按目标位置插入。
+- 同一窗口内排序与跨窗口迁移共用统一移动接口。
+- 拖放与右键菜单共用 main process 归属迁移链路。
+- source `dragend` 延迟结算，避免 drop 与 dragend IPC 到达顺序导致误拆窗。
+- 源独立窗口最后一个标签移出后只销毁空窗口，不关闭连接。
+- 用户关闭独立窗口时逐个关闭其中全部连接；部分失败时保留未关闭标签和窗口。
+- renderer 崩溃时标签恢复主窗口，连接保持。
+- 移动完成后恢复、显示、置前并聚焦目标窗口，目标 renderer 选择移动标签。
+- runtime owner 使用 compare-and-release，旧 renderer 延迟销毁不会清除新 owner。
+- 新 renderer claim 后恢复完整 terminal transcript 和最新 workspace snapshot。
 
-## 文件结构
+## 2. 模块职责
 
-### 新建
+### `packages/core`
 
-- `apps/desktop/src/main/services/windows/workspace-window-registry.ts`
-  - workspace 窗口注册、placement、detach/attach 状态机。
-- `apps/desktop/src/main/ipc/workspace-window-handlers.ts`
-  - workspace window IPC 注册。
-- `apps/desktop/src/renderer/hooks/useWorkspaceWindowContext.ts`
-  - 加载窗口上下文、placement 并认领 tab。
-- `apps/desktop/src/renderer/features/windowing/DetachedSessionWindow.tsx`
-  - 单会话窗口壳。
-- `apps/desktop/test/workspace/workspace-window-placement.test.ts`
-  - 纯 placement 状态转换测试。
+`packages/core/src/index.ts` 定义：
 
-### 修改
+- 窗口上下文。
+- placement 与窗口内顺序。
+- 统一移动输入。
+- 跨窗口拖拽输入与状态。
+- preload 暴露的 `FileTermDesktopApi` 类型。
 
-- `packages/core/src/index.ts`
-  - 窗口上下文、placement、detach input 和 preload API 类型。
-- `apps/desktop/src/main/services/workspace/workspace-session-runtime.ts`
-  - `claimTabRenderer/releaseTabRenderer/getTabRenderer`。
-- `apps/desktop/src/main/services/workspace/workspace-tab-lifecycle.ts`
-  - 去除读取 snapshot 时的全 tab sender 覆盖。
-- `apps/desktop/src/main/services/workspace-service.ts`
-  - 暴露显式 tab renderer 认领接口。
-- `apps/desktop/src/main/ipc/types.ts`
-  - 注入窗口 registry 能力。
-- `apps/desktop/src/main/ipc/index.ts`
-  - 注册 workspace window handlers。
-- `apps/desktop/src/main/ipc/workspace-handlers.ts`
-  - `getSnapshot` 变为纯读取。
-- `apps/desktop/src/main/main.ts`
-  - 创建 registry、detached BrowserWindow、退出/隐藏集成。
-- `apps/desktop/src/preload/preload.cts`
-  - 暴露类型化窗口 API 与 placement 事件。
-- `apps/desktop/src/renderer/App.tsx`
-  - 窗口上下文接入、main/detached 路由。
-- `apps/desktop/src/renderer/hooks/useWorkspaceTabs.ts`
-  - 过滤 detached tabs，支持 detach action。
-- `apps/desktop/src/renderer/features/layout/TabBar.tsx`
-  - 报告 drag end 的 screen 坐标并增加拆出入口。
-- `apps/desktop/src/renderer/features/workspace/WorkspaceStage.tsx`
-  - 允许 detached 壳复用单会话内容。
-- `apps/desktop/src/renderer/i18n.ts`
-  - “在独立窗口打开”“返回主窗口”等文案。
-- `apps/desktop/src/renderer/styles/features/shell.css`
-  - detached 窗口壳样式。
-- `docs/architecture.md`
-  - 固化窗口 ownership 边界。
+### Main process
 
-## Task 1：核心类型与 placement 纯模型
+`apps/desktop/src/main/services/windows/workspace-window-registry.ts`：
 
-- [ ] 在 `packages/core/src/index.ts` 增加：
+- 管理 workspace 窗口注册表和标签归属索引。
+- 校验移动、计算插入位置并广播 placements。
+- 管理跨 renderer drag/drop 结算。
+- 清理空独立窗口。
+- 处理独立窗口整组关闭、部分失败和崩溃恢复。
+- 激活移动目标窗口。
 
-```ts
-export type WorkspaceWindowKind = 'main' | 'detached-session'
+`apps/desktop/src/main/services/windows/workspace-window-placement.ts`：
 
-export interface WorkspaceWindowContext {
-  windowId: string
-  kind: WorkspaceWindowKind
-  tabId?: string
-}
+- 构造带顺序的 placement。
+- 计算多显示器和跨平台窗口 bounds。
 
-export interface WorkspaceTabPlacement {
-  tabId: string
-  ownerWindowId: string
-  ownerKind: WorkspaceWindowKind
-}
+`apps/desktop/src/main/ipc/workspace-window-handlers.ts` 与 `apps/desktop/src/main/ipc/index.ts`：
 
-export interface DetachWorkspaceTabInput {
-  tabId: string
-  screenPoint?: { x: number; y: number }
-}
+- 注册窗口上下文、placements、移动和拖拽 IPC。
+- 以 `event.sender` 识别调用窗口，不信任 renderer 自报身份。
+
+`apps/desktop/src/main/main.ts`：
+
+- 创建和注册顶层独立窗口。
+- 接入应用隐藏、恢复、退出和 shutdown 生命周期。
+
+### Preload
+
+`apps/desktop/src/preload/preload.cts`：
+
+- 暴露类型化窗口移动和拖拽 API。
+- 暴露 placement 变化订阅。
+- 不向 renderer 暴露 Electron 原始对象。
+
+### Renderer
+
+`apps/desktop/src/renderer/hooks/useWorkspaceTabs.ts`：
+
+- 按当前 `windowId` 过滤标签。
+- 按 placement `order` 构建标签顺序。
+- 维护窗口本地活动标签。
+- 在 placement 迁移完成后选择刚移入标签。
+- 提交排序、跨窗口 drop 和右键移动。
+
+`apps/desktop/src/renderer/features/layout/TabBar.tsx`：
+
+- 提供标签拖拽源和跨窗口 drop 目标。
+- 计算目标插入位置。
+- 只报告交互意图，不直接修改 main process placement。
+
+`apps/desktop/src/renderer/App.tsx`：
+
+- 注入窗口上下文和当前窗口标签集合。
+- 主窗口与独立窗口复用同一 workspace 渲染链路。
+
+## 3. 数据流
+
+```txt
+Tab drag/drop or context menu
+  -> preload typed API
+  -> workspace window IPC
+  -> WorkspaceWindowRegistry
+  -> ordered placement update
+  -> placementsChanged broadcast
+  -> target renderer filters and selects moved tab
+  -> WorkspaceSessionRuntime switches WebContents owner on claim
+  -> transcript/snapshot hydrate target renderer
 ```
 
-- [ ] 扩展 `AppWindowMode`，加入 `detached-session` 与已有 `file-editor`。
-- [ ] 扩展 `FileTermDesktopApi`：
+连接移动期间不创建新 controller，不调用 reconnect，不删除领域 tab。
 
-```ts
-getWorkspaceWindowContext(): Promise<WorkspaceWindowContext>
-getWorkspaceTabPlacements(): Promise<WorkspaceTabPlacement[]>
-detachWorkspaceTab(input: DetachWorkspaceTabInput): Promise<void>
-attachWorkspaceTab(tabId: string): Promise<void>
-claimWorkspaceTab(tabId: string): Promise<void>
-onWorkspaceTabPlacementChanged(listener: (placements: WorkspaceTabPlacement[]) => void): () => void
+## 4. 关闭状态机
+
+```txt
+user closes detached window
+  -> preventDefault
+  -> phase = closing-connections
+  -> for tabId in current ordered tabIds
+       close workspace tab
+       on success: remove placement immediately
+       on failure: stop and keep remaining window state
+  -> destroy window only when no tabs remain
 ```
 
-- [ ] 新建 placement 纯函数测试，验证 main-owned、detached-owned、重复 detach 幂等和 attach 回主窗口。
-- [ ] 运行：
+布局移动导致空窗口使用独立的空容器清理路径，不进入上述连接关闭状态机。
+
+## 5. 自动化测试
+
+`apps/desktop/test/controllers/workspace-windowing.test.mjs` 覆盖：
+
+- owner 只在目标 renderer claim 后切换。
+- 独立窗口接收多个有序标签。
+- 标签在两个独立窗口之间移动。
+- 源窗口为空后销毁。
+- 整组连接关闭。
+- 部分关闭失败后的剩余状态。
+- renderer 崩溃恢复主窗口。
+- 最后连接关闭后的窗口清理。
+- transcript 恢复和 owner 延迟释放竞态。
+
+`apps/desktop/test/workspace/workspace-window-placement.test.ts` 覆盖：
+
+- 主窗口显式顺序。
+- 独立窗口 ready 状态才成为稳定 owner。
+
+Renderer 纯函数测试继续覆盖：
+
+- 跨窗口移动后的目标标签识别。
+- 初始 placement hydration 不误判为移动。
+- Chromium 异常 dragend 坐标下的拖拽状态机。
+- terminal transcript 增量合并。
+
+## 6. 质量验证
+
+最终验证命令：
 
 ```bash
+node_modules/.bin/prettier --check <本功能修改文件>
+node_modules/.bin/eslint --max-warnings=0 <本功能代码文件>
+npm run build -w @fileterm/core
+npm run typecheck -w @fileterm/desktop
 npm run test:unit -w @fileterm/desktop
-npm run typecheck -w @fileterm/core
+npm run test:controllers -w @fileterm/desktop
+npm run build && npm test
+git diff --check
 ```
 
-预期：新增测试通过，core 类型检查通过。
+仓库级 `npm run format:check` 存在大量与本功能无关的既有格式问题，因此本次使用针对性 Prettier 检查，不将仓库级格式门禁标记为通过。
 
-## Task 2：Runtime renderer owner 安全 API
+## 7. 手工验证清单
 
-- [ ] 在 `workspace-session-runtime.ts` 用以下 API 替代公开 `setSender/getSender`：
-
-```ts
-claimTabRenderer(tabId: string, sender: WebContents): void
-releaseTabRenderer(tabId: string, sender: WebContents): void
-getTabRenderer(tabId: string): WebContents | undefined
-```
-
-- [ ] `releaseTabRenderer()` 必须 compare-and-release：当前 sender 不等于传入 sender 时不删除。
-- [ ] sender destroyed 时只释放仍归属于该 sender 的 tabs。
-- [ ] `workspace-tab-lifecycle.ts` 的 open/reconnect 路径改用 `claimTabRenderer()`。
-- [ ] 删除 `bindWorkspaceSender()` 对全部 tabs 的覆盖行为。
-- [ ] `WorkspaceService` 增加显式代理方法：
-
-```ts
-claimTabRenderer(tabId: string, sender: WebContents): void
-releaseTabRenderer(tabId: string, sender: WebContents): void
-```
-
-- [ ] 增加 runtime owner 竞态测试：owner 从 A 切换到 B 后，释放 A 不影响 B。
-- [ ] 运行 workspace 相关单测和 desktop main typecheck。
-
-## Task 3：WorkspaceWindowRegistry 与 main 窗口生命周期
-
-- [ ] 新建 `WorkspaceWindowRegistry`，构造依赖采用函数注入，避免服务直接依赖全局变量：
-
-```ts
-interface WorkspaceWindowRegistryOptions {
-  getMainWindow(): BrowserWindow | null
-  createDetachedWindow(context: WorkspaceWindowContext, point?: { x: number; y: number }): BrowserWindow
-  tabExists(tabId: string): boolean
-  claimTabRenderer(tabId: string, sender: WebContents): void
-  releaseTabRenderer(tabId: string, sender: WebContents): void
-  isQuitting(): boolean
-}
-```
-
-- [ ] registry 实现：
-  - `registerMainWindow(window)`
-  - `getContext(sender)`
-  - `listPlacements()`
-  - `detach(tabId, point)`
-  - `claim(tabId, sender)`
-  - `attach(tabId)`
-  - `closeAll()`
-- [ ] `detach()` 重复调用时聚焦已有窗口。
-- [ ] detached window `close` 在非退出状态下 `preventDefault()` 并执行 attach。
-- [ ] renderer 崩溃或 window destroyed 时 placement 恢复 main。
-- [ ] 在 `main.ts` 增加顶层 detached 窗口创建函数，不使用 `parent`。
-- [ ] 使用 `screen.getDisplayNearestPoint()` 和 `workArea` 修正初始 bounds。
-- [ ] 将 detached windows 纳入 hide/show 和真正退出链路。
-- [ ] 运行 main typecheck。
-
-## Task 4：IPC 与 preload 边界
-
-- [ ] 新建 `workspace-window-handlers.ts`，注册：
-
-```txt
-workspaceWindow:getContext
-workspaceWindow:getPlacements
-workspaceWindow:detachTab
-workspaceWindow:attachTab
-workspaceWindow:claimTab
-```
-
-- [ ] `getContext/claimTab` 必须以 `event.sender` 为身份来源，不能相信 renderer 传入 windowId。
-- [ ] registry placement 变化时只广播给 main 与 detached workspace 窗口：
-
-```txt
-workspaceWindow:placementsChanged
-```
-
-- [ ] 在 preload 中实现 core API 对应的方法和取消订阅函数。
-- [ ] `workspace:getSnapshot` 只返回 snapshot，不再隐式绑定全部 tab。
-- [ ] 主窗口启动后通过新的 claim 流程认领 main-owned tabs。
-- [ ] 运行 desktop typecheck。
-
-## Task 5：Renderer 窗口上下文与独立会话窗口
-
-- [ ] 新建 `useWorkspaceWindowContext`：
-  - 加载 context 与 placements。
-  - 订阅 placement 变化。
-  - detached context 加载后调用 `claimWorkspaceTab(tabId)`。
-  - 暴露 `detachedTabIds`。
-- [ ] `useWorkspaceTabs` 接受 `hiddenSessionTabIds: ReadonlySet<string>`，只过滤 renderer 可见 tabs，不修改领域 snapshot。
-- [ ] 新建 `DetachedSessionWindow`，固定使用 context `tabId` 解析 tab/session/profile。
-- [ ] detached window 不调用 `activateTab()`，不读取全局 `activeTabId` 选择内容。
-- [ ] 独立窗口复用 `SessionWorkspace`、系统侧栏、transfer center 与现有文件操作 hooks。
-- [ ] `App.tsx` 在最外层根据 context 分流 main 与 detached；不把独立窗口状态继续堆进普通 modal 分支。
-- [ ] detached close/返回按钮调用 `attachWorkspaceTab(tabId)`。
-- [ ] 运行 renderer typecheck 与 lint。
-
-## Task 6：标签拖出与可访问入口
-
-- [ ] `TabBar` 的 session tab `dragend` 将 `event.screenX/screenY` 上报。
-- [ ] `useWorkspaceTabs` 仅在 session tab 上调用：
-
-```ts
-desktopApi.detachWorkspaceTab({
-  tabId,
-  screenPoint: { x: event.screenX, y: event.screenY }
-})
-```
-
-- [ ] 第一版 detach 判定：drag end 坐标位于当前窗口屏幕矩形之外时拆出；窗口内继续只排序。
-- [ ] 标签右键菜单增加“在独立窗口打开”，保证键盘和不稳定 DnD 环境可用。
-- [ ] detached 窗口提供“返回主窗口”。
-- [ ] 首页和 system local tab 不允许拆出。
-- [ ] 失败时保留标签并进入现有错误提示链。
-- [ ] 补中英文文案与 shell 样式。
-
-## Task 7：关闭与退出语义
-
-- [ ] detached `Ctrl/Cmd+W` 触发 attach，不触发 `workspace.closeTab()`。
-- [ ] detached 窗口关闭按钮触发 attach。
-- [ ] “关闭连接”仍走现有 close tab 确认和 runtime teardown。
-- [ ] `Cmd/Ctrl+Q` 继续走统一退出确认；退出期间 detached close handler 不执行 attach。
-- [ ] 托盘隐藏/显示同时处理当前可见 detached windows。
-- [ ] `requestCloseFocusedWindow()` 区分 main 和 detached。
-- [ ] 手工验证连接中、传输中、MFA 中的窗口关闭行为。
-
-## Task 8：验证与文档
-
-- [ ] 更新 `docs/architecture.md`：
-
-```txt
-WorkspaceSessionRuntime owns protocol sessions
-WorkspaceWindowRegistry owns renderer placement
-one tab -> one renderer owner
-snapshot broadcast != terminal event ownership
-```
-
-- [ ] 更新规格状态与实际实现差异。
-- [ ] 运行：
-
-```bash
-npm run typecheck
-npm run lint
-npm run format:check
-npm test
-npm run build
-```
-
-- [ ] Windows 手工验证：
-  - 两个 SSH 标签分别输出。
-  - 拖出后不串流、不重连。
-  - resize、SFTP、CWD、sudo/root 正常。
-  - 关闭独立窗口后标签返回。
-  - 多显示器与 125%/150% DPI 定位合理。
-  - `Ctrl+W`、退出确认、托盘隐藏链正确。
-
-- [ ] 最终检查 `git diff --check` 与编辑文件 lints。
+- 主窗口标签拖入已有独立窗口并按落点插入。
+- 独立窗口 A 标签拖入独立窗口 B。
+- 同一窗口内排序。
+- 拖到所有 FileTerm 窗口外时创建新独立窗口，且不因 IPC 顺序误创建第二个窗口。
+- 移走最后一个标签后源独立窗口销毁，连接保持。
+- 关闭多标签独立窗口时全部连接关闭。
+- 单个标签关闭失败时已成功关闭的 placement 移除，剩余标签和窗口保留。
+- 右键“移动到独立窗口/移动到主窗口”行为正确。
+- 目标窗口最小化时恢复、置前、聚焦并选择移动标签。
+- 终端历史、提示符、已输入内容和后续输出不丢失。
