@@ -1,4 +1,4 @@
-name: Release
+name: Release Electron
 
 on:
   push:
@@ -76,14 +76,14 @@ jobs:
         run: npm run typecheck
 
       - name: Build renderer + main
-        run: npm run build -w @fileterm/desktop
+        run: npm run build -w @fileterm/electron
 
       - name: Package macOS arm64 and x64
         run: |
           if [[ -z "${CSC_LINK:-}" ]]; then
             unset CSC_LINK CSC_KEY_PASSWORD
           fi
-          cd apps/desktop
+          cd apps/electron
           npx electron-builder --mac --arm64 --x64 --publish never
 
       - name: Verify macOS Ad-hoc signatures
@@ -94,7 +94,7 @@ jobs:
           apps=()
           while IFS= read -r -d '' app; do
             apps+=("${app}")
-          done < <(find apps/desktop/release -type d -name 'FileTerm.app' -print0)
+          done < <(find apps/electron/release -type d -name 'FileTerm.app' -print0)
           if [[ "${#apps[@]}" -ne 2 ]]; then
             echo "Expected two architecture-specific FileTerm.app bundles, found ${#apps[@]}."
             printf '%s\n' "${apps[@]}"
@@ -113,20 +113,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test -f apps/desktop/release/latest-mac.yml
-          compgen -G 'apps/desktop/release/*macos-arm64.dmg' >/dev/null
-          compgen -G 'apps/desktop/release/*macos-arm64.zip' >/dev/null
-          compgen -G 'apps/desktop/release/*macos-x64.dmg' >/dev/null
-          compgen -G 'apps/desktop/release/*macos-x64.zip' >/dev/null
+          test -f apps/electron/release/latest-mac.yml
+          compgen -G 'apps/electron/release/*macos-arm64.dmg' >/dev/null
+          compgen -G 'apps/electron/release/*macos-arm64.zip' >/dev/null
+          compgen -G 'apps/electron/release/*macos-x64.dmg' >/dev/null
+          compgen -G 'apps/electron/release/*macos-x64.zip' >/dev/null
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
           name: FileTerm-macOS-arch-split
           path: |
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.zip
-            apps/desktop/release/*.yml
+            apps/electron/release/*.dmg
+            apps/electron/release/*.zip
+            apps/electron/release/*.yml
           if-no-files-found: error
 
   build-win:
@@ -160,27 +160,27 @@ jobs:
         run: npm run typecheck
 
       - name: Build renderer + main
-        run: npm run build -w @fileterm/desktop
+        run: npm run build -w @fileterm/electron
 
       - name: Package Windows (${{ matrix.arch }})
         run: |
-          cd apps/desktop
+          cd apps/electron
           npx electron-builder --win --${{ matrix.arch }} --publish never
 
       - name: Validate Windows update metadata
         shell: bash
         run: |
           set -euo pipefail
-          test -f apps/desktop/release/latest.yml
-          compgen -G 'apps/desktop/release/*.exe' >/dev/null
+          test -f apps/electron/release/latest.yml
+          compgen -G 'apps/electron/release/*.exe' >/dev/null
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
           name: FileTerm-Windows-${{ matrix.arch }}
           path: |
-            apps/desktop/release/*.exe
-            apps/desktop/release/*.yml
+            apps/electron/release/*.exe
+            apps/electron/release/*.yml
           if-no-files-found: error
 
   release:

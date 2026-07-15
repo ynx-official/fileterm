@@ -11,7 +11,15 @@ const sourceFiles = ['**/*.{js,cjs,mjs,ts,tsx,cts,mts}']
 
 module.exports = [
   {
-    ignores: ['**/node_modules/**', '**/dist/**', '**/dist-electron/**', '**/release/**', '**/coverage/**']
+    ignores: [
+      '**/node_modules/**',
+      '**/dist/**',
+      '**/dist-electron/**',
+      '**/release/**',
+      '**/coverage/**',
+      'apps/tauri/src-tauri/target/**',
+      'apps/tauri/src-tauri/gen/**'
+    ]
   },
   {
     files: ['**/*.{js,cjs,mjs}'],
@@ -65,9 +73,9 @@ module.exports = [
   },
   {
     files: [
-      'apps/desktop/src/main/**/*.{ts,tsx}',
-      'apps/desktop/src/preload/**/*.{ts,tsx,cts,mts}',
-      'apps/desktop/test/**/*.{ts,tsx,cts,mts}'
+      'apps/electron/src/main/**/*.{ts,tsx}',
+      'apps/electron/src/preload/**/*.{ts,tsx,cts,mts}',
+      'apps/electron/test/**/*.{ts,tsx,cts,mts}'
     ],
     languageOptions: {
       globals: {
@@ -77,8 +85,8 @@ module.exports = [
   },
   {
     files: [
-      'apps/desktop/src/main/services/sessions/shell-cwd-integration.ts',
-      'apps/desktop/src/main/services/sessions/ssh-session-controller.ts'
+      'apps/electron/src/main/services/sessions/shell-cwd-integration.ts',
+      'apps/electron/src/main/services/sessions/ssh-session-controller.ts'
     ],
     rules: {
       // These modules intentionally parse ANSI/OSC control sequences from a shell stream.
@@ -92,7 +100,7 @@ module.exports = [
     }
   },
   {
-    files: ['apps/desktop/src/renderer/**/*.{ts,tsx}'],
+    files: ['apps/{tauri,electron}/src/renderer/**/*.{ts,tsx}'],
     languageOptions: {
       globals: {
         ...globals.browser

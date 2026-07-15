@@ -3,8 +3,8 @@
 ## 自动化命令
 
 ```bash
-npm run test:transfers -w @fileterm/desktop
-npm run test:transfers:protocol -w @fileterm/desktop
+npm run test:transfers -w @fileterm/electron
+npm run test:transfers:protocol -w @fileterm/electron
 npm run typecheck
 npm run build
 git diff --check
@@ -22,4 +22,4 @@ git diff --check
 | 断点大于源文件   | 必须拒绝 | 必须拒绝       | 必须拒绝 | 必须拒绝  | 必须拒绝  |
 | 最终 rename 失败 | 保留断点 | 保留断点       | 保留断点 | 保留断点  | 保留断点  |
 
-真实 socket 协议夹具位于 `apps/desktop/test/protocol/`，包含本地 OpenSSH SFTP、FTP、显式 FTPS 和隐式 FTPS。受限环境缺少 sshd/openssl 或禁止监听 localhost 时相应用例显示 skipped；普通 macOS/Linux 开发机或 CI 中必须执行为 pass。
+Electron 真实 socket 协议夹具位于 `apps/electron/test/protocol/`，包含本地 OpenSSH SFTP、FTP、显式 FTPS 和隐式 FTPS。受限环境缺少 sshd/openssl 或禁止监听 localhost 时相应用例显示 skipped；普通 macOS/Linux 开发机或 CI 中必须执行为 pass。

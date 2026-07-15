@@ -7,13 +7,13 @@
 先构建 renderer 和 main：
 
 ```bash
-npm run build -w @fileterm/desktop
+npm run build -w @fileterm/electron
 ```
 
-在 `apps/desktop` 目录中分别构建两个版本。第一个版本安装后，再用第二个版本的文件作为本地更新源：
+在 `apps/electron` 目录中分别构建两个版本。第一个版本安装后，再用第二个版本的文件作为本地更新源：
 
 ```bash
-cd apps/desktop
+cd apps/electron
 npx electron-builder --config electron-builder.update-test.yml --win --x64 \
   --config.extraMetadata.version=1.0.0 \
   --config.directories.output=release/update-test-v1
@@ -32,7 +32,7 @@ python3 -m http.server 8765 --directory release/update-test
 npm run dev
 ```
 
-开发进程会读取 `apps/desktop/dev-app-update.yml`，允许未打包的 Electron 进程访问本地 generic 更新源。若 HTTP 服务未启动，设置页会显示检查失败并保留重试按钮。
+开发进程会读取 `apps/electron/dev-app-update.yml`，允许未打包的 Electron 进程访问本地 generic 更新源。若 HTTP 服务未启动，设置页会显示检查失败并保留重试按钮。
 
 安装并启动 `1.0.0` 的 NSIS 安装包，在设置 → 应用更新中点击检查更新。预期流程是：发现 `1.0.1` → 下载 → 重启并更新。
 
@@ -43,7 +43,7 @@ npm run dev
 本地配置默认使用 arm64、未签名的 DMG / ZIP：
 
 ```bash
-cd apps/desktop
+cd apps/electron
 npx electron-builder --config electron-builder.update-test.yml --mac --arm64 \
   --config.extraMetadata.version=1.0.0 \
   --config.directories.output=release/update-test-v1

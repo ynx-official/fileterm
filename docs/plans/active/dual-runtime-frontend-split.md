@@ -1,0 +1,38 @@
+# 双运行时前端物理分叉计划
+
+## 目标
+
+让 Electron 与 Tauri 可并行开发、运行和发布，且不共享 renderer 代码。
+
+## 已完成
+
+- [x] `apps/desktop` 重命名为 `apps/tauri`。
+- [x] 从 `origin/main` 冻结 Electron 基线到 `apps/electron`。
+- [x] Tauri 保留自己的 `src/renderer` 与 `src/bridge/tauri-api.ts`。
+- [x] Electron 保留自己的 `src/main`、`src/preload` 与 `src/renderer`。
+- [x] 使用独立开发端口、包名、bundle ID、发布产物名和 userData 根。
+
+## 待完成
+
+- [x] 重新生成根 `package-lock.json`，将两个 workspace 的依赖写入锁文件。
+- [x] 更新根命令、CI 与 Electron 发布工作流，使两个 runtime 可单独构建和测试。
+- [x] 将 Tauri 的真实协议夹具测试串行化，避免并发启动本地 OpenSSH fixture 时互相干扰。
+- [ ] 分别验证 Tauri 和 Electron 的完整质量门禁与开发启动。
+- [ ] 清理剩余历史文档的旧 `apps/desktop` 路径，或明确标记为历史快照。
+- [x] 定义跨端功能节奏：新功能默认只进指定 runtime；双端需求在两个 app 分别实现并用 `packages/*` 稳定契约校验。
+
+## 运行命令
+
+```bash
+npm run dev:tauri
+npm run dev:electron
+npm run build:tauri
+npm run build:electron
+npm run test:tauri
+npm run test:electron
+```
+
+## 数据边界
+
+Tauri 与 Electron 不共享可写 userData。迁移/比较数据通过导入导出或后续专门
+的同步协议完成，避免 JSON repository、secret 文件和 transfer journal 并发写入。
