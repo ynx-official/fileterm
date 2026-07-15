@@ -12,6 +12,8 @@ const zhCN = {
   exitWorkspaceFocusMode: '缩小工作区',
   noConnection: '暂时无连接',
   noConnectionDescription: '打开一个连接后，这里会显示主机状态、资源占用和网络监控。',
+  loadingSystemInfo: '正在获取系统信息',
+  loadingSystemInfoDescription: '连接正常，正在读取主机状态、硬件和文件系统数据…',
   remoteDisconnected: '远程连接已断开',
   remoteDisconnectedDescription: '当前会话已断开，远程文件和系统信息已停止刷新，请先重连。',
   remoteSessionDisconnectedAction: '会话已断开，请先重连。',
@@ -499,6 +501,8 @@ const enUS: typeof zhCN = {
   exitWorkspaceFocusMode: 'Shrink workspace',
   noConnection: 'No Connection',
   noConnectionDescription: 'Open a connection to see host status, resource usage, and network monitoring here.',
+  loadingSystemInfo: 'Loading system information',
+  loadingSystemInfoDescription: 'Connected. Reading host status, hardware, and filesystem data…',
   remoteDisconnected: 'Remote connection closed',
   remoteDisconnectedDescription:
     'This session is disconnected. Remote files and system info have stopped updating. Reconnect first.',

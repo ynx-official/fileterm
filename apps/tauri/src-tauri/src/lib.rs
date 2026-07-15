@@ -4,8 +4,8 @@ pub mod sessions;
 pub mod storage;
 
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder},
-    AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindow,
+    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
+    window::Color, AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder, WindowEvent, Wry,
 };
 use thiserror::Error;
@@ -373,13 +373,23 @@ fn window_url(input: &OpenWindowInput) -> WebviewUrl {
 pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), AppError> {
     let label = window_label(&input);
     if let Some(window) = app.get_webview_window(&label) {
-        window
-            .show()
-            .map_err(|error| AppError::Window(error.to_string()))?;
-        window
-            .set_focus()
-            .map_err(|error| AppError::Window(error.to_string()))?;
-        return Ok(());
+        // Match Electron's form lifecycle: opening a form always reloads it
+        // with the new mode/id URL. Focusing the existing WebviewWindow keeps
+        // its old query string, which made edit requests render the previous
+        // create form (or a different profile) instead.
+        if matches!(input.kind.as_str(), "connection-form" | "command-form") {
+            window
+                .destroy()
+                .map_err(|error| AppError::Window(error.to_string()))?;
+        } else {
+            window
+                .show()
+                .map_err(|error| AppError::Window(error.to_string()))?;
+            window
+                .set_focus()
+                .map_err(|error| AppError::Window(error.to_string()))?;
+            return Ok(());
+        }
     }
 
     let (title, width, height, min_width, min_height, decorations) = match input.kind.as_str() {
@@ -399,7 +409,12 @@ pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), 
         .min_inner_size(min_width, min_height)
         .center()
         .decorations(decorations)
-        .transparent(!decorations)
+        // Match Electron's `show: false` + `ready-to-show` lifecycle. Wry
+        // otherwise shows a transparent native frame before React and the
+        // theme bootstrap have painted, which flashes twice on Windows.
+        .transparent(false)
+        .background_color(Color(21, 21, 21, 255))
+        .visible(false)
         .build()
         .map_err(|error| AppError::Window(error.to_string()))?;
     if input.kind == "file-editor" {
@@ -506,6 +521,28 @@ pub fn run() {
                 .build()
                 .map_err(|error| error.to_string())?;
 
+            // WebKit routes the standard Cmd/Ctrl editing accelerators through
+            // native predefined items. Electron gets these from its Edit menu;
+            // without the equivalent Tauri menu, inputs in standalone child
+            // windows ignore Cmd+A/C/V even though their DOM handlers are fine.
+            let edit_undo = PredefinedMenuItem::undo(app, None).map_err(|error| error.to_string())?;
+            let edit_redo = PredefinedMenuItem::redo(app, None).map_err(|error| error.to_string())?;
+            let edit_cut = PredefinedMenuItem::cut(app, None).map_err(|error| error.to_string())?;
+            let edit_copy = PredefinedMenuItem::copy(app, None).map_err(|error| error.to_string())?;
+            let edit_paste = PredefinedMenuItem::paste(app, None).map_err(|error| error.to_string())?;
+            let edit_select_all = PredefinedMenuItem::select_all(app, None).map_err(|error| error.to_string())?;
+            let edit_submenu = SubmenuBuilder::new(app, "编辑")
+                .item(&edit_undo)
+                .item(&edit_redo)
+                .separator()
+                .item(&edit_cut)
+                .item(&edit_copy)
+                .item(&edit_paste)
+                .separator()
+                .item(&edit_select_all)
+                .build()
+                .map_err(|error| error.to_string())?;
+
             let window_minimize_menu = MenuItemBuilder::with_id("window-minimize", "最小化")
                 .build(app)
                 .map_err(|error| error.to_string())?;
@@ -522,6 +559,7 @@ pub fn run() {
 
             let menu = MenuBuilder::new(app)
                 .item(&file_submenu)
+                .item(&edit_submenu)
                 .item(&window_submenu)
                 .build()
                 .map_err(|error| error.to_string())?;

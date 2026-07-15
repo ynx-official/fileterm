@@ -5,6 +5,9 @@
 
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use crate::services::profile_ops;
 use crate::services::workspace::ConnectionImportPlanEntry;
@@ -43,6 +46,29 @@ fn safe_string(value: Option<&Value>) -> String {
         .to_string()
 }
 
+fn normalize_host(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') { trimmed[1..trimmed.len() - 1].trim().to_string() } else { trimmed.to_string() }
+}
+
+fn valid_host(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let host = normalize_host(raw);
+    if host.is_empty() || trimmed.contains(|c: char| c.is_whitespace() || matches!(c, '/' | '@' | '?' | '#' | '\\')) || trimmed.contains("://") || (trimmed.starts_with('[') != trimmed.ends_with(']')) || host.contains(|c| matches!(c, '(' | ')' | '[' | ']' | '{' | '}')) { return None; }
+    if host.contains(':') {
+        let (address, zone) = host.split_once('%').unwrap_or((&host, ""));
+        if Ipv6Addr::from_str(address).is_err() || (!zone.is_empty() && (host.matches('%').count() != 1 || !zone.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')))) { return None; }
+    } else if host.chars().all(|c| c.is_ascii_digit() || c == '.') && Ipv4Addr::from_str(&host).is_err() { return None; }
+    Some(host)
+}
+
+fn expand_home(value: Option<&Value>) -> Option<Value> {
+    let path = value?.as_str()?;
+    let relative = path.strip_prefix("~/")?;
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).ok()?;
+    Some(Value::String(Path::new(&home).join(relative).to_string_lossy().into_owned()))
+}
+
 fn map_auth(value: Option<&Value>) -> &'static str {
     let value = value
         .and_then(Value::as_str)
@@ -76,12 +102,12 @@ fn normalize_external_profile(raw: &Value, fallback_name: &str) -> Result<Value,
     } else {
         name
     };
-    let host = safe_string(source.get("host"));
+    let host = normalize_host(&safe_string(source.get("host")));
     let port = source
         .get("port")
         .and_then(Value::as_u64)
         .unwrap_or_else(|| default_port(&kind));
-    if kind != "serial" && (host.is_empty() || !(1..=65535).contains(&port)) {
+    if kind != "serial" && (valid_host(&host).is_none() || !(1..=65535).contains(&port)) {
         return Err("缺少有效 Host 或 Port".to_string());
     }
     if kind == "serial" && safe_string(source.get("devicePath")).is_empty() {
@@ -142,18 +168,16 @@ fn normalize_external_profile(raw: &Value, fallback_name: &str) -> Result<Value,
             .entry("encoding".to_string())
             .or_insert_with(|| value.clone());
     }
+    if let Some(private_key_path) = expand_home(source.get("private_key_path").or_else(|| source.get("privateKeyPath"))) {
+        object.insert("privateKeyPath".to_string(), private_key_path);
+    }
     Ok(profile)
 }
 
-fn fingerprint(profile: &Value) -> Option<(String, String, String, u64, String)> {
+fn fingerprint(profile: &Value) -> Option<(String, String, u64, String)> {
     Some((
         profile.get("type")?.as_str()?.to_ascii_lowercase(),
-        profile.get("name")?.as_str()?.to_string(),
-        profile
-            .get("host")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        profile.get("host").and_then(Value::as_str).map(normalize_host).unwrap_or_default().to_ascii_lowercase(),
         profile
             .get("port")
             .and_then(Value::as_u64)
@@ -161,8 +185,7 @@ fn fingerprint(profile: &Value) -> Option<(String, String, String, u64, String)>
         profile
             .get("username")
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+            .unwrap_or_default().trim().to_ascii_lowercase(),
     ))
 }
 
@@ -216,7 +239,7 @@ fn parse_ssh_config(
                 continue;
             }
             let mut block = std::collections::HashMap::new();
-            block.insert("hostAlias".to_string(), value.to_string());
+            block.insert("hostalias".to_string(), value.to_string());
             current = Some(block);
         } else if let Some(block) = current.as_mut() {
             block.insert(key, value.to_string());
@@ -228,10 +251,11 @@ fn parse_ssh_config(
     blocks
         .into_iter()
         .map(|block| {
-            let alias = block.get("hostAlias").cloned().unwrap_or_else(|| "SSH".to_string());
-            let host = block.get("hostname").cloned().unwrap_or_default();
+            let alias = block.get("hostalias").cloned().unwrap_or_else(|| "SSH".to_string());
+            let host = normalize_host(&block.get("hostname").cloned().unwrap_or_default());
             let port = block.get("port").and_then(|value| value.parse::<u64>().ok()).unwrap_or(22);
-            let item = if host.is_empty() || !(1..=65535).contains(&port) {
+            let unsupported_fields = block.keys().filter(|key| !matches!(key.as_str(), "hostalias" | "host" | "hostname" | "user" | "port" | "identityfile" | "proxyjump")).cloned().collect::<Vec<_>>();
+            let item = if valid_host(&host).is_none() || !(1..=65535).contains(&port) {
                 serde_json::json!({
                     "id": format!("import-item-{}", uuid::Uuid::new_v4()),
                     "sourceLabel": source_label,
@@ -250,8 +274,8 @@ fn parse_ssh_config(
                     "enableExecChannel": true, "enableResourceMonitoring": true,
                 });
                 let mut preview = preview(&input, source_label, existing);
-                if block.contains_key("proxyjump") {
-                    preview["unsupportedFields"] = serde_json::json!(["proxyjump"]);
+                if !unsupported_fields.is_empty() {
+                    preview["unsupportedFields"] = serde_json::json!(unsupported_fields);
                 }
                 return ConnectionImportPlanEntry { preview, input: Some(input) };
             };
@@ -305,8 +329,8 @@ pub async fn create_import_plan(
     text: &str,
     source_label: &str,
 ) -> Result<Value, AppError> {
-    if text.len() > 5 * 1024 * 1024 {
-        return Err(command_error("导入文件超过 5 MB 限制"));
+    if text.len() > 2 * 1024 * 1024 {
+        return Err(command_error("导入文件超过 2 MB 限制"));
     }
     let (existing, _) = profile_ops::read_and_heal_profiles(app)?;
     let trimmed = text.trim_start();
@@ -325,6 +349,36 @@ pub async fn create_import_plan(
         .write()
         .await
         .insert(plan_id.clone(), entries);
+    Ok(serde_json::json!({ "id": plan_id, "items": items }))
+}
+
+fn supported_import_file(path: &Path) -> bool {
+    matches!(path.extension().and_then(|extension| extension.to_str()).map(|extension| extension.to_ascii_lowercase()).as_deref(), Some("json" | "config" | "txt")) || path.file_name().and_then(|name| name.to_str()) == Some("config")
+}
+
+fn collect_import_files(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    if files.len() >= 500 { return Ok(()); }
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.is_file() { if supported_import_file(path) { files.push(path.to_path_buf()); } return Ok(()); }
+    if metadata.is_dir() { for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? { let entry = entry.map_err(|error| error.to_string())?; if !entry.file_name().to_string_lossy().starts_with('.') { collect_import_files(&entry.path(), files)?; } if files.len() >= 500 { break; } } }
+    Ok(())
+}
+
+pub async fn create_import_plan_from_paths(app: &AppHandle, paths: Vec<PathBuf>) -> Result<Value, AppError> {
+    let files = tokio::task::spawn_blocking(move || { let mut files = Vec::new(); for path in paths { collect_import_files(&path, &mut files)?; } Ok::<_, String>(files) }).await.map_err(|error| command_error(error.to_string()))?.map_err(command_error)?;
+    let (existing, _) = profile_ops::read_and_heal_profiles(app)?;
+    let mut entries = Vec::new();
+    for path in files {
+        let source_label = path.file_name().and_then(|name| name.to_str()).unwrap_or("连接文件").to_string();
+        match tokio::fs::metadata(&path).await {
+            Ok(metadata) if metadata.len() > 2 * 1024 * 1024 => entries.push(ConnectionImportPlanEntry { preview: serde_json::json!({"id": format!("import-item-{}", uuid::Uuid::new_v4()), "sourceLabel": source_label, "name": path.file_name().and_then(|name| name.to_str()).unwrap_or("连接文件"), "type": "ssh", "status": "invalid", "reason": "导入文件超过 2 MB 限制"}), input: None }),
+            Ok(_) => match tokio::fs::read_to_string(&path).await { Ok(text) => { let parsed = if path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("json")) { parse_json(&text, &source_label, &existing) } else { Ok(parse_ssh_config(&text, &source_label, &existing)) }; entries.extend(parsed?); }, Err(error) => entries.push(ConnectionImportPlanEntry { preview: serde_json::json!({"id": format!("import-item-{}", uuid::Uuid::new_v4()), "sourceLabel": source_label, "name": path.file_name().and_then(|name| name.to_str()).unwrap_or("连接文件"), "type": "ssh", "status": "invalid", "reason": error.to_string()}), input: None }) },
+            Err(error) => entries.push(ConnectionImportPlanEntry { preview: serde_json::json!({"id": format!("import-item-{}", uuid::Uuid::new_v4()), "sourceLabel": source_label, "name": path.file_name().and_then(|name| name.to_str()).unwrap_or("连接文件"), "type": "ssh", "status": "invalid", "reason": error.to_string()}), input: None }),
+        }
+    }
+    let plan_id = format!("connection-import-{}", uuid::Uuid::new_v4());
+    let items = entries.iter().map(|entry| entry.preview.clone()).collect::<Vec<_>>();
+    app.state::<crate::services::workspace::WorkspaceState>().connection_import_plans.write().await.insert(plan_id.clone(), entries);
     Ok(serde_json::json!({ "id": plan_id, "items": items }))
 }
 
@@ -447,28 +501,23 @@ pub fn export_bundle(app: &AppHandle, format: &str) -> Result<Vec<u8>, AppError>
     serde_json::to_vec_pretty(&payload).map_err(|error| AppError::Serialization(error.to_string()))
 }
 
-pub fn export_filename(name: &str, fallback: &str) -> String {
-    let clean = name
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if clean.trim_matches('_').is_empty() {
-        fallback.to_string()
-    } else {
-        clean
-    }
+pub fn export_filename(name: &str, id: &str, used_names: &mut std::collections::HashSet<String>) -> String {
+    let mut normalized = name.chars().map(|character| if matches!(character, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0'..='\u{1f}') { '-' } else { character }).collect::<String>();
+    normalized = normalized.trim().trim_end_matches(['.', ' ']).chars().take(100).collect();
+    if normalized.is_empty() { normalized = "connection".to_string(); }
+    let reserved = matches!(normalized.to_ascii_lowercase().as_str(), "con" | "prn" | "aux" | "nul") || (normalized.len() == 4 && (normalized[..3].eq_ignore_ascii_case("com") || normalized[..3].eq_ignore_ascii_case("lpt")) && matches!(normalized.as_bytes()[3], b'1'..=b'9'));
+    let stem = if reserved { format!("connection-{normalized}") } else { normalized };
+    let mut candidate = stem.clone(); let mut counter = 2;
+    while used_names.contains(&candidate.to_ascii_lowercase()) { candidate = format!("{stem}-{}", counter); counter += 1; }
+    used_names.insert(candidate.to_ascii_lowercase());
+    format!("{}-{}", candidate, &id[..id.len().min(8)])
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_external_profile, parse_ssh_config};
+    use super::{export_filename, fingerprint, normalize_external_profile, parse_ssh_config};
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn parses_ssh_config_and_skips_wildcards() {
@@ -487,5 +536,21 @@ mod tests {
         assert_eq!(profile["type"], "ssh");
         assert_eq!(profile["username"], "ops");
         assert_eq!(profile["authType"], "privateKey");
+    }
+
+    #[test]
+    fn normalizes_hosts_and_detects_endpoint_conflicts() {
+        let profile = normalize_external_profile(&json!({"name":"ipv6","host":" [2001:db8::1] ","port":22}), "fallback").unwrap();
+        assert_eq!(profile["host"], "2001:db8::1");
+        assert!(normalize_external_profile(&json!({"name":"bad","host":"ssh://host","port":22}), "fallback").is_err());
+        assert_eq!(fingerprint(&json!({"type":"ssh","name":"old","host":"Example.test","port":22,"username":"OPS"})), fingerprint(&json!({"type":"ssh","name":"new","host":"example.test","port":22,"username":"ops"})));
+    }
+
+    #[test]
+    fn creates_unique_cross_platform_export_names() {
+        let mut used = HashSet::new();
+        assert_eq!(export_filename("CON", "abcdefgh", &mut used), "connection-CON-abcdefgh");
+        assert_eq!(export_filename("same", "12345678", &mut used), "same-12345678");
+        assert_eq!(export_filename("same", "87654321", &mut used), "same-2-87654321");
     }
 }

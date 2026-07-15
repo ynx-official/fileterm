@@ -169,7 +169,7 @@ export function WorkspaceStage({
   onDeleteConnectionFolder(folderId: string): void
   onUpdateConnectionFolder(folderId: string, updates: Partial<ConnectionFolder>): void
   onUpdateConnectionOrder(id: string, newParentId: string | undefined, newOrder: number): void
-  onImportConnections(): void
+  onImportConnections(source?: 'files' | 'folder'): void
   onExportConnections(): void
   onCreateCommand(input: CommandTemplateInput): void
   onUpdateCommand(commandId: string, input: CommandTemplateInput): void
@@ -188,7 +188,13 @@ export function WorkspaceStage({
   onResizeStart(): void
 }) {
   if (activeLocalTab?.kind === 'system') {
-    return <SystemInfoWorkspace activeProfile={activeProfile} activeSession={activeSession} />
+    return (
+      <SystemInfoWorkspace
+        activeProfile={activeProfile}
+        activeSession={activeSession}
+        connectionStatus={activeTab?.status ?? null}
+      />
+    )
   }
 
   if (activeTab && activeSession && !activeLocalTab) {

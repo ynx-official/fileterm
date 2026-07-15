@@ -5,8 +5,12 @@
 // below are pure functions and unchanged from the ssh2 era.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::time::Duration;
 
+use base64::Engine;
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use russh::client::{Handle, Handler};
 use russh::ChannelMsg;
 use tokio::time::timeout;
@@ -929,13 +933,21 @@ if [ -z "$swap_bytes" ]; then
   }}')
 fi
 swap=$(printf "%s" "$swap_bytes" | awk -F'|' 'NF >= 4 {{printf "%d|%d|%d", $1/1024/1024, $2/1024/1024, $4}}')
-cpu_info=$(awk -F: '
+logical_cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null)
+case "$logical_cpu_count" in
+  ''|*[!0-9]*|0) logical_cpu_count=$(nproc 2>/dev/null) ;;
+esac
+case "$logical_cpu_count" in
+  ''|*[!0-9]*|0) logical_cpu_count=$(awk '/^processor[[:space:]]*:/ {{ count++ }} END {{ print count + 0 }}' /proc/cpuinfo 2>/dev/null) ;;
+esac
+cpu_info=$(awk -F: -v logical_cpu_count="$logical_cpu_count" '
   /^model name[[:space:]]*:/ || /^Hardware[[:space:]]*:/ || /^Processor[[:space:]]*:/ {{
     current=$2
     sub(/^[[:space:]]+/, "", current)
     if (current != "") {{
       model_order[++model_count]=current
-      seen[current]=1
+      model_occurrences[current]++
+      if (!seen[current]++) unique_model_count++
     }}
   }}
   /^cpu cores[[:space:]]*:/ {{
@@ -959,11 +971,14 @@ cpu_info=$(awk -F: '
     if (bogomips[current] == "") bogomips[current]=value
   }}
   END {{
-    for (index = 1; index <= model_count; index++) {{
-      model=model_order[index]
+    for (row_index = 1; row_index <= model_count; row_index++) {{
+      model=model_order[row_index]
       if (printed[model]) continue
       printed[model]=1
-      printf "%s|%s|%s|%s|%s\n", model, (cores[model] == "" ? "0" : cores[model]), (mhz[model] == "" ? "-" : mhz[model]), (cache[model] == "" ? "-" : cache[model]), (bogomips[model] == "" ? "-" : bogomips[model])
+      resolved_cores=model_occurrences[model] + 0
+      if (unique_model_count == 1 && logical_cpu_count + 0 > resolved_cores) resolved_cores=logical_cpu_count + 0
+      if (resolved_cores == 0 && cores[model] != "") resolved_cores=cores[model] + 0
+      printf "%s|%s|%s|%s|%s\n", model, resolved_cores, (mhz[model] == "" ? "-" : mhz[model]), (cache[model] == "" ? "-" : cache[model]), (bogomips[model] == "" ? "-" : bogomips[model])
     }}
   }}
 ' /proc/cpuinfo 2>/dev/null)
@@ -1117,6 +1132,15 @@ function Write-Metric([string]$Name, [object]$Value) {
     Write-Output ('__' + $Name + '__' + [string]$Value)
 }
 
+function Format-FileTermBytes([double]$Bytes) {
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    if ($Bytes -ge 1TB) { return [string]::Format($culture, '{0:0.0} TB', $Bytes / 1TB) }
+    if ($Bytes -ge 1GB) { return [string]::Format($culture, '{0:0.0} GB', $Bytes / 1GB) }
+    if ($Bytes -ge 1MB) { return [string]::Format($culture, '{0:0.0} MB', $Bytes / 1MB) }
+    if ($Bytes -ge 1KB) { return [string]::Format($culture, '{0:0.0} KB', $Bytes / 1KB) }
+    return [string]::Format($culture, '{0:0} B', $Bytes)
+}
+
 $os = Get-CimInstance Win32_OperatingSystem
 $cs = Get-CimInstance Win32_ComputerSystem
 $cpu = Get-CimInstance Win32_Processor
@@ -1134,20 +1158,50 @@ $swapPct   = if ($swapTotal -gt 0) { [Math]::Round($swapUsed * 100 / $swapTotal)
 $cpu1 = (Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 0.3).CounterSamples
 Start-Sleep -Milliseconds 500
 $cpuPct = if ($cpu1) { [Math]::Round($cpu1.CookedValue) } else { 0 }
+$logicalProcessorCount = [Math]::Max(1, [Environment]::ProcessorCount)
+$systemLoad = [string]::Format(
+    [Globalization.CultureInfo]::InvariantCulture,
+    '{0:0.00}',
+    ($cpuPct * $logicalProcessorCount) / 100
+)
 
 $hostname = $env:COMPUTERNAME
 $ip = ''
-$net = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1
-if ($net) { $ip = $net.IPv4Address.IPAddress }
+$sshConnectionParts = @(([string]$env:SSH_CONNECTION).Trim() -split '\s+')
+if ($sshConnectionParts.Count -ge 4) { $ip = [string]$sshConnectionParts[2] }
+if (-not $ip) {
+    $net = Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.IPv4DefaultGateway -ne $null } | Select-Object -First 1
+    if ($net) { $ip = $net.IPv4Address.IPAddress }
+}
 
 $uptimeSec = 0
 if ($os.LastBootUpTime) {
     $uptimeSec = [int]((Get-Date) - $os.LastBootUpTime).TotalSeconds
 }
 
-$cpuModel = ($cpu | Select-Object -First 1).Name
 $cpuCores = ($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum
 if (-not $cpuCores) { $cpuCores = 0 }
+$cpuRows = @()
+foreach ($processor in @($cpu)) {
+    $cpuModel = ([string]$processor.Name).Trim()
+    $cpuFrequency = if ([double]$processor.MaxClockSpeed -gt 0) { [string][int]$processor.MaxClockSpeed } else { '-' }
+    $cacheParts = @()
+    if ([double]$processor.L2CacheSize -gt 0) { $cacheParts += ('L2 ' + (Format-FileTermBytes ([double]$processor.L2CacheSize * 1KB))) }
+    if ([double]$processor.L3CacheSize -gt 0) { $cacheParts += ('L3 ' + (Format-FileTermBytes ([double]$processor.L3CacheSize * 1KB))) }
+    $cpuCache = if ($cacheParts.Count -gt 0) { $cacheParts -join ' / ' } else { '-' }
+    $cpuRows += ('{0}|{1}|{2}|{3}|-' -f $cpuModel, $cpuCores, $cpuFrequency, $cpuCache)
+}
+if ($cpuRows.Count -eq 0) { $cpuRows += ('-|{0}|-|-|-' -f $cpuCores) }
+
+$gpuRows = @()
+foreach ($adapter in @(Get-CimInstance Win32_VideoController)) {
+    $gpuName = ([string]$adapter.Name).Trim()
+    if (-not $gpuName) { continue }
+    $gpuVendor = ([string]$adapter.AdapterCompatibility).Trim()
+    $gpuDriver = ([string]$adapter.DriverVersion).Trim()
+    $gpuMemory = if ([double]$adapter.AdapterRAM -gt 0) { Format-FileTermBytes ([double]$adapter.AdapterRAM) } else { '-' }
+    $gpuRows += ('{0}|{1}|{2}|{3}' -f $gpuName, $gpuVendor, $gpuDriver, $gpuMemory)
+}
 
 $disks = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3'
 $diskLines = @()
@@ -1157,10 +1211,11 @@ foreach ($d in $disks) {
     $free = [double]$d.FreeSpace
     $used = $size - $free
     $pct  = if ($size -gt 0) { [Math]::Round($used * 100 / $size) } else { 0 }
-    $sizeStr = if ($size -ge 1GB) { ('{0:N1} GB' -f ($size / 1GB)) } elseif ($size -ge 1MB) { ('{0:N1} MB' -f ($size / 1MB)) } else { ('{0:N0} KB' -f ($size / 1KB)) }
-    $usedStr = if ($used -ge 1GB) { ('{0:N1} GB' -f ($used / 1GB)) } elseif ($used -ge 1MB) { ('{0:N1} MB' -f ($used / 1MB)) } else { ('{0:N0} KB' -f ($used / 1KB)) }
+    $sizeStr = Format-FileTermBytes $size
+    $usedStr = Format-FileTermBytes $used
+    $freeStr = Format-FileTermBytes $free
     $diskLines += ('{0}|{1}/{2}' -f $d.DeviceID, $usedStr, $sizeStr)
-    $fsLines   += ('{0}|{1:N0} KB|{2:N0} KB|{3}|{4:N0} KB|{5}' -f $d.DeviceID, $size / 1KB, $used / 1KB, $pct, $free / 1KB, $d.DeviceID)
+    $fsLines   += ('{0}|{1}|{2}|{3}%|{4}|{5}' -f $d.DeviceID, $sizeStr, $usedStr, $pct, $freeStr, $d.DeviceID)
 }
 
 $procs = Get-Process | Sort-Object -Property WS -Descending | Select-Object -First 20
@@ -1204,7 +1259,8 @@ Write-Output ('__HOSTNAME__' + $hostname)
 Write-Output ('__IP__' + $ip)
 Write-Output '__UPTIME__'
 Write-Output ('__UPTIME_SECONDS__' + $uptimeSec)
-Write-Output '__LOAD__-'
+Write-Output ('__LOAD__' + $systemLoad)
+Write-Output '__LOAD_UNIT__busy-logical-processors'
 Write-Output ('__CPU__' + $cpuPct)
 Write-Output ('__CPU_USAGE__{0}|{1}|0|{2}|0|0|0|0' -f $cpuPct, $cpuPct, [Math]::Max(0, 100 - $cpuPct))
 Write-Output ('__MEM__{0}|{1}|{2}|0|0|0' -f [Math]::Round($memUsed / 1MB), [Math]::Round($memTotal / 1MB), $memPct)
@@ -1212,9 +1268,10 @@ Write-Output ('__MEM_BYTES__{0}|{1}|{2}|{3}|0|0|0' -f $memUsed, $memTotal, $memF
 Write-Output ('__SWAP__{0}|{1}|{2}' -f [Math]::Round($swapUsed / 1MB), [Math]::Round($swapTotal / 1MB), $swapPct)
 Write-Output ('__SWAP_BYTES__{0}|{1}|{2}|{3}' -f $swapUsed, $swapTotal, $swapFree, $swapPct)
 Write-Output '__CPUINFO_START__'
-Write-Output ('{0}|{1}|-|-|-' -f $cpuModel, $cpuCores)
+$cpuRows | ForEach-Object { Write-Output $_ }
 Write-Output '__CPUINFO_END__'
 Write-Output '__GPUINFO_START__'
+$gpuRows | ForEach-Object { Write-Output $_ }
 Write-Output '__GPUINFO_END__'
 Write-Output ('__IFACES__' + $ifaces)
 Write-Output '__ACTIVE_IFACE__all'
@@ -1235,9 +1292,170 @@ Write-Output '__FILETERM_METRICS_COMPLETE__'
 "#.to_string()
 }
 
+/// Builds a long-lived Windows collector. The first block is the full system
+/// snapshot; later blocks reuse cached static data and warm performance
+/// counters so CPU/memory/network samples are emitted on a fixed one-second
+/// clock without paying PowerShell/CIM startup cost on every refresh.
+pub fn build_windows_streaming_metrics_command() -> String {
+    let mut script = build_windows_metrics_command();
+    script.push_str(
+        r#"
+$cpuCounter = $null
+$memoryAvailableCounter = $null
+try {
+    $cpuCounter = New-Object Diagnostics.PerformanceCounter('Processor', '% Processor Time', '_Total')
+    $memoryAvailableCounter = New-Object Diagnostics.PerformanceCounter('Memory', 'Available Bytes')
+    $null = $cpuCounter.NextValue()
+    $null = $memoryAvailableCounter.NextValue()
+} catch {}
+
+$previousNetworkStats = @{}
+foreach ($item in @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue)) {
+    $previousNetworkStats[[string]$item.Name] = @{
+        rx = [double]$item.ReceivedBytes
+        tx = [double]$item.SentBytes
+    }
+}
+$sampleClock = [Diagnostics.Stopwatch]::StartNew()
+$previousNetworkSampleMs = [double]$sampleClock.ElapsedMilliseconds
+$nextEmitMs = [double]$sampleClock.ElapsedMilliseconds + 1000
+Write-Output '__FILETERM_METRICS_BLOCK__'
+
+while ($true) {
+    if ($cpuCounter) {
+        try { $cpuPct = [Math]::Round($cpuCounter.NextValue()) } catch {}
+    }
+    if ($memoryAvailableCounter) {
+        try { $memFree = [double]$memoryAvailableCounter.NextValue() } catch {}
+    }
+    $cpuPct = [Math]::Max(0, [Math]::Min(100, [double]$cpuPct))
+    $memUsed = [Math]::Max(0, $memTotal - $memFree)
+    $memPct = if ($memTotal -gt 0) { [Math]::Round($memUsed * 100 / $memTotal) } else { 0 }
+    $systemLoad = [string]::Format(
+        [Globalization.CultureInfo]::InvariantCulture,
+        '{0:0.00}',
+        ($cpuPct * $logicalProcessorCount) / 100
+    )
+    if ($os.LastBootUpTime) {
+        $uptimeSec = [int]((Get-Date) - $os.LastBootUpTime).TotalSeconds
+    }
+
+    $networkNowMs = [double]$sampleClock.ElapsedMilliseconds
+    $networkElapsedSeconds = [Math]::Max(0.001, ($networkNowMs - $previousNetworkSampleMs) / 1000)
+    $previousNetworkSampleMs = $networkNowMs
+    $rxRate = 0
+    $txRate = 0
+    $ifRates = @()
+    $currentNetworkStats = @(Get-NetAdapterStatistics -ErrorAction SilentlyContinue)
+    foreach ($item in $currentNetworkStats) {
+        $name = [string]$item.Name
+        $rxTotal = [double]$item.ReceivedBytes
+        $txTotal = [double]$item.SentBytes
+        $previous = $previousNetworkStats[$name]
+        $itemRxRate = 0
+        $itemTxRate = 0
+        if ($previous) {
+            $itemRxRate = [Math]::Max(0, ($rxTotal - [double]$previous.rx) / $networkElapsedSeconds)
+            $itemTxRate = [Math]::Max(0, ($txTotal - [double]$previous.tx) / $networkElapsedSeconds)
+        }
+        $previousNetworkStats[$name] = @{ rx = $rxTotal; tx = $txTotal }
+        $rxRate += $itemRxRate
+        $txRate += $itemTxRate
+        $ifRates += ('{0}|{1}|{2}|{3}|{4}' -f $name, $rxTotal, $txTotal, [Math]::Round($itemRxRate), [Math]::Round($itemTxRate))
+    }
+
+    $procLines = @()
+    Get-Process -ErrorAction SilentlyContinue |
+        Sort-Object -Property WorkingSet64 -Descending |
+        Select-Object -First 20 |
+        ForEach-Object {
+            $memMB = [Math]::Round($_.WorkingSet64 / 1MB, 1)
+            $cpuTime = if ($_.CPU) { [Math]::Round($_.CPU, 1) } else { 0 }
+            $procLines += ('{0}M|{1}|0|{2}' -f $memMB, $cpuTime, $_.ProcessName)
+        }
+
+    $waitMs = [Math]::Round($nextEmitMs - [double]$sampleClock.ElapsedMilliseconds)
+    if ($waitMs -gt 0) { Start-Sleep -Milliseconds $waitMs }
+    $nextEmitMs += 1000
+    if ($nextEmitMs -le [double]$sampleClock.ElapsedMilliseconds) {
+        $nextEmitMs = [double]$sampleClock.ElapsedMilliseconds + 1000
+    }
+
+    Write-Output '__PLATFORM__windows'
+    Write-Output ('__OS__' + $os.Caption)
+    Write-Output '__KERNEL_NAME__Windows'
+    Write-Output ('__KERNEL_VERSION__' + $os.Version)
+    Write-Output ('__ARCH__' + $env:PROCESSOR_ARCHITECTURE)
+    Write-Output ('__HOSTNAME__' + $hostname)
+    Write-Output ('__IP__' + $ip)
+    Write-Output '__UPTIME__'
+    Write-Output ('__UPTIME_SECONDS__' + $uptimeSec)
+    Write-Output ('__LOAD__' + $systemLoad)
+    Write-Output '__LOAD_UNIT__busy-logical-processors'
+    Write-Output ('__CPU__' + $cpuPct)
+    Write-Output ('__CPU_USAGE__0|{0}|0|{1}|0|0|0|0' -f $cpuPct, [Math]::Max(0, 100 - $cpuPct))
+    Write-Output ('__MEM__{0}|{1}|{2}|0|0|0' -f [Math]::Round($memUsed / 1MB), [Math]::Round($memTotal / 1MB), $memPct)
+    Write-Output ('__MEM_BYTES__{0}|{1}|{2}|{3}|0|0|0' -f $memUsed, $memTotal, $memFree, $memPct)
+    Write-Output ('__SWAP__{0}|{1}|{2}' -f [Math]::Round($swapUsed / 1MB), [Math]::Round($swapTotal / 1MB), $swapPct)
+    Write-Output ('__SWAP_BYTES__{0}|{1}|{2}|{3}' -f $swapUsed, $swapTotal, $swapFree, $swapPct)
+    Write-Output '__CPUINFO_START__'
+    $cpuRows | ForEach-Object { Write-Output $_ }
+    Write-Output '__CPUINFO_END__'
+    Write-Output '__GPUINFO_START__'
+    $gpuRows | ForEach-Object { Write-Output $_ }
+    Write-Output '__GPUINFO_END__'
+    Write-Output ('__IFACES__' + $ifaces)
+    Write-Output '__ACTIVE_IFACE__all'
+    Write-Output ('__RATES__{0}|{1}' -f [Math]::Round($rxRate), [Math]::Round($txRate))
+    Write-Output '__IFACE_RATES_START__'
+    $ifRates | ForEach-Object { Write-Output $_ }
+    Write-Output '__IFACE_RATES_END__'
+    Write-Output '__DISK_START__'
+    $diskLines | ForEach-Object { Write-Output $_ }
+    Write-Output '__DISK_END__'
+    Write-Output '__FILESYSTEMS_START__'
+    $fsLines | ForEach-Object { Write-Output $_ }
+    Write-Output '__FILESYSTEMS_END__'
+    Write-Output '__PROCS_START__'
+    $procLines | ForEach-Object { Write-Output $_ }
+    Write-Output '__PROCS_END__'
+    Write-Output '__FILETERM_METRICS_BLOCK__'
+}
+"#,
+    );
+    script
+}
+
+pub fn build_windows_streaming_metrics_exec_command() -> Result<String, String> {
+    let script = build_windows_streaming_metrics_command();
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(script.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let compressed = encoder.finish().map_err(|error| error.to_string())?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(compressed);
+    let loader = format!(
+        "$b=[Convert]::FromBase64String('{encoded}');$m=New-Object IO.MemoryStream(,$b);$g=New-Object IO.Compression.GzipStream($m,[IO.Compression.CompressionMode]::Decompress);$r=New-Object IO.StreamReader($g,[Text.Encoding]::UTF8);& ([scriptblock]::Create($r.ReadToEnd()))"
+    );
+    let command = format!(
+        "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"{loader}\""
+    );
+    if command.len() >= 8000 {
+        return Err(format!(
+            "Windows streaming metrics command exceeds cmd.exe safe length: {}",
+            command.len()
+        ));
+    }
+    Ok(command)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{build_posix_metrics_command, parse_system_metrics};
+    use super::{
+        build_posix_metrics_command, build_windows_metrics_command,
+        build_windows_streaming_metrics_command, build_windows_streaming_metrics_exec_command,
+        parse_system_metrics,
+    };
 
     #[test]
     fn posix_metrics_command_emits_real_awk_line_breaks() {
@@ -1245,6 +1463,9 @@ mod tests {
 
         assert!(command.contains(r#"printf "%s|%sK/%sK\n"#));
         assert!(command.contains(r#"printf "%.1fM|%s|%s|%s\n"#));
+        assert!(command.contains("getconf _NPROCESSORS_ONLN"));
+        assert!(command.contains("for (row_index = 1; row_index <= model_count; row_index++)"));
+        assert!(!command.contains("for (index = 1; index <= model_count; index++)"));
         assert!(!command.contains(r#"printf "%s|%sK/%sK\\n"#));
         assert!(!command.contains(r#"printf "%.1fM|%s|%s|%s\\n"#));
     }
@@ -1259,5 +1480,57 @@ mod tests {
         assert_eq!(metrics["diskRows"].as_array().map(Vec::len), Some(2));
         assert_eq!(metrics["topProcesses"].as_array().map(Vec::len), Some(2));
         assert_eq!(metrics["topProcesses"][0]["command"], "sshd");
+    }
+
+    #[test]
+    fn windows_metrics_command_emits_electron_compatible_load() {
+        let command = build_windows_metrics_command();
+
+        assert!(command.contains("($cpuPct * $logicalProcessorCount) / 100"));
+        assert!(command.contains("Write-Output ('__LOAD__' + $systemLoad)"));
+        assert!(command.contains("Write-Output '__LOAD_UNIT__busy-logical-processors'"));
+        assert!(command.contains("Get-CimInstance Win32_VideoController"));
+        assert!(command.contains("$processor.L3CacheSize"));
+        assert!(command.contains("$fsLines   +="));
+
+        let metrics = parse_system_metrics(
+            "__PLATFORM__windows\n__LOAD__1.25\n__LOAD_UNIT__busy-logical-processors\n",
+            "windows",
+        );
+        assert_eq!(metrics["load"], "1.25");
+        assert_eq!(metrics["loadUnit"], "busy-logical-processors");
+    }
+
+    #[test]
+    fn parser_keeps_windows_static_hardware_and_filesystem_rows() {
+        let metrics = parse_system_metrics(
+            "__PLATFORM__windows\n__CPUINFO_START__\n12th Gen Intel(R) Core(TM) i7-12700H|20|2300|L2 11.5 MB / L3 24.0 MB|-\n__CPUINFO_END__\n__GPUINFO_START__\nNVIDIA GeForce RTX 3070 Laptop GPU|NVIDIA|32.0.16.1047|4.0 GB\n__GPUINFO_END__\n__FILESYSTEMS_START__\nC:|400.1 GB|345.6 GB|86%|54.5 GB|C:\n__FILESYSTEMS_END__\n",
+            "windows",
+        );
+
+        assert_eq!(metrics["cpuInfoRows"][0]["frequencyMHz"], "2300");
+        assert_eq!(
+            metrics["cpuInfoRows"][0]["cache"],
+            "L2 11.5 MB / L3 24.0 MB"
+        );
+        assert_eq!(metrics["gpuInfoRows"][0]["vendor"], "NVIDIA");
+        assert_eq!(metrics["gpuInfoRows"][0]["memory"], "4.0 GB");
+        assert_eq!(metrics["fileSystemRows"][0]["mountPoint"], "C:");
+        assert_eq!(metrics["fileSystemRows"][0]["usagePercent"], "86%");
+    }
+
+    #[test]
+    fn windows_streaming_metrics_reuses_warm_counters_on_a_fixed_clock() {
+        let command = build_windows_streaming_metrics_command();
+
+        assert!(command.contains("Diagnostics.PerformanceCounter('Processor'"));
+        assert!(command.contains("$nextEmitMs += 1000"));
+        assert!(command.contains("while ($true)"));
+        assert!(command.matches("__FILETERM_METRICS_BLOCK__").count() >= 2);
+        assert!(!command.contains("while ($true) {\n\n$ErrorActionPreference"));
+
+        let exec_command = build_windows_streaming_metrics_exec_command().unwrap();
+        assert!(exec_command.len() < 8000);
+        assert!(exec_command.contains("IO.Compression.GzipStream"));
     }
 }

@@ -77,6 +77,10 @@ export function registerAppHandlers(options: IpcWindowOptions) {
     BrowserWindow.fromWebContents(event.sender)?.minimize()
   })
 
+  ipcMain.handle('app:showCurrentWindow', (event) => {
+    BrowserWindow.fromWebContents(event.sender)?.show()
+  })
+
   ipcMain.handle('app:isCurrentWindowMaximized', (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     return win ? win.isMaximized() : false

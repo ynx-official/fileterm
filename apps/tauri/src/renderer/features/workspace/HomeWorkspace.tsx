@@ -62,7 +62,7 @@ export function HomeWorkspace({
   onDeleteConnectionFolder(folderId: string): void
   onUpdateConnectionFolder(folderId: string, updates: Partial<ConnectionFolder>): void
   onUpdateConnectionOrder(id: string, newParentId: string | undefined, newOrder: number): void
-  onImportConnections(): void
+  onImportConnections(source?: 'files' | 'folder'): void
   onExportConnections(): void
   onCreateCommand(input: CommandTemplateInput): void
   onUpdateCommand(commandId: string, input: CommandTemplateInput): void

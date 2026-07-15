@@ -31,6 +31,7 @@ encoding_rs = "0.8"
 rfd = "0.17"
 sha2 = "0.10"
 base64 = "0.22"
+flate2 = "1"
 tokio-socks = "0.5"
 tokio-serial = "5.5"
 suppaftp = { version = "10", default-features = false, features = ["tokio-async-native-tls", "deprecated"] }

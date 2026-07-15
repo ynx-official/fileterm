@@ -41,7 +41,7 @@ export function ConnectionManagerModal({
   standalone?: boolean
   inline?: boolean
   onActiveFolderChange?(name: string): void
-  onImportConnections?(): void
+  onImportConnections?(source?: 'files' | 'folder'): void
   onExportConnections?(): void
 }) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
@@ -655,17 +655,30 @@ export function ConnectionManagerModal({
           <div className={`connection-manager-floating-drawer ${isActionsExpanded ? 'expanded' : ''}`}>
             <div className="drawer-options-wrapper">
               {onImportConnections ? (
-                <button
-                  className="drawer-option-btn secondary-btn"
-                  type="button"
-                  onClick={() => {
-                    onImportConnections()
-                    setIsActionsExpanded(false)
-                  }}
-                >
-                  <span className="material-symbols-outlined">upload_file</span>
-                  <span>导入连接</span>
-                </button>
+                <>
+                  <button
+                    className="drawer-option-btn secondary-btn"
+                    type="button"
+                    onClick={() => {
+                      onImportConnections('files')
+                      setIsActionsExpanded(false)
+                    }}
+                  >
+                    <span className="material-symbols-outlined">upload_file</span>
+                    <span>导入连接</span>
+                  </button>
+                  <button
+                    className="drawer-option-btn secondary-btn"
+                    type="button"
+                    onClick={() => {
+                      onImportConnections('folder')
+                      setIsActionsExpanded(false)
+                    }}
+                  >
+                    <span className="material-symbols-outlined">folder_open</span>
+                    <span>导入文件夹</span>
+                  </button>
+                </>
               ) : null}
               {onExportConnections ? (
                 <button
