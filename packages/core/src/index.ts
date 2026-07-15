@@ -606,6 +606,12 @@ export interface ImportSshKeyInput {
   note?: string
 }
 
+export interface SshKeyFileSelection {
+  sourcePath: string
+  fileName: string
+  existingKey?: SshKeyMetadata
+}
+
 export interface SshKeyImportResult {
   key: SshKeyMetadata
   duplicate: boolean
@@ -687,13 +693,6 @@ export interface SshKeyboardInteractiveRequest {
   prompts: SshKeyboardInteractivePrompt[]
 }
 
-export type SshInteractionRequest =
-  SshHostVerificationRequest | SshCredentialsPromptRequest | SshKeyboardInteractiveRequest
-export type SshInteractionDraft =
-  | Omit<SshHostVerificationRequest, 'requestId' | 'tabId' | 'profileId'>
-  | Omit<SshCredentialsPromptRequest, 'requestId' | 'tabId' | 'profileId'>
-  | Omit<SshKeyboardInteractiveRequest, 'requestId' | 'tabId' | 'profileId'>
-
 export interface SshKeyPassphrasePromptRequest {
   requestId: string
   tabId: string
@@ -703,7 +702,6 @@ export interface SshKeyPassphrasePromptRequest {
   keyName: string
   reason: 'required' | 'invalid-saved'
 }
-
 
 export type SshInteractionRequest =
   | SshHostVerificationRequest
@@ -848,6 +846,7 @@ export interface FileTermDesktopApi {
   getSnapshot(): Promise<WorkspaceSnapshot>
   getConnectionLibrary(): Promise<ConnectionLibrarySnapshot>
   listSshKeys(): Promise<SshKeyMetadata[]>
+  selectSshKeyFile(): Promise<SshKeyFileSelection | null>
   importSshKey(input?: ImportSshKeyInput): Promise<SshKeyImportResult | null>
   updateSshKeyNote(keyId: string, note: string): Promise<SshKeyMetadata>
   deleteSshKey(keyId: string): Promise<void>

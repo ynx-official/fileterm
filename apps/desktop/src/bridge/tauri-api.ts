@@ -21,6 +21,10 @@ import type {
   TransferTask,
   SessionMetricsUpdate,
   SshInteractionRequest,
+  SshKeyFileSelection,
+  SshKeyImportResult,
+  SshKeyMetadata,
+  ImportSshKeyInput,
   LocalFileItem
 } from '@fileterm/core'
 
@@ -264,6 +268,12 @@ export function createTauriApi(): FileTermDesktopApi {
       invoke<{ profiles: WorkspaceSnapshot['profiles']; folders: WorkspaceSnapshot['folders'] }>(
         'app_get_connection_library'
       ),
+    listSshKeys: () => invoke<SshKeyMetadata[]>('app_list_ssh_keys'),
+    selectSshKeyFile: () => invoke<SshKeyFileSelection | null>('app_select_ssh_key_file'),
+    importSshKey: (input?: ImportSshKeyInput) => invoke<SshKeyImportResult | null>('app_import_ssh_key', { input }),
+    updateSshKeyNote: (keyId: string, note: string) =>
+      invoke<SshKeyMetadata>('app_update_ssh_key_note', { keyId, note }),
+    deleteSshKey: (keyId: string) => invoke<void>('app_delete_ssh_key', { keyId }),
     previewConnectionImport: () => invoke<ConnectionImportPlan | null>('app_preview_connection_import'),
     commitConnectionJsonImport: (planId: string, options: ConnectionImportOptions) =>
       invoke<ConnectionImportResult>('app_commit_connection_json_import', { planId, options }),
@@ -378,6 +388,7 @@ export function createTauriApi(): FileTermDesktopApi {
     onSessionMetrics: (listener: (payload: SessionMetricsUpdate) => void) =>
       subscribe('workspace:sessionMetrics', listener),
     onSshInteraction: (listener: (request: SshInteractionRequest) => void) => subscribe('ssh:interaction', listener),
+    onSshKeysChanged: (listener: (keys: SshKeyMetadata[]) => void) => subscribe('sshKeys:changed', listener),
     onWindowCloseRequest: (listener: (event: { isQuit: boolean }) => void) =>
       subscribe('app:window-close-request', listener),
     onRequestCloseActiveWorkspaceItem: (listener: () => void) =>

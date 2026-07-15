@@ -344,8 +344,7 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
         {
           resolveManagedKey: (keyId) => this.options.resolveSshKey(keyId),
           setManagedKeyPassphrase: (keyId, passphrase) => this.options.setSshKeyPassphrase(keyId, passphrase)
-        }
-        ,
+        },
         (profileId) => this.options.resolveProfile(profileId)
       )
       return sshController

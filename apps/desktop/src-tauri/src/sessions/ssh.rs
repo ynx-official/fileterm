@@ -1569,23 +1569,27 @@ async fn try_authenticate(
             })
         }
         "privateKey" => {
-            let private_key_path = profile
-                .get("privateKeyPath")
-                .and_then(|p| p.as_str())
-                .unwrap_or("");
-            let passphrase = profile.get("passphrase").and_then(|p| p.as_str());
-
-            let mut resolved = private_key_path.to_string();
-            if resolved.starts_with("~/") || resolved == "~" {
-                if let Ok(home) = app.path().home_dir() {
-                    let rest = if resolved == "~" { "" } else { &resolved[2..] };
-                    resolved = home.join(rest).to_string_lossy().into_owned();
+            let (key_content, passphrase) = if let Some(key_id) = profile.get("privateKeyId").and_then(|value| value.as_str()) {
+                resolve_managed_private_key(app, tab_id, &profile_id, key_id).await?
+            } else {
+                let private_key_path = profile
+                    .get("privateKeyPath")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("");
+                let mut resolved = private_key_path.to_string();
+                if resolved.starts_with("~/") || resolved == "~" {
+                    if let Ok(home) = app.path().home_dir() {
+                        let rest = if resolved == "~" { "" } else { &resolved[2..] };
+                        resolved = home.join(rest).to_string_lossy().into_owned();
+                    }
                 }
-            }
+                (
+                    std::fs::read_to_string(&resolved).map_err(|error| error.to_string())?,
+                    profile.get("passphrase").and_then(|value| value.as_str()).map(ToOwned::to_owned),
+                )
+            };
 
-            // Try to read the key from disk, then authenticate via memory key.
-            let key_content = std::fs::read_to_string(&resolved).map_err(|e| e.to_string())?;
-            let key_pair = russh::keys::decode_secret_key(&key_content, passphrase)
+            let key_pair = russh::keys::decode_secret_key(&key_content, passphrase.as_deref())
                 .map_err(|e| e.to_string())?;
             // Best-effort: pick the strongest RSA hash the server advertises.
             // For non-RSA keys, hash_alg is ignored by PrivateKeyWithHashAlg::new.
@@ -1650,6 +1654,90 @@ async fn try_authenticate(
             }
             Ok(AuthenticationResult::Rejected)
         }
+    }
+}
+
+async fn resolve_managed_private_key(
+    app: &AppHandle,
+    tab_id: &str,
+    profile_id: &str,
+    key_id: &str,
+) -> Result<(String, Option<String>), String> {
+    let managed = crate::services::ssh_keys::resolve(app, key_id).map_err(|error| error.to_string())?;
+    if !managed.key.encrypted {
+        return Ok((managed.private_key, None));
+    }
+
+    let mut reason = "required";
+    if let Some(saved) = managed.saved_passphrase {
+        if russh::keys::decode_secret_key(&managed.private_key, Some(&saved)).is_ok() {
+            return Ok((managed.private_key, Some(saved)));
+        }
+        crate::services::ssh_keys::set_passphrase(app, &managed.key.id, None)
+            .map_err(|error| error.to_string())?;
+        reason = "invalid-saved";
+    }
+
+    let response = request_key_passphrase(
+        app,
+        tab_id,
+        profile_id,
+        &managed.key.id,
+        &managed.key.name,
+        reason,
+    )
+    .await?
+    .ok_or_else(|| "SSH key passphrase request canceled".to_string())?;
+    if russh::keys::decode_secret_key(&managed.private_key, Some(&response.0)).is_err() {
+        return Err("私钥口令不正确。".to_string());
+    }
+    if response.1 {
+        crate::services::ssh_keys::set_passphrase(app, &managed.key.id, Some(response.0.clone()))
+            .map_err(|error| error.to_string())?;
+    }
+    Ok((managed.private_key, Some(response.0)))
+}
+
+async fn request_key_passphrase(
+    app: &AppHandle,
+    tab_id: &str,
+    profile_id: &str,
+    key_id: &str,
+    key_name: &str,
+    reason: &str,
+) -> Result<Option<(String, bool)>, String> {
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = oneshot::channel::<Value>();
+    {
+        let state = app.state::<crate::services::workspace::WorkspaceState>();
+        state.pending_interactions.write().await.insert(request_id.clone(), tx);
+    }
+    app.emit(
+        "ssh:interaction",
+        serde_json::json!({
+            "requestId": request_id,
+            "kind": "key-passphrase",
+            "tabId": tab_id,
+            "profileId": profile_id,
+            "keyId": key_id,
+            "keyName": key_name,
+            "reason": reason,
+        }),
+    )
+    .map_err(|error| error.to_string())?;
+    match rx.await {
+        Ok(response) if !response.get("canceled").and_then(|value| value.as_bool()).unwrap_or(false) => {
+            let passphrase = response
+                .get("passphrase")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            Ok(passphrase.map(|value| (
+                value,
+                response.get("savePassphrase").and_then(|item| item.as_bool()).unwrap_or(false),
+            )))
+        }
+        _ => Ok(None),
     }
 }
 

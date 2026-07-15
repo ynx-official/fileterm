@@ -1,6 +1,6 @@
 # Rust + Tauri 重构路线（单运行时）
 
-> 当前状态（2026-07-14）：Phase 0–4 实现已完成；macOS 的真实协议、生产打包和性能基线已通过，Windows/Linux socket 生命周期由 CI 矩阵验证。签名应用内 updater 和发行公证仍属于 Phase 5 外部发布前置。实际 Rust 工程路径为 `apps/desktop/src-tauri`；本计划中的早期目录示例已按实际仓库路径修正。
+> 当前状态（2026-07-15）：Phase 0–4 代码主体已完成；macOS 本机协议夹具、生产打包和性能基线已通过，Windows/Linux socket lifecycle 仍只有 workflow 配置，尚未取得归档结果。签名应用内 updater、三平台签名/公证、迁移工具和正式切换仍属于 Phase 5 外部发布前置。实际 Rust 工程路径为 `apps/desktop/src-tauri`；本计划中的早期目录示例已按实际仓库路径修正。
 
 ## 1. 目标与不可破坏的边界
 
@@ -67,7 +67,7 @@ apps/desktop/src-tauri/
 - [x] 实现平台信息、剪贴板、UI preferences/state。
 - [x] 建立 Rust command/event contract test；不再维护 Electron adapter。
 
-验收：现有 Electron 版本功能和测试全部通过，renderer 不再直接依赖 Electron 类型。
+验收：Tauri commands/contract test 与共享 renderer 接口一致；renderer 不再直接依赖 Electron 类型。历史 Electron 测试仅作为 parity 对照，不作为 Tauri 发行验收结论。
 
 ### Phase 1：Tauri 桌面壳垂直切片
 

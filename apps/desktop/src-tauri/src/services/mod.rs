@@ -1,4 +1,5 @@
 pub mod workspace;
+pub mod ssh_keys;
 pub mod profile_ops;
 pub mod transfers;
 pub mod webdav;

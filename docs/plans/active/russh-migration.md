@@ -1,10 +1,10 @@
 # russh 迁移评估与计划
 
-> 状态（2026-07-14）：russh 主链路、代理和 `-L/-R/-D` 隧道实现已完成；本文剩余内容只描述三平台构建和 Electron parity 的真实服务验收。
+> 状态（2026-07-15）：russh 主链路、代理和 `-L/-R/-D` 隧道实现已完成；本文剩余内容只描述三平台构建和历史 Electron 42.4.0 parity 的真实服务验收。
 
 ## 1. 背景
 
-Tauri 迁移 Phase 3 当前选用 `ssh2 = "0.9.6"`（libssh2 C 绑定 + vendored-openssl）。本文档评估是否切换到 `russh`（纯 Rust SSH 实现），并给出迁移路径。
+Tauri 迁移 Phase 3 曾以 `ssh2`（libssh2 C 绑定 + vendored-openssl）作为过渡方案；当前已完成到 `russh`（纯 Rust SSH 实现）的切换。本页保留选型依据、已完成迁移记录和剩余验收项。
 
 ## 2. 版本与安全状态（2026-07-13 核对 crates.io）
 
@@ -81,11 +81,11 @@ Tauri 迁移 Phase 3 当前选用 `ssh2 = "0.9.6"`（libssh2 C 绑定 + vendored
 - ⏳ SSH -D 动态转发（SOCKS5 server + async `channel_open_direct_tcpip`）
 - ⏳ `app_resolve_ssh_interaction` 真实异步接通（pending Map + oneshot channel 唤醒）
 
-### 阶段 C（当前）：russh 迁移后的功能收尾
+### 阶段 C（当前）：russh 迁移后的外部验收
 
-- russh 主链路稳定后，移除 ssh2 依赖。
-- 移除 `vendored-openssl` feature，简化 Windows 构建。
-- 评估 `russh-sftp` 2.3.0 在生产场景的边角 case 覆盖。
+- `russh 0.62.2` + `russh-sftp 2.3.0` 已在 Cargo.lock 锁定并作为当前 SSH 主链路。
+- `ssh2` 与 `vendored-openssl` 已不在当前 Cargo manifest；历史 Electron `ssh2` controller 仅保留作 parity 对照。
+- 继续评估 `russh-sftp` 2.3.0 在真实服务和三平台发行场景的边角 case。
 
 ## 7. russh 迁移技术要点
 
@@ -213,4 +213,4 @@ russh 迁移完成的验收标准：
 - [x] SSH -L/-R/-D 隧道全部支持（待真实 SSH 服务验收）
 - [x] SOCKS5/HTTP 代理全部支持（待真实代理服务验收）
 - [ ] macOS / Windows / Linux 三平台构建验证（后续推进）
-- [ ] 与 Electron 版本完成真实服务 parity：重点为三平台 socket 生命周期、SFTP 边角 case 与 Phase 4 协议/传输能力
+- [ ] 与历史 Electron 42.4.0 版本完成真实服务 parity：重点为三平台 socket 生命周期、SFTP 边角 case 与 Phase 4 协议/传输能力

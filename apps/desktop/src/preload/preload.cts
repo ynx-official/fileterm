@@ -28,6 +28,7 @@ import type {
   SessionMetricsUpdate,
   SshInteractionRequest,
   SshInteractionResponse,
+  SshKeyFileSelection,
   SshKeyImportResult,
   SshKeyMetadata,
   TransferTask,
@@ -104,6 +105,7 @@ const api: FileTermDesktopApi = {
   getSnapshot: (): Promise<WorkspaceSnapshot> => ipcRenderer.invoke('workspace:getSnapshot'),
   getConnectionLibrary: (): Promise<ConnectionLibrarySnapshot> => ipcRenderer.invoke('workspace:getConnectionLibrary'),
   listSshKeys: (): Promise<SshKeyMetadata[]> => ipcRenderer.invoke('sshKeys:list'),
+  selectSshKeyFile: (): Promise<SshKeyFileSelection | null> => ipcRenderer.invoke('sshKeys:selectFile'),
   importSshKey: (input?: ImportSshKeyInput): Promise<SshKeyImportResult | null> =>
     ipcRenderer.invoke('sshKeys:import', input),
   updateSshKeyNote: (keyId: string, note: string): Promise<SshKeyMetadata> =>

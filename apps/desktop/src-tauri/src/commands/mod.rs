@@ -68,6 +68,13 @@ impl Default for CommandSendPreferences {
     }
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportSshKeyInput {
+    pub source_path: Option<String>,
+    pub note: Option<String>,
+}
+
 fn write_json_object(app: &AppHandle, name: &str, value: &Value) -> Result<(), AppError> {
     let path = crate::storage::workspace_file(app, name)?;
     let temporary = path.with_file_name(format!("{name}.tmp"));
@@ -301,6 +308,51 @@ pub fn app_get_connection_library(app: AppHandle) -> Result<serde_json::Value, A
         "profiles": read_json_array(&app, "profiles.json")?,
         "folders": read_json_array(&app, "folders.json")?,
     }))
+}
+
+#[tauri::command]
+pub fn app_list_ssh_keys(app: AppHandle) -> Result<Vec<serde_json::Value>, AppError> {
+    crate::services::ssh_keys::list(&app)
+}
+
+#[tauri::command]
+pub async fn app_select_ssh_key_file(app: AppHandle) -> Result<Option<serde_json::Value>, AppError> {
+    crate::services::ssh_keys::select_file(&app).await
+}
+
+#[tauri::command]
+pub fn app_import_ssh_key(
+    app: AppHandle,
+    input: Option<ImportSshKeyInput>,
+) -> Result<Option<serde_json::Value>, AppError> {
+    let input = input.unwrap_or(ImportSshKeyInput { source_path: None, note: None });
+    let result = crate::services::ssh_keys::import(&app, input.source_path, input.note)?;
+    if result.is_some() {
+        emit_ssh_keys_changed(&app)?;
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn app_update_ssh_key_note(
+    app: AppHandle,
+    key_id: String,
+    note: String,
+) -> Result<serde_json::Value, AppError> {
+    let updated = crate::services::ssh_keys::update_note(&app, &key_id, note)?;
+    emit_ssh_keys_changed(&app)?;
+    Ok(updated)
+}
+
+#[tauri::command]
+pub fn app_delete_ssh_key(app: AppHandle, key_id: String) -> Result<(), AppError> {
+    crate::services::ssh_keys::delete(&app, &key_id)?;
+    emit_ssh_keys_changed(&app)
+}
+
+fn emit_ssh_keys_changed(app: &AppHandle) -> Result<(), AppError> {
+    app.emit("sshKeys:changed", crate::services::ssh_keys::list(app)?)
+        .map_err(|error| AppError::Command(error.to_string()))
 }
 
 #[tauri::command]

@@ -1,15 +1,27 @@
 # Tauri 迁移进度与 Electron 功能差距
 
-| 项目     | 值                                                                                                                                                      |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 文档版本 | v1.1                                                                                                                                                    |
-| 更新日期 | 2026-07-14                                                                                                                                              |
-| 状态     | 功能实现与本地协议夹具持续收口；不得宣称 Phase 0–4 已完成发行验收。macOS 本机已执行部分真实服务回归，Windows/Linux CI 与实体设备/发行候选手测仍待执行。 |
-| 关联文档 | `russh-migration.md`、`rust-backend-migration-plan.md`                                                                                                  |
+| 项目     | 值                                                                                                              |
+| -------- | --------------------------------------------------------------------------------------------------------------- |
+| 文档版本 | v1.2                                                                                                            |
+| 更新日期 | 2026-07-15                                                                                                      |
+| 状态     | 当前运行入口已切换为 Tauri v2；Phase 0–4 的代码主体与本地协议夹具已完成，Phase 5 发布与外部发行候选验收进行中。 |
+| 关联文档 | `russh-migration.md`、`rust-backend-migration-plan.md`                                                          |
 
 ---
 
 ## 1. 各阶段执行进度
+
+### 运行时与版本核对（2026-07-15）
+
+| 项目               | 当前事实                                                                                                                                                          |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 历史 Electron 基线 | Electron `42.4.0`，来自迁移前的 npm lockfile；对应的是历史 FileTerm 1.2.x 构建，不是当前运行时。                                                                  |
+| 当前桌面运行时     | Tauri v2；Rust crate 锁定 `tauri 2.11.5`、`russh 0.62.2`、`russh-sftp 2.3.0`。                                                                                    |
+| 当前 npm manifest  | `apps/desktop/package.json` 使用 `tauri dev/build`；当前 lockfile 不再包含 `electron`、`electron-builder` 或 `electron-updater`。                                 |
+| 本地依赖残留       | 当前 `node_modules` 仍可能被 `npm ls` 报告为 extraneous 的 `electron 42.4.0`、`electron-builder` 和 `electron-updater`；它们不属于 manifest，后续可清理安装目录。 |
+| 遗留 Electron 文件 | `src/main`、`src/preload`、`dist-electron` 测试配置和部分历史发布文档仍保留，作为迁移对照/清理对象，不代表 Electron 仍是可运行入口。                              |
+
+因此，本次迁移不是“还在 Electron 运行时和 Tauri 之间二选一”的阶段，而是已经完成运行时切换；剩余工作集中在 Tauri 的跨平台构建、真实服务/设备验收、签名发布和数据回滚保障。
 
 ### 2026-07-14 重新审计结论（覆盖下方历史“完成”标记）
 
@@ -19,9 +31,9 @@
 | Phase 1 | ✅ 代码/contract 完成，待 UI 手测 | `showWindowMenu` 已替换为 Rust 原生 File/View/Window 弹出菜单；文件编辑器取消关闭已清除 main-side pending state。仍未在打包 Tauri 应用中手测菜单坐标、缩放、关闭确认和多窗口焦点。                            |
 | Phase 2 | ✅ 代码与 contract 覆盖已完成     | 未做完整多窗口 renderer 端到端回归；作为实现里程碑完成，但不是发行验收。                                                                                                                                      |
 | Phase 3 | ⚠️ 代码主体已实现                 | 真实 sshd 已覆盖公钥、exec、SFTP、HTTP/SOCKS5 代理、local/dynamic direct-tcpip；跳板、远程转发、sudo/root、CWD UI 事件、完整指标流和 OpenSSH/PAM MFA 尚未在发行候选闭环。macOS 远端指标当前探测为 `unknown`。 |
-| Phase 4 | ⚠️ 代码主体已实现                 | 已覆盖真实 FTPS、WebDAV HEAD/PUT/GET + ETag/hash、Telnet HTTP/SOCKS5 代理和 Linux PTY；仍缺真实 Telnet 设备/代理、真实 WebDAV 服务、macOS/Windows 串口、三平台 socket CI 实际结果，以及签名 in-app updater。  |
+| Phase 4 | ✅ 代码主体完成，外部验收进行中   | 已覆盖真实 FTPS、WebDAV HEAD/PUT/GET + ETag/hash、Telnet HTTP/SOCKS5 代理和 Linux PTY；仍缺真实 Telnet 设备/代理、真实 WebDAV 服务、macOS/Windows 串口和三平台 socket CI 实际结果。                           |
 
-**结论：Phase 0、1、2 均可标为代码/contract 完成（仍待 UI 端到端回归）；Phase 3、4 不能标为“全部完成”。** 下文的旧清单用于描述已落地代码，不等同于发行验收。
+**结论：Phase 0–4 均已完成代码/contract 主体；Phase 0、1 仍待打包 UI 手测，Phase 3、4 仍待真实服务/设备和三平台结果，不能等同于发行验收完成。** 下文清单描述的是代码落地状态，不等同于产品发布就绪。
 
 ### Phase 0：Tauri 直连骨架与基础能力 ✅ 代码/contract 完成，待原生 UI 手测
 
@@ -45,17 +57,18 @@
 
 ### Phase 2：Rust 存储与 Workspace ✅ 代码/contract 完成
 
-- ✅ JSON 存储读写（profiles.json / profile-secrets.json / folders.json / command-folders.json / commands.json / ui-preferences.json / ui-state.json / webdav-sync.json）
+- ✅ JSON 存储读写（profiles.json / profile-secrets.json / ssh-keys.json / ssh-key-secrets.json / folders.json / command-folders.json / commands.json / ui-preferences.json / ui-state.json / webdav-sync.json）
 - ✅ Profile/Folder/Command CRUD（`services/profile_ops.rs`）
 - ✅ group/parentId 双向自愈（5 个单元测试覆盖）
 - ✅ Secrets stripping + 持久化（contract test 专项断言）
 - ✅ Ordering（profile/folder/command/command-folder）
 - ✅ 旧 Electron userData 兼容（按 id 去重合并 + secrets 回填）
+- ✅ SSH 私钥库：旧 Electron `ssh-keys` 元数据、私钥文件和保存的口令按 ID 迁移；私钥文件以独立目录保存，profile 仅引用 `privateKeyId`。
 - ✅ Workspace snapshot 广播
 
 ### Phase 3：SSH 工作区主链路 ⚠️ 实现主体完成，发行候选验收未完成
 
-- ✅ M3.1 russh 0.62.2 锁定：password / privateKey / agent / keyboard-interactive 四种认证
+- ✅ M3.1 russh 0.62.2 锁定：password / privateKey / agent / keyboard-interactive 四种认证；受管私钥可经 `privateKeyId` 解析，加密密钥以 `ssh:interaction` 请求口令，口令不会进入 workspace snapshot 或事件 payload。
 - ✅ M3.2 SSH shell + 终端：write/resize/data/state，16ms batcher
 - ✅ M3.3 SFTP 文件操作：list/read/write/mkdir/rename/delete/permissions，含 root 模式（`sudo -S`/`sudo -n`）；若服务端拒绝 `sftp` subsystem，则保留 SSH shell/隧道并将文件操作明确拒绝，不再把 SFTP INIT 超时误报为整条 SSH 连接失败。
 - ✅ M3.4 CWD 跟随：OSC 7 + RemoteUser 1337 解析与广播
@@ -90,19 +103,20 @@
 质量记录见 [`../../quality/tauri-phase4-validation.md`](../../quality/tauri-phase4-validation.md)。
 发行候选的真实服务、设备和三平台步骤见 [`../../quality/tauri-rc-protocol-checklist.md`](../../quality/tauri-rc-protocol-checklist.md)。
 
-### Phase 5：发行与切换 🔲 未开始
+### Phase 5：发行与切换 ⚠️ 进行中
 
+- ✅ macOS Tauri production DMG 可打包，并已有本机性能/RSS 基线
 - 🔲 Tauri updater + 签名公证
-- 🔲 三平台安装包
-- 🔲 性能对比
-- 🔲 迁移工具 + 回滚
+- 🔲 Windows/Linux 安装包与三平台签名/公证
+- 🔲 同版本、同配置的三平台性能对比
+- 🔲 用户数据迁移工具 + 失败回滚
 - 🔲 正式发布
 
 ---
 
-## 2. 与 Electron 原版功能差距
+## 2. Electron 历史基线与 Tauri 对齐结果
 
-### 2.1 完全缺失（优先级高）
+### 2.1 原 Electron 能力的迁移结果
 
 | 功能                       | Electron 源                                                    | 说明                                                                                                                                                                     |
 | -------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
