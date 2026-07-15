@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use serde::{Serialize, Deserialize};
+use tauri::ipc::Channel;
 use tokio::sync::{oneshot, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use crate::sessions::WorkerCmd;
@@ -65,6 +67,16 @@ pub struct WorkspaceState {
     pub active_tab_id: Arc<RwLock<Option<String>>>,
     pub sessions: Arc<RwLock<HashMap<String, SessionSnapshot>>>,
     pub workers: Arc<RwLock<HashMap<String, tokio::sync::mpsc::Sender<WorkerCmd>>>>,
+    /// High-frequency SSH keystrokes bypass the general worker command queue.
+    /// The SSH worker drains and coalesces this channel before writing to the
+    /// PTY, so file commands cannot fill the bounded queue and reject input.
+    pub terminal_inputs:
+        Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
+    /// Tauri IPC channels are the ordered streaming boundary for terminal
+    /// output. Ordinary app events remain appropriate for low-frequency state
+    /// updates, but can fall behind sustained PTY traffic in WKWebView.
+    pub terminal_output_channels:
+        Arc<StdMutex<HashMap<u32, Channel<serde_json::Value>>>>,
     /// Cancels the runtime owned by each worker. Dropping the command sender
     /// alone cannot interrupt a worker that is currently parsing a large
     /// remote metrics payload or waiting on an SSH operation.
@@ -93,6 +105,8 @@ impl Default for WorkspaceState {
             active_tab_id: Arc::new(RwLock::new(None)),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             workers: Arc::new(RwLock::new(HashMap::new())),
+            terminal_inputs: Arc::new(RwLock::new(HashMap::new())),
+            terminal_output_channels: Arc::new(StdMutex::new(HashMap::new())),
             worker_controls: Arc::new(RwLock::new(HashMap::new())),
             pending_interactions: Arc::new(RwLock::new(HashMap::new())),
             remote_forwards: Arc::new(RwLock::new(HashMap::new())),
@@ -102,6 +116,52 @@ impl Default for WorkspaceState {
             transfer_last_event: Arc::new(Mutex::new(HashMap::new())),
             connection_import_plans: Arc::new(RwLock::new(HashMap::new())),
             update_status: Arc::new(RwLock::new(None)),
+        }
+    }
+}
+
+impl WorkspaceState {
+    pub fn register_terminal_output_channel(&self, channel: Channel<serde_json::Value>) {
+        if let Ok(mut channels) = self.terminal_output_channels.lock() {
+            channels.insert(channel.id(), channel);
+        }
+    }
+
+    pub fn publish_terminal_output(&self, tab_id: &str, chunk: &str) {
+        let payload = serde_json::json!({ "tabId": tab_id, "chunk": chunk });
+        if let Ok(mut channels) = self.terminal_output_channels.lock() {
+            channels.retain(|_, channel| channel.send(payload.clone()).is_ok());
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorkspaceState;
+    use std::sync::{Arc, Mutex};
+    use tauri::ipc::Channel;
+
+    #[test]
+    fn terminal_output_channel_preserves_stream_order_under_load() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let received_messages = Arc::clone(&received);
+        let channel = Channel::new(move |body| {
+            let payload: serde_json::Value = body.deserialize().unwrap();
+            received_messages.lock().unwrap().push(payload);
+            Ok(())
+        });
+        let state = WorkspaceState::default();
+        state.register_terminal_output_channel(channel);
+
+        for index in 0..2_000 {
+            state.publish_terminal_output("tab-load", &format!("{index}\r\n"));
+        }
+
+        let messages = received.lock().unwrap();
+        assert_eq!(messages.len(), 2_000);
+        for (index, payload) in messages.iter().enumerate() {
+            assert_eq!(payload["tabId"], "tab-load");
+            assert_eq!(payload["chunk"], format!("{index}\r\n"));
         }
     }
 }

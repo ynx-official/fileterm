@@ -107,6 +107,7 @@ pub fn start_ssh_worker(
     tab_id: String,
     profile: Value,
     mut cmd_rx: mpsc::Receiver<WorkerCmd>,
+    mut terminal_input_rx: mpsc::UnboundedReceiver<String>,
     app: AppHandle,
     cancellation: CancellationToken,
 ) {
@@ -117,7 +118,15 @@ pub fn start_ssh_worker(
         // snapshot's `terminal_transcript` (set by `app_open_profile`), so
         // the renderer hydrates it via `bootText` — no need to emit it here.
         // Emitting here would race the renderer's listener registration.
-        let run_result = run_worker_loop(&tab_id, &profile, &mut cmd_rx, &app, cancellation.clone()).await;
+        let run_result = run_worker_loop(
+            &tab_id,
+            &profile,
+            &mut cmd_rx,
+            &mut terminal_input_rx,
+            &app,
+            cancellation.clone(),
+        )
+        .await;
         if cancellation.is_cancelled() {
             crate::services::logging::ssh_debug(&app, &tid, "SSH worker cancelled");
             return;
@@ -727,16 +736,10 @@ async fn update_tab_status_and_emit(app: &AppHandle, tab_id: &str, status: &str)
 /// Emit a terminal data chunk to the renderer and append it to the session
 /// snapshot's `terminal_transcript` so later `terminal:state` / snapshot
 /// refreshes surface the full history (handles the case where the renderer
-/// missed the live `terminal:data` event, e.g. during a fast-fail connect).
+/// missed the live terminal stream, e.g. during a fast-fail connect).
 async fn emit_terminal_data(app: &AppHandle, tab_id: &str, chunk: &str) {
-    let _ = app.emit(
-        "terminal:data",
-        serde_json::json!({
-            "tabId": tab_id,
-            "chunk": chunk,
-        }),
-    );
     let state = app.state::<crate::services::workspace::WorkspaceState>();
+    state.publish_terminal_output(tab_id, chunk);
     let mut sessions = state.sessions.write().await;
     if let Some(s) = sessions.get_mut(tab_id) {
         s.terminal_transcript.push_str(chunk);
@@ -867,63 +870,6 @@ fn track_cwd_and_user(chunk: &str, buffer: &mut String) -> (Option<String>, Opti
     (cwd, user)
 }
 
-/// Keeps FileTerm's private OSC7 / iTerm RemoteUser markers out of the xterm
-/// display stream. They are parsed above for CWD and sudo-state tracking, but
-/// have no user-facing meaning. In Tauri's macOS WebKit webview, forwarding
-/// those control sequences under a busy prompt stream can advance xterm's
-/// cursor without painting the corresponding prompt rows.
-#[derive(Default)]
-struct TerminalMetadataFilter {
-    pending: String,
-}
-
-impl TerminalMetadataFilter {
-    const PREFIXES: [&'static str; 2] = ["\x1b]7;file://", "\x1b]1337;RemoteUser="];
-
-    fn filter(&mut self, chunk: &str) -> String {
-        let mut source = std::mem::take(&mut self.pending);
-        source.push_str(chunk);
-
-        let mut visible = String::with_capacity(source.len());
-        let mut offset = 0;
-        while offset < source.len() {
-            let remaining = &source[offset..];
-            if let Some(prefix) = Self::PREFIXES.iter().find(|prefix| remaining.starts_with(**prefix)) {
-                let payload = &remaining[prefix.len()..];
-                let terminator = payload
-                    .bytes()
-                    .enumerate()
-                    .find_map(|(index, byte)| match byte {
-                        b'\x07' => Some(index + 1),
-                        b'\x1b' if payload.as_bytes().get(index + 1) == Some(&b'\\') => Some(index + 2),
-                        _ => None,
-                    });
-                if let Some(length) = terminator {
-                    offset += prefix.len() + length;
-                    continue;
-                }
-
-                // The SSH channel may split a marker across packets. Retain
-                // it until the terminator arrives instead of forwarding half
-                // an OSC sequence to xterm.
-                self.pending = remaining.to_string();
-                break;
-            }
-
-            if Self::PREFIXES.iter().any(|prefix| prefix.starts_with(remaining)) {
-                self.pending = remaining.to_string();
-                break;
-            }
-
-            let character = remaining.chars().next().expect("remaining is non-empty");
-            visible.push(character);
-            offset += character.len_utf8();
-        }
-
-        visible
-    }
-}
-
 /// Remove CSI/OSC control sequences before inspecting a prompt. This mirrors
 /// Electron's root-prompt heuristic without feeding visual escape codes into
 /// the comparison.
@@ -977,6 +923,16 @@ fn capture_sudo_password_input(
         }
     }
     changed
+}
+
+fn coalesce_terminal_input(
+    mut first: String,
+    receiver: &mut mpsc::UnboundedReceiver<String>,
+) -> String {
+    while let Ok(next) = receiver.try_recv() {
+        first.push_str(&next);
+    }
+    first
 }
 
 fn track_sudo_prompt_from_terminal(
@@ -2137,6 +2093,7 @@ async fn run_worker_loop(
     tab_id: &str,
     profile: &Value,
     cmd_rx: &mut mpsc::Receiver<WorkerCmd>,
+    terminal_input_rx: &mut mpsc::UnboundedReceiver<String>,
     app: &AppHandle,
     cancellation: CancellationToken,
 ) -> Result<(), String> {
@@ -2509,7 +2466,6 @@ while ($true) {{
     let mut awaiting_sudo_password = false;
     let mut pending_sudo_password = String::new();
     let mut recent_terminal_input = String::new();
-    let mut terminal_metadata_filter = TerminalMetadataFilter::default();
     // A new `sudo -i` shell discards the login shell's PROMPT_COMMAND.  Keep
     // Electron's two-second guard so a root prompt causes one safe reinject
     // of the OSC CWD/RemoteUser hook, not an injection loop.
@@ -2546,13 +2502,38 @@ while ($true) {{
                 tunnel_manager.stop_all().await;
                 return Ok(());
             }
+            input = terminal_input_rx.recv() => {
+                let Some(data) = input else {
+                    flush_batch(&mut batch_buffer, app, tab_id).await;
+                    metrics_shutdown.notify_waiters();
+                    tunnel_manager.stop_all().await;
+                    return Ok(());
+                };
+                let data = coalesce_terminal_input(data, terminal_input_rx);
+                if capture_sudo_password_input(
+                    &data,
+                    &mut awaiting_sudo_password,
+                    &mut pending_sudo_password,
+                    &mut recent_terminal_input,
+                    &mut sudo_password,
+                ) {
+                    let mut sessions = state.sessions.write().await;
+                    if let Some(session) = sessions.get_mut(tab_id) {
+                        session.has_reusable_sudo_auth = sudo_password.is_some();
+                    }
+                }
+                shell_channel
+                    .data(data.as_bytes())
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
             // Commands and shell output intentionally share Tokio's fair
             // selection. Making this branch unconditionally preferred lets a
             // stream of Enter keypresses starve both shell reads and the 16ms
             // output flush, so the terminal appears to freeze and then jumps.
             // When the sender is dropped (reconnect / disconnect / close),
             // `recv()` returns None and we must exit — otherwise the old
-            // worker keeps emitting `terminal:data` alongside the new worker.
+            // worker keeps publishing terminal output alongside the new worker.
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(cmd) => {
@@ -2593,7 +2574,6 @@ while ($true) {{
                                 &mut sudo_user,
                                 &mut sudo_password,
                                 tab_id,
-                                app,
                                 &state,
                                 &mut tunnel_manager,
                                 sftp_unavailable_reason.as_deref().unwrap_or(SFTP_UNAVAILABLE_FALLBACK),
@@ -2630,9 +2610,8 @@ while ($true) {{
                 }
             }, if pending_shell_setup_echo.is_some() => {
                 let visible = finish_shell_setup_suppression(&mut pending_shell_setup_echo);
-                let display = terminal_metadata_filter.filter(&visible);
-                if !display.is_empty() {
-                    batch_buffer.extend_from_slice(display.as_bytes());
+                if !visible.is_empty() {
+                    batch_buffer.extend_from_slice(visible.as_bytes());
                 }
             }
             // 2. Drain shell channel output.
@@ -2735,9 +2714,8 @@ while ($true) {{
                         }
 
                         let visible = suppress_shell_setup_echo(&mut pending_shell_setup_echo, &text);
-                        let display = terminal_metadata_filter.filter(&visible);
-                        if !display.is_empty() {
-                            batch_buffer.extend_from_slice(display.as_bytes());
+                        if !visible.is_empty() {
+                            batch_buffer.extend_from_slice(visible.as_bytes());
                         }
 
                         if pending_shell_setup_echo.is_none()
@@ -2803,7 +2781,6 @@ async fn handle_worker_cmd_without_sftp(
     sudo_user: &mut Option<String>,
     sudo_password: &mut Option<String>,
     tab_id: &str,
-    app: &AppHandle,
     state: &crate::services::workspace::WorkspaceState,
     tunnel_manager: &mut TunnelManager,
     unavailable_reason: &str,
@@ -2921,13 +2898,6 @@ async fn handle_worker_cmd_without_sftp(
             Ok(false)
         }
         WorkerCmd::Disconnect => {
-            let _ = app.emit(
-                "terminal:data",
-                serde_json::json!({
-                    "tabId": tab_id,
-                    "chunk": "",
-                }),
-            );
             Ok(true)
         }
     }
@@ -3490,14 +3460,6 @@ async fn handle_worker_cmd(
             Ok(false)
         }
         WorkerCmd::Disconnect => {
-            // Signal the worker loop to exit.
-            let _ = app.emit(
-                "terminal:data",
-                serde_json::json!({
-                    "tabId": tab_id,
-                    "chunk": "",
-                }),
-            );
             Ok(true)
         }
     }
@@ -4256,8 +4218,8 @@ mod tests {
         build_http_connect_request, format_sftp_unavailable_reason, is_password_prompt,
         looks_like_mfa_prompt, parent_remote_path, forward_local_connection, forward_socks5_connection,
         capture_sudo_password_input, looks_like_root_prompt, remote_bind_host_matches,
+        coalesce_terminal_input,
         suppress_shell_setup_echo, track_sudo_prompt_from_terminal, ShellSetupEchoSuppression,
-        TerminalMetadataFilter,
         SHELL_SETUP_SETTLE_DELAY,
         try_keyboard_interactive_with_responder, tunnel_bind_address, validate_tunnel_rule,
         KeyboardInteractiveRequest, SshTunnelRule,
@@ -4544,18 +4506,6 @@ mod tests {
     }
 
     #[test]
-    fn removes_fragmented_fileterm_osc_metadata_without_losing_visible_output() {
-        let mut filter = TerminalMetadataFilter::default();
-
-        assert_eq!(filter.filter("first\r\n\u{1b}]7;file:///home/"), "first\r\n");
-        assert_eq!(
-            filter.filter("user\u{7}\u{1b}]1337;RemoteUser=stoffel\u{7}stoffel@debian:~$ "),
-            "stoffel@debian:~$ "
-        );
-        assert_eq!(filter.filter("next\r\n"), "next\r\n");
-    }
-
-    #[test]
     fn detects_root_prompt_after_terminal_colours_are_removed() {
         assert!(looks_like_root_prompt("\u{1b}[01;31mroot@host\u{1b}[0m:# "));
         assert!(!looks_like_root_prompt("user@host:$ "));
@@ -4594,6 +4544,21 @@ mod tests {
         ));
         assert!(cached.is_none());
         assert!(!awaiting);
+    }
+
+    #[test]
+    fn coalesces_high_frequency_terminal_input_without_losing_order() {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        sender.send("clear\r".to_string()).unwrap();
+        for _ in 0..2_000 {
+            sender.send("\r".to_string()).unwrap();
+        }
+
+        let first = receiver.try_recv().unwrap();
+        let merged = coalesce_terminal_input(first, &mut receiver);
+        assert!(merged.starts_with("clear\r"));
+        assert_eq!(merged.matches('\r').count(), 2_001);
+        assert!(receiver.is_empty());
     }
 
     #[test]

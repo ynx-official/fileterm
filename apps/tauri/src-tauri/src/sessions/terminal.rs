@@ -42,11 +42,8 @@ fn truncate_transcript(value: &mut String) {
 }
 
 pub async fn emit_terminal_data(app: &AppHandle, tab_id: &str, chunk: &str) {
-    let _ = app.emit(
-        "terminal:data",
-        serde_json::json!({ "tabId": tab_id, "chunk": chunk }),
-    );
     let state = app.state::<crate::services::workspace::WorkspaceState>();
+    state.publish_terminal_output(tab_id, chunk);
     let mut sessions = state.sessions.write().await;
     if let Some(session) = sessions.get_mut(tab_id) {
         session.terminal_transcript.push_str(chunk);

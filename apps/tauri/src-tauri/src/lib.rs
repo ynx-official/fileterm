@@ -739,6 +739,7 @@ pub fn run() {
             crate::commands::app_disconnect_tab,
             crate::commands::app_close_tab,
             crate::commands::app_write_terminal,
+            crate::commands::app_subscribe_terminal_data,
             crate::commands::app_resize_terminal,
             crate::commands::app_open_remote_path,
             crate::commands::app_set_follow_shell_cwd,

@@ -1,4 +1,4 @@
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager, WebviewWindow};
 use serde::{Serialize, Deserialize};
 use serde_json::Value;
 use regex::Regex;
@@ -13,7 +13,8 @@ use crate::sessions::WorkerCmd;
 /// 等待 worker 接收命令的最大时间。worker 主循环被 SFTP init / shell
 /// channel 写阻塞 时，mpsc 一旦满，send 会永久 await，导致前端 invoke
 /// 链路整体卡死（多窗口发送后续 tab 全部排队、Cmd+Q 退出无法完成）。
-/// 超时后返回显式 busy 错误，由 renderer 保序重试，绝不静默吞掉输入。
+/// 超时后返回显式 busy 错误，绝不静默吞掉输入。SSH 终端输入已经走
+/// 独立 channel；这里仍作为 Telnet / Serial 和通用 worker 命令的保护。
 const WORKER_CMD_SEND_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// 文件/会话级操作（list/read/write/重连等）容忍更长延迟，但同样不能
@@ -30,6 +31,32 @@ const WORKER_FILE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 /// 退出链路 hang 住，用户只能强制杀进程。drop sender 后 worker 的
 /// `cmd_rx.recv()` 会返回 None，自然走清理路径。
 const WORKER_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+
+async fn send_terminal_input(
+    state: &crate::services::workspace::WorkspaceState,
+    tab_id: &str,
+    data: String,
+) -> Result<(), AppError> {
+    if let Some(sender) = state.terminal_inputs.read().await.get(tab_id).cloned() {
+        return sender
+            .send(data)
+            .map_err(|_| AppError::Storage("Terminal session closed".to_string()));
+    }
+
+    // Telnet and serial still use their protocol worker queue. SSH owns the
+    // dedicated low-latency input channel above.
+    let sender = state
+        .workers
+        .read()
+        .await
+        .get(tab_id)
+        .cloned()
+        .ok_or_else(|| AppError::Storage("Terminal session not found".to_string()))?;
+    timeout(WORKER_CMD_SEND_TIMEOUT, sender.send(WorkerCmd::WriteTerminal(data)))
+        .await
+        .map_err(|_| AppError::Storage("Terminal worker busy".to_string()))?
+        .map_err(|error| AppError::Storage(error.to_string()))
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct UiPreferences {
@@ -717,6 +744,7 @@ fn start_session_worker(
     tab_id: String,
     profile: serde_json::Value,
     receiver: mpsc::Receiver<WorkerCmd>,
+    terminal_input_receiver: Option<mpsc::UnboundedReceiver<String>>,
     app: AppHandle,
     cancellation: CancellationToken,
 ) {
@@ -724,7 +752,14 @@ fn start_session_worker(
         "ftp" => crate::sessions::ftp::start_ftp_worker(tab_id, profile, receiver, app),
         "telnet" => crate::sessions::telnet::start_telnet_worker(tab_id, profile, receiver, app),
         "serial" => crate::sessions::serial::start_serial_worker(tab_id, profile, receiver, app),
-        _ => crate::sessions::ssh::start_ssh_worker(tab_id, profile, receiver, app, cancellation),
+        _ => crate::sessions::ssh::start_ssh_worker(
+            tab_id,
+            profile,
+            receiver,
+            terminal_input_receiver.expect("SSH worker requires a terminal input channel"),
+            app,
+            cancellation,
+        ),
     }
 }
 
@@ -738,6 +773,7 @@ async fn stop_session_worker(
         // emitting state over a replacement connection after reconnect.
         control.cancel();
     }
+    state.terminal_inputs.write().await.remove(tab_id);
     let sender = state.workers.write().await.remove(tab_id);
     if let Some(sender) = sender {
         // 超时即放弃：worker 主循环卡死时 channel 已满，send 不进去；
@@ -759,6 +795,7 @@ pub async fn shutdown_session_workers(app: &AppHandle) {
     for control in controls {
         control.cancel();
     }
+    state.terminal_inputs.write().await.clear();
     let senders = state
         .workers
         .write()
@@ -834,10 +871,19 @@ pub async fn app_open_profile(
     }
 
     let (tx, rx) = mpsc::channel(100);
+    let (terminal_input_tx, terminal_input_rx) = if profile_type == "ssh" {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (Some(sender), Some(receiver))
+    } else {
+        (None, None)
+    };
     let worker_control = CancellationToken::new();
     {
         let mut workers = state.workers.write().await;
         workers.insert(tab_id.clone(), tx);
+    }
+    if let Some(sender) = terminal_input_tx {
+        state.terminal_inputs.write().await.insert(tab_id.clone(), sender);
     }
     state
         .worker_controls
@@ -845,7 +891,14 @@ pub async fn app_open_profile(
         .await
         .insert(tab_id.clone(), worker_control.clone());
 
-    start_session_worker(tab_id, profile.clone(), rx, app.clone(), worker_control);
+    start_session_worker(
+        tab_id,
+        profile.clone(),
+        rx,
+        terminal_input_rx,
+        app.clone(),
+        worker_control,
+    );
 
     get_workspace_snapshot(app).await
 }
@@ -914,10 +967,20 @@ pub async fn app_reconnect_tab(
             }
 
             let (tx, rx) = mpsc::channel(100);
+            let profile_type = profile.get("type").and_then(Value::as_str).unwrap_or("ssh");
+            let (terminal_input_tx, terminal_input_rx) = if profile_type == "ssh" {
+                let (sender, receiver) = mpsc::unbounded_channel();
+                (Some(sender), Some(receiver))
+            } else {
+                (None, None)
+            };
             let worker_control = CancellationToken::new();
             {
                 let mut workers = state.workers.write().await;
                 workers.insert(tab_id.clone(), tx);
+            }
+            if let Some(sender) = terminal_input_tx {
+                state.terminal_inputs.write().await.insert(tab_id.clone(), sender);
             }
             state
                 .worker_controls
@@ -925,7 +988,14 @@ pub async fn app_reconnect_tab(
                 .await
                 .insert(tab_id.clone(), worker_control.clone());
 
-            start_session_worker(tab_id, profile.clone(), rx, app.clone(), worker_control);
+            start_session_worker(
+                tab_id,
+                profile.clone(),
+                rx,
+                terminal_input_rx,
+                app.clone(),
+                worker_control,
+            );
         }
     }
 
@@ -983,20 +1053,16 @@ pub async fn app_write_terminal(
     data: String,
 ) -> Result<(), AppError> {
     let state = app.state::<crate::services::workspace::WorkspaceState>();
-    let workers = state.workers.read().await;
-    let sender = workers
-        .get(&tab_id)
-        .cloned()
-        .ok_or_else(|| AppError::Storage("Terminal session not found".to_string()))?;
-    drop(workers);
+    send_terminal_input(&state, &tab_id, data).await
+}
 
-    // Do not silently discard keystrokes when the shared worker queue is
-    // congested. The renderer batches normal input and retries an explicit
-    // busy response, which keeps Enter presses ordered and recoverable.
-    timeout(WORKER_CMD_SEND_TIMEOUT, sender.send(WorkerCmd::WriteTerminal(data)))
-        .await
-        .map_err(|_| AppError::Storage("Terminal worker busy".to_string()))?
-        .map_err(|error| AppError::Storage(error.to_string()))
+#[tauri::command]
+pub fn app_subscribe_terminal_data(
+    app: AppHandle,
+    channel: Channel<serde_json::Value>,
+) {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    state.register_terminal_output_channel(channel);
 }
 
 #[tauri::command]
@@ -1610,18 +1676,7 @@ pub async fn app_execute_command_template(
     } else {
         rendered_command.clone()
     };
-    let workers = state.workers.read().await;
-    let sender = workers
-        .get(&tab_id)
-        .ok_or_else(|| AppError::Storage("Session not found".to_string()))?
-        .clone();
-    drop(workers);
-    // 多窗口发送时 renderer 会顺序 invoke 多个 tab；任一 worker 卡住都
-    // 不能让本次调用永久 hang。超时返回错误，前端可以继续后续 tab。
-    timeout(WORKER_CMD_SEND_TIMEOUT, sender.send(WorkerCmd::WriteTerminal(payload)))
-        .await
-        .map_err(|_| AppError::Storage("Worker busy: command send timeout".to_string()))?
-        .map_err(|error| AppError::Storage(error.to_string()))?;
+    send_terminal_input(&state, &tab_id, payload).await?;
 
     Ok(serde_json::json!({ "renderedCommand": rendered_command }))
 }

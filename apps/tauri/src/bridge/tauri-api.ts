@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { getName, getVersion } from '@tauri-apps/api/app'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import type {
@@ -33,6 +33,38 @@ const unsupported = (name: string, ..._args: unknown[]) =>
 
 let latestNativeDropPaths: string[] = []
 let latestNativeDropAt = 0
+const terminalDataListeners = new Set<(payload: TerminalDataPayload) => void>()
+let terminalDataChannel: Channel<TerminalDataPayload> | null = null
+let terminalDataRegistration: Promise<void> | null = null
+
+function ensureTerminalDataChannel() {
+  if (terminalDataChannel || terminalDataRegistration) {
+    return
+  }
+
+  const channel = new Channel<TerminalDataPayload>()
+  channel.onmessage = (payload) => {
+    for (const listener of terminalDataListeners) {
+      listener(payload)
+    }
+  }
+  terminalDataChannel = channel
+  terminalDataRegistration = invoke<void>('app_subscribe_terminal_data', { channel })
+    .catch(() => {
+      terminalDataChannel = null
+    })
+    .finally(() => {
+      terminalDataRegistration = null
+    })
+}
+
+function subscribeTerminalData(listener: (payload: TerminalDataPayload) => void) {
+  terminalDataListeners.add(listener)
+  ensureTerminalDataChannel()
+  return () => {
+    terminalDataListeners.delete(listener)
+  }
+}
 
 // Browser File objects in a Tauri webview intentionally do not expose their
 // native filesystem path. Keep the path list from Tauri's drag-drop event so
@@ -381,7 +413,7 @@ export function createTauriApi(): FileTermDesktopApi {
     onWindowMaximizedChange: (listener: (isMaximized: boolean) => void) =>
       subscribe('app:window-maximized-change', listener),
     onFileEditorCloseRequest: (listener: () => void) => subscribe('app:file-editor-close-request', listener),
-    onTerminalData: (listener: (payload: TerminalDataPayload) => void) => subscribe('terminal:data', listener),
+    onTerminalData: subscribeTerminalData,
     onTerminalState: (listener: (payload: TerminalStatePayload) => void) => subscribe('terminal:state', listener),
     onTransferUpdate: (listener: (transfer: TransferTask) => void) => subscribe('transfer:update', listener),
     onWorkspaceSnapshot: (listener: (snapshot: WorkspaceSnapshot) => void) => subscribe('workspace:snapshot', listener),
