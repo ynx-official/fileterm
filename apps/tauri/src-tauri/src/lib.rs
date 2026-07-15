@@ -802,6 +802,9 @@ pub fn run() {
         .run(|app_handle, event| {
             // macOS: clicking the dock icon when the main window is hidden
             // should bring it back (mirrors Electron `activate`).
+            // `Reopen` is a macOS-only Tauri event and must not be referenced
+            // while compiling the Linux or Windows desktop targets.
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 show_main_window(app_handle);
             }
