@@ -14,9 +14,10 @@ files:
   - build/**
   - package.json
 mac:
-  # Local test builds are intentionally unsigned. Use Developer ID credentials
-  # for a real macOS restart-and-replace test.
+  # Local test builds use an Ad-hoc signature. Use Developer ID credentials
+  # for a trusted distribution build and a real macOS update test.
   identity: '-'
+  hardenedRuntime: false
   target:
     - dmg
     - zip
