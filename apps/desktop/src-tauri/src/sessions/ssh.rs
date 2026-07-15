@@ -953,40 +953,87 @@ fn track_sudo_prompt_from_terminal(
     false
 }
 
-/// Removes the one command line echoed by an interactive POSIX shell while we
-/// install the CWD hook. Electron performs the same suppression so an internal
-/// setup command never becomes part of the user's terminal transcript.
+/// Buffered output produced while injecting the internal CWD hook.
 ///
-/// The echo can arrive fragmented, so retain data until the line containing
-/// the hook marker is complete. If the remote shell behaves unexpectedly, the
-/// bounded fallback releases the buffered terminal output instead of hiding it.
-fn suppress_shell_setup_echo(pending: &mut Option<String>, chunk: &str) -> String {
-    let Some(buffer) = pending.as_mut() else {
+/// A POSIX PTY is allowed to split the command echo, the generated OSC marker
+/// and the replacement prompt across packets. Do not release the buffer as
+/// soon as the marker is observed: doing so leaks the tail of a long setup
+/// command after `sudo -i` on Debian/bash.
+struct ShellSetupEchoSuppression {
+    buffer: String,
+    started_at: Instant,
+    visible_prefix_length: Option<usize>,
+    marker_seen_at: Option<Instant>,
+}
+
+impl ShellSetupEchoSuppression {
+    fn new() -> Self {
+        Self {
+            buffer: String::new(),
+            started_at: Instant::now(),
+            visible_prefix_length: None,
+            marker_seen_at: None,
+        }
+    }
+}
+
+const SHELL_SETUP_SETTLE_DELAY: Duration = Duration::from_millis(200);
+const SHELL_SETUP_TIMEOUT: Duration = Duration::from_millis(1200);
+const MAX_SHELL_SETUP_BUFFER_BYTES: usize = 16 * 1024;
+
+/// Suppresses the echo and replacement prompt from an internal CWD-hook
+/// injection. The bounded timeout fails closed: a malformed shell must not
+/// expose the hidden command in the user's terminal transcript.
+fn suppress_shell_setup_echo(
+    pending: &mut Option<ShellSetupEchoSuppression>,
+    chunk: &str,
+) -> String {
+    let Some(state) = pending.as_mut() else {
         return chunk.to_string();
     };
 
-    buffer.push_str(chunk);
-    const HOOK_MARKER: &str = "__tdcwd";
+    let now = Instant::now();
+    if state
+        .marker_seen_at
+        .is_some_and(|seen_at| now.duration_since(seen_at) >= SHELL_SETUP_SETTLE_DELAY)
+        || now.duration_since(state.started_at) >= SHELL_SETUP_TIMEOUT
+    {
+        let visible = state
+            .visible_prefix_length
+            .map(|length| state.buffer[..length].to_string())
+            .unwrap_or_default();
+        *pending = None;
+        return format!("{visible}{chunk}");
+    }
 
-    if let Some(marker_index) = buffer.find(HOOK_MARKER) {
-        if let Some(line_end_relative) = buffer[marker_index..].find(['\r', '\n']) {
-            let line_start = buffer[..marker_index]
-                .rfind(['\r', '\n'])
-                .map(|index| index + 1)
-                .unwrap_or(0);
-            let mut line_end = marker_index + line_end_relative + 1;
-            if buffer.as_bytes().get(line_end) == Some(&b'\n') {
-                line_end += 1;
-            }
-            let mut visible = buffer[..line_start].to_string();
-            visible.push_str(&buffer[line_end..]);
-            *pending = None;
-            return visible;
+    state.buffer.push_str(chunk);
+    const HOOK_MARKER: &str = "__tdcwd";
+    let re_cwd = regex::Regex::new(r"\x1b\]7;file://[^\x07\x1b]*(?:\x07|\x1b\\)")
+        .expect("constant OSC7 regex");
+
+    if re_cwd.is_match(&state.buffer) {
+        state.marker_seen_at.get_or_insert(now);
+        if state.visible_prefix_length.is_none() {
+            state.visible_prefix_length = Some(
+                state
+                    .buffer
+                    .find(HOOK_MARKER)
+                    .map(|marker_index| {
+                        state.buffer[..marker_index]
+                            .rfind(['\r', '\n'])
+                            .map(|index| index + 1)
+                            .unwrap_or(0)
+                    })
+                    .unwrap_or(0),
+            );
         }
     }
 
-    if buffer.len() > 32 * 1024 {
-        let visible = std::mem::take(buffer);
+    if state.buffer.len() > MAX_SHELL_SETUP_BUFFER_BYTES {
+        let visible = state
+            .visible_prefix_length
+            .map(|length| state.buffer[..length].to_string())
+            .unwrap_or_default();
         *pending = None;
         return visible;
     }
@@ -2097,7 +2144,7 @@ async fn run_worker_loop(
                 tab_id, e
             );
         } else {
-            pending_shell_setup_echo = Some(String::new());
+            pending_shell_setup_echo = Some(ShellSetupEchoSuppression::new());
         }
         // The setup script's trailing `__tdcwd` call emits an OSC7 + RemoteUser
         // pair immediately; the main loop's `track_cwd_and_user` will pick it
@@ -2528,10 +2575,9 @@ while ($true) {{
                             }
                         }
                         let (new_cwd, new_user) = track_cwd_and_user(&text, &mut cwd_buffer);
-                        let hook_marker_seen = new_cwd.is_some() || new_user.is_some();
                         let mut cwd_to_follow = None;
                         let mut file_mode_switch: Option<(String, Option<String>)> = None;
-                        if hook_marker_seen {
+                        if new_cwd.is_some() || new_user.is_some() {
                             let mut sessions = state.sessions.write().await;
                             if let Some(s) = sessions.get_mut(tab_id) {
                                 if let Some(cwd) = new_cwd {
@@ -2603,17 +2649,6 @@ while ($true) {{
                         }
 
                         let visible = suppress_shell_setup_echo(&mut pending_shell_setup_echo, &text);
-                        // A shell with PTY echo disabled has no setup command
-                        // to remove. Its OSC marker proves the hook completed,
-                        // so safely release the buffered greeting/prompt.
-                        let visible = if visible.is_empty()
-                            && hook_marker_seen
-                            && pending_shell_setup_echo.is_some()
-                        {
-                            pending_shell_setup_echo.take().unwrap_or_default()
-                        } else {
-                            visible
-                        };
                         if !visible.is_empty() {
                             batch_buffer.extend_from_slice(visible.as_bytes());
                         }
@@ -2634,7 +2669,7 @@ while ($true) {{
                                 if let Some(setup) = shell_cwd_setup_for_platform(&platform) {
                                     last_shell_setup_injection = Instant::now();
                                     if shell_channel.data(format!(" {setup}\r").as_bytes()).await.is_ok() {
-                                        pending_shell_setup_echo = Some(String::new());
+                                        pending_shell_setup_echo = Some(ShellSetupEchoSuppression::new());
                                     }
                                 }
                             }
@@ -4134,12 +4169,14 @@ mod tests {
         build_http_connect_request, format_sftp_unavailable_reason, is_password_prompt,
         looks_like_mfa_prompt, parent_remote_path, forward_local_connection, forward_socks5_connection,
         capture_sudo_password_input, looks_like_root_prompt, remote_bind_host_matches,
-        suppress_shell_setup_echo, track_sudo_prompt_from_terminal,
+        suppress_shell_setup_echo, track_sudo_prompt_from_terminal, ShellSetupEchoSuppression,
+        SHELL_SETUP_SETTLE_DELAY,
         try_keyboard_interactive_with_responder, tunnel_bind_address, validate_tunnel_rule,
         KeyboardInteractiveRequest, SshTunnelRule,
     };
     use std::borrow::Cow;
     use std::sync::{Arc, Mutex};
+    use std::time::Instant;
 
     use russh::keys::PrivateKey;
     use russh::{client, server};
@@ -4389,8 +4426,8 @@ mod tests {
     }
 
     #[test]
-    fn suppresses_only_the_echoed_cwd_setup_command() {
-        let mut pending = Some(String::new());
+    fn suppresses_fragmented_cwd_setup_echo_after_its_marker_settles() {
+        let mut pending = Some(ShellSetupEchoSuppression::new());
 
         assert_eq!(
             suppress_shell_setup_echo(
@@ -4400,15 +4437,21 @@ mod tests {
             ""
         );
 
-        let visible = suppress_shell_setup_echo(
-            &mut pending,
-            " '\\033]7;file:///home/user\\007'; }; __tdcwd\r\n\u{1b}]7;file:///home/user\u{7}user@host:~$ ",
+        assert_eq!(
+            suppress_shell_setup_echo(
+                &mut pending,
+                " '\\033]7;file:///home/user\\007'; }; __tdcwd\r\n\u{1b}]7;file:///home/user\u{7}user@host:~$ ",
+            ),
+            ""
         );
 
-        assert_eq!(
-            visible,
-            "Debian GNU/Linux\r\n\u{1b}]7;file:///home/user\u{7}user@host:~$ "
+        pending.as_mut().unwrap().marker_seen_at = Some(Instant::now() - SHELL_SETUP_SETTLE_DELAY);
+        let visible = suppress_shell_setup_echo(
+            &mut pending,
+            "root@host:~# ",
         );
+
+        assert_eq!(visible, "Debian GNU/Linux\r\nroot@host:~# ");
         assert!(pending.is_none());
     }
 
