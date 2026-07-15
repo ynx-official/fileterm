@@ -73,6 +73,7 @@ const api: FileTermDesktopApi = {
   openExternalUrl: (url: string): Promise<void> => ipcRenderer.invoke('app:openExternalUrl', url),
   openLogsDirectory: (): Promise<void> => ipcRenderer.invoke('app:openLogsDirectory'),
   minimizeCurrentWindow: (): Promise<void> => ipcRenderer.invoke('app:minimizeCurrentWindow'),
+  showCurrentWindow: (): Promise<void> => ipcRenderer.invoke('app:showCurrentWindow'),
   isCurrentWindowMaximized: (): Promise<boolean> => ipcRenderer.invoke('app:isCurrentWindowMaximized'),
   toggleMaximizeCurrentWindow: (): Promise<void> => ipcRenderer.invoke('app:toggleMaximizeCurrentWindow'),
   closeCurrentWindow: (): Promise<void> => ipcRenderer.invoke('app:closeCurrentWindow'),

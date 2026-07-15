@@ -1,23 +1,52 @@
 import type { ReactNode } from 'react'
-import type { ConnectionProfile, SessionSnapshot } from '@fileterm/core'
+import type { ConnectionProfile, SessionSnapshot, TabStatus } from '@fileterm/core'
 import { t } from '../../i18n'
 import { formatSystemLoad } from './system-metric-format'
 
 export function SystemInfoWorkspace({
   activeProfile,
-  activeSession
+  activeSession,
+  connectionStatus
 }: {
   activeProfile: ConnectionProfile | null
   activeSession: SessionSnapshot | null
+  connectionStatus: TabStatus | null
 }) {
   const metrics = activeSession?.systemMetrics
 
-  if (!activeSession || activeSession.connected !== true || !metrics) {
+  if (!activeSession) {
     return (
-      <section className="system-info-workspace system-info-workspace-empty">
+      <section className="system-info-workspace system-info-workspace-empty selectable-text">
         <div className="system-info-empty">
-          <strong>{activeSession ? t.remoteDisconnected : t.noConnection}</strong>
-          <p>{activeSession ? t.remoteDisconnectedDescription : t.noConnectionDescription}</p>
+          <strong>{t.noConnection}</strong>
+          <p>{t.noConnectionDescription}</p>
+        </div>
+      </section>
+    )
+  }
+
+  const isExplicitlyDisconnected =
+    connectionStatus === 'closed' ||
+    connectionStatus === 'error' ||
+    (connectionStatus === null && activeSession.connected !== true)
+
+  if (isExplicitlyDisconnected) {
+    return (
+      <section className="system-info-workspace system-info-workspace-empty selectable-text">
+        <div className="system-info-empty">
+          <strong>{t.remoteDisconnected}</strong>
+          <p>{t.remoteDisconnectedDescription}</p>
+        </div>
+      </section>
+    )
+  }
+
+  if (!metrics) {
+    return (
+      <section className="system-info-workspace system-info-workspace-empty selectable-text">
+        <div className="system-info-empty">
+          <strong>{t.loadingSystemInfo}</strong>
+          <p>{t.loadingSystemInfoDescription}</p>
         </div>
       </section>
     )
@@ -36,7 +65,7 @@ export function SystemInfoWorkspace({
   ]
 
   return (
-    <section className="system-info-workspace">
+    <section className="system-info-workspace selectable-text">
       <header className="system-info-header">
         <div>
           <strong>{t.systemInfo}</strong>

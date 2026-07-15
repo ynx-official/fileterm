@@ -237,10 +237,14 @@ export function createTauriApi(): FileTermDesktopApi {
     openConnectionManagerWindow: () => invoke<void>('app_open_window', { input: { kind: 'connection-manager' } }),
     openCommandManagerWindow: () => invoke<void>('app_open_window', { input: { kind: 'command-manager' } }),
     openConnectionFormWindow: (mode: 'create' | 'edit', profileId?: string) =>
-      invoke<void>('app_open_window', { input: { kind: 'connection-form', mode, profile_id: profileId } }),
+      // `OpenWindowInput` explicitly uses camelCase serde names. Sending the
+      // Rust field spelling here silently drops the id, so an edit child
+      // window receives no `profileId` in its URL and falls back to an empty
+      // form.
+      invoke<void>('app_open_window', { input: { kind: 'connection-form', mode, profileId } }),
     openCommandFormWindow: (mode: 'create' | 'edit', commandId?: string, folderId?: string) =>
       invoke<void>('app_open_window', {
-        input: { kind: 'command-form', mode, command_id: commandId, folder_id: folderId }
+        input: { kind: 'command-form', mode, commandId, folderId }
       }),
     openFileEditorWindow: (input: {
       source: 'local' | 'remote'
@@ -262,6 +266,7 @@ export function createTauriApi(): FileTermDesktopApi {
     openExternalUrl: (url: string) => invoke<void>('app_open_external_url', { url }),
     openLogsDirectory: () => invoke<void>('app_open_logs_directory'),
     minimizeCurrentWindow: () => invoke<void>('app_window_action', { action: 'minimize' }),
+    showCurrentWindow: () => invoke<void>('app_window_action', { action: 'show' }),
     isCurrentWindowMaximized: () => invoke<boolean>('app_is_window_maximized'),
     toggleMaximizeCurrentWindow: () => invoke<void>('app_window_action', { action: 'toggle-maximize' }),
     closeCurrentWindow: () => invoke<void>('app_window_action', { action: 'close' }),
@@ -336,7 +341,8 @@ export function createTauriApi(): FileTermDesktopApi {
     updateSshKeyNote: (keyId: string, note: string) =>
       invoke<SshKeyMetadata>('app_update_ssh_key_note', { keyId, note }),
     deleteSshKey: (keyId: string) => invoke<void>('app_delete_ssh_key', { keyId }),
-    previewConnectionImport: () => invoke<ConnectionImportPlan | null>('app_preview_connection_import'),
+    previewConnectionImport: (source: 'files' | 'folder' = 'files') =>
+      invoke<ConnectionImportPlan | null>('app_preview_connection_import', { source }),
     commitConnectionJsonImport: (planId: string, options: ConnectionImportOptions) =>
       invoke<ConnectionImportResult>('app_commit_connection_json_import', { planId, options }),
     exportConnections: (format: ConnectionExportFormat) => invoke<boolean>('app_export_connections', { format }),

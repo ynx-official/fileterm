@@ -868,6 +868,7 @@ export interface FileTermDesktopApi {
   openExternalUrl(url: string): Promise<void>
   openLogsDirectory(): Promise<void>
   minimizeCurrentWindow(): Promise<void>
+  showCurrentWindow(): Promise<void>
   isCurrentWindowMaximized(): Promise<boolean>
   toggleMaximizeCurrentWindow(): Promise<void>
   closeCurrentWindow(): Promise<void>
@@ -888,7 +889,7 @@ export interface FileTermDesktopApi {
   updateSshKeyNote(keyId: string, note: string): Promise<SshKeyMetadata>
   deleteSshKey(keyId: string): Promise<void>
   onSshKeysChanged(listener: (keys: SshKeyMetadata[]) => void): () => void
-  previewConnectionImport(): Promise<ConnectionImportPlan | null>
+  previewConnectionImport(source?: 'files' | 'folder'): Promise<ConnectionImportPlan | null>
   commitConnectionJsonImport(planId: string, options: ConnectionImportOptions): Promise<ConnectionImportResult>
   exportConnections(format: ConnectionExportFormat): Promise<boolean>
   exportConnectionsAsFiles(format: ConnectionExportFormat): Promise<boolean>

@@ -19,6 +19,7 @@ export type WorkspaceWindowCloseRequest = {
 
 export type UseWorkspaceIpcSyncOptions = {
   desktopApi?: FileTermDesktopApi
+  isConnectionFormWindow: boolean
   isMainWorkspaceWindow: boolean
   isConnectionManagerWindow: boolean
   themeMode: ThemeMode
@@ -64,6 +65,7 @@ function isUploadPermissionFailure(transfer: TransferTask) {
 
 export function useWorkspaceIpcSync({
   desktopApi,
+  isConnectionFormWindow,
   isMainWorkspaceWindow,
   isConnectionManagerWindow,
   themeMode,
@@ -330,7 +332,12 @@ export function useWorkspaceIpcSync({
 
     const hydrateWorkspace = async () => {
       try {
-        if (isConnectionManagerWindow) {
+        // A standalone connection editor only needs persisted profiles and
+        // folders. Do not couple it to the full workspace snapshot: that
+        // snapshot initializes transfer/session state first and can fail or
+        // race while a child window opens, leaving the editor unable to find
+        // the profile selected in the manager.
+        if (isConnectionManagerWindow || isConnectionFormWindow) {
           const snapshot = await desktopApi.getConnectionLibrary()
           if (canceled || receivedSnapshotEvent) {
             return
@@ -349,7 +356,10 @@ export function useWorkspaceIpcSync({
         }
       } catch (error) {
         if (!canceled && !receivedSnapshotEvent) {
-          onErrorRef.current(isConnectionManagerWindow ? '获取连接列表' : '获取工作区快照', error)
+          onErrorRef.current(
+            isConnectionManagerWindow || isConnectionFormWindow ? '获取连接列表' : '获取工作区快照',
+            error
+          )
         }
       } finally {
         finishHydration()
@@ -388,6 +398,7 @@ export function useWorkspaceIpcSync({
     applySnapshot,
     applyTransferUpdate,
     desktopApi,
+    isConnectionFormWindow,
     isConnectionManagerWindow,
     isMainWorkspaceWindow
   ])

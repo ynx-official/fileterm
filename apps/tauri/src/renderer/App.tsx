@@ -127,10 +127,11 @@ export function App() {
 
   const desktopApi = window.fileterm
   const isWindowsDesktop = desktopApi?.platform === 'win32'
+  const hasRevealedStandaloneWindowRef = useRef(false)
 
-  const openConnectionImportPreview = () => {
+  const openConnectionImportPreview = (source: 'files' | 'folder' = 'files') => {
     void desktopApi
-      ?.previewConnectionImport()
+      ?.previewConnectionImport(source)
       .then((plan) => plan && setConnectionImportPlan(plan))
       .catch((cause) => reportError(setError, '读取连接配置', cause))
   }
@@ -173,6 +174,7 @@ export function App() {
     requestQuitApp
   } = useWorkspaceIpcSync({
     desktopApi,
+    isConnectionFormWindow,
     isMainWorkspaceWindow,
     isConnectionManagerWindow,
     themeMode,
@@ -185,6 +187,17 @@ export function App() {
     onError: (scope, err) => reportError(setError, scope, err),
     onStatusMessage: (msg) => setError(msg)
   })
+
+  // Child windows remain hidden until their route's first data fetch has
+  // settled. This is the Tauri equivalent of Electron's `ready-to-show` and
+  // prevents a blank/transparent first paint from being visible to the user.
+  useEffect(() => {
+    if (isMainWorkspaceWindow || !desktopApi || !hasLoadedInitialSnapshot || hasRevealedStandaloneWindowRef.current) {
+      return
+    }
+    hasRevealedStandaloneWindowRef.current = true
+    void desktopApi.showCurrentWindow().catch((cause) => reportError(setError, '显示窗口', cause))
+  }, [desktopApi, hasLoadedInitialSnapshot, isMainWorkspaceWindow])
 
   // 2. Workspace Tabs Hook
   const {

@@ -383,25 +383,17 @@ fn emit_ssh_keys_changed(app: &AppHandle) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-pub async fn app_preview_connection_import(app: AppHandle) -> Result<Option<serde_json::Value>, AppError> {
-    let Some(file) = rfd::AsyncFileDialog::new()
+pub async fn app_preview_connection_import(app: AppHandle, source: Option<String>) -> Result<Option<serde_json::Value>, AppError> {
+    let dialog = rfd::AsyncFileDialog::new()
         .add_filter("Connection files", &["json", "config", "txt"])
-        .pick_file()
-        .await
-    else {
-        return Ok(None);
+        .set_title("选择连接配置或目录");
+    let paths = match source.as_deref() {
+        Some("folder") => dialog.pick_folder().await.map(|folder| vec![folder.path().to_path_buf()]),
+        Some("files") | None => dialog.pick_files().await.map(|files| files.into_iter().map(|file| file.path().to_path_buf()).collect()),
+        _ => return Err(AppError::Command("导入来源无效".to_string())),
     };
-    let path = file.path();
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|error| AppError::Storage(format!("无法读取导入文件: {error}")))?;
-    crate::services::connections::create_import_plan(
-        &app,
-        &content,
-        &path.file_name().and_then(|name| name.to_str()).unwrap_or("连接文件"),
-    )
-    .await
-    .map(Some)
+    let Some(paths) = paths else { return Ok(None); };
+    crate::services::connections::create_import_plan_from_paths(&app, paths).await.map(Some)
 }
 
 #[tauri::command]
@@ -452,10 +444,11 @@ pub async fn app_export_connections_as_files(app: AppHandle, format: String) -> 
         return Ok(false);
     };
     let (profiles, _) = crate::services::profile_ops::read_and_heal_profiles(&app)?;
+    let mut used_names = std::collections::HashSet::new();
     for profile in profiles {
         let id = profile.get("id").and_then(Value::as_str).unwrap_or("connection");
         let name = profile.get("name").and_then(Value::as_str).unwrap_or(id);
-        let filename = format!("{}.json", crate::services::connections::export_filename(name, id));
+        let filename = format!("{}.json", crate::services::connections::export_filename(name, id, &mut used_names));
         let payload = if format == "compatible" {
             serde_json::json!({
                 "id": profile.get("id"), "name": profile.get("name"),
@@ -464,6 +457,8 @@ pub async fn app_export_connections_as_files(app: AppHandle, format: String) -> 
                 "user_name": profile.get("username"), "terminal_encoding": profile.get("encoding"),
                 "authentication_type": profile.get("authType"), "password": profile.get("password"),
                 "private_key_path": profile.get("privateKeyPath"), "passphrase": profile.get("passphrase"),
+                "exec_channel_enable": profile.get("enableExecChannel"),
+                "port_forwarding_list": profile.get("forwards"),
             })
         } else {
             serde_json::json!({
@@ -598,6 +593,14 @@ pub async fn app_window_action(
     action: String,
 ) -> Result<(), AppError> {
     match action.as_str() {
+        "show" => {
+            window
+                .show()
+                .map_err(|error| AppError::Window(error.to_string()))?;
+            window
+                .set_focus()
+                .map_err(|error| AppError::Window(error.to_string()))?;
+        }
         "minimize" => {
             let _ = window.minimize();
         }
@@ -818,6 +821,10 @@ pub async fn app_open_profile(
     let profiles = read_json_array(&app, "profiles.json")?;
     let profile = profiles.iter().find(|p| p.get("id").and_then(|id| id.as_str()) == Some(&profile_id))
         .ok_or_else(|| AppError::Storage("Profile not found".to_string()))?;
+
+    // Match Electron's open lifecycle: recency is about the user's intent to
+    // open a connection, not whether the later network handshake succeeds.
+    crate::services::profile_ops::touch_profile(&app, &profile_id)?;
     
     let profile_type = profile.get("type").and_then(|t| t.as_str()).unwrap_or("ssh");
     let name = profile.get("name").and_then(|n| n.as_str()).unwrap_or("SSH Session");
@@ -1106,10 +1113,46 @@ pub async fn app_set_follow_shell_cwd(
     enabled: bool,
 ) -> Result<serde_json::Value, AppError> {
     let state = app.state::<crate::services::workspace::WorkspaceState>();
-    {
+    let cwd_to_follow = {
         let mut sessions = state.sessions.write().await;
         if let Some(session) = sessions.get_mut(&tab_id) {
             session.follow_shell_cwd = enabled;
+            if enabled && session.shell_cwd.as_deref() != Some(session.remote_path.as_str()) {
+                session.shell_cwd.clone()
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // Match Electron's recovery behaviour: enabling follow must immediately
+    // catch the file pane up to the most recently reported shell directory.
+    // Waiting for another `cd` leaves the toggle active while the pane remains
+    // stale forever when the initial listing happened to fail.
+    if let Some(cwd) = cwd_to_follow {
+        match refresh_remote_files(&app, &tab_id, &cwd).await {
+            Ok(()) => {
+                let mut sessions = state.sessions.write().await;
+                if let Some(session) = sessions.get_mut(&tab_id) {
+                    if session.follow_shell_cwd
+                        && session.shell_cwd.as_deref() == Some(cwd.as_str())
+                    {
+                        session.remote_path = cwd;
+                    }
+                }
+            }
+            Err(error) => {
+                // CWD reporting is best-effort in Electron too. A directory
+                // the SFTP user cannot read must not make the toggle itself
+                // fail or interfere with the interactive terminal.
+                crate::services::logging::ssh_debug(
+                    &app,
+                    &tab_id,
+                    format!("CWD follow recovery failed for {cwd}: {error}"),
+                );
+            }
         }
     }
     get_workspace_snapshot(app).await

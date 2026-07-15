@@ -791,6 +791,7 @@ async fn follow_shell_cwd(
         list_dir(&mut sftp, &cwd).await
     };
 
+    let follow_error = files.as_ref().err().cloned();
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     let mut sessions = state.sessions.write().await;
     let Some(session) = sessions.get_mut(&tab_id) else {
@@ -799,11 +800,25 @@ async fn follow_shell_cwd(
     session.remote_files_loading = false;
     if session.shell_cwd.as_deref() == Some(cwd.as_str()) && session.follow_shell_cwd {
         if let Ok(files) = files {
-            session.remote_path = cwd;
+            session.remote_path = cwd.clone();
             session.remote_files = files;
         }
     }
     drop(sessions);
+
+    if let Some(error) = follow_error {
+        crate::services::logging::ssh_debug(
+            &app,
+            &tab_id,
+            format!("CWD follow failed for {cwd}: {error}"),
+        );
+    } else {
+        crate::services::logging::ssh_debug(
+            &app,
+            &tab_id,
+            format!("CWD follow applied: {cwd}"),
+        );
+    }
 
     if let Ok(snapshot) = crate::commands::get_workspace_snapshot(app.clone()).await {
         let _ = app.emit("workspace:snapshot", snapshot);
@@ -881,6 +896,12 @@ fn visible_shell_text(value: &str) -> String {
 
 fn looks_like_root_prompt(value: &str) -> bool {
     visible_shell_text(value).trim_end().ends_with('#')
+}
+
+fn looks_like_shell_prompt(value: &str) -> bool {
+    let visible = visible_shell_text(value);
+    let prompt = visible.trim_end();
+    prompt.ends_with('$') || prompt.ends_with('#') || prompt.ends_with('%') || prompt.ends_with('>')
 }
 
 /// Track the interactive sudo exchange on the terminal channel. The password
@@ -2160,28 +2181,15 @@ async fn run_worker_loop(
     // injected; Windows / unknown are left untouched so we never push a
     // POSIX script into a non-POSIX shell.
     let mut pending_shell_setup_echo = None;
+    let mut shell_setup_waiting_for_prompt = shell_cwd_setup_for_platform(&platform).is_some();
+    let mut shell_prompt_buffer = String::new();
     if let Some(setup) = shell_cwd_setup_for_platform(&platform) {
         eprintln!(
-            "[SSH shell-setup] tab={} platform='{}' — injecting CWD hook ({} bytes)",
+            "[SSH shell-setup] tab={} platform='{}' — waiting for first prompt before CWD hook injection ({} bytes)",
             tab_id,
             platform,
             setup.len()
         );
-        // An interactive shell only executes submitted input after CR/LF. The
-        // previous port sent the script without a terminator, leaving it on
-        // the prompt as visible text and preventing OSC7/RemoteUser updates.
-        let setup_command = format!(" {setup}\r");
-        if let Err(e) = shell_channel.data(setup_command.as_bytes()).await {
-            eprintln!(
-                "[SSH shell-setup] tab={} failed to write setup: {}",
-                tab_id, e
-            );
-        } else {
-            pending_shell_setup_echo = Some(ShellSetupEchoSuppression::new(true));
-        }
-        // The setup script's trailing `__tdcwd` call emits an OSC7 + RemoteUser
-        // pair immediately; the main loop's `track_cwd_and_user` will pick it
-        // up and sync the initial CWD into the session snapshot.
     } else {
         eprintln!(
             "[SSH shell-setup] tab={} platform='{}' — skipping setup (unsupported platform)",
@@ -2309,19 +2317,19 @@ async fn run_worker_loop(
             // delimited metrics block and sleeps for 1 second. We use a
             // unique marker so the stream parser can reliably slice blocks.
             let marker = "__FILETERM_METRICS_BLOCK__";
-            let script_body = if metrics_plat == "windows" {
-                // Windows: wrap the metrics script in a loop with Start-Sleep
-                let metrics = super::system_metrics::build_windows_metrics_command();
-                format!(
-                    r#"
-while ($true) {{
-{0}
-  Write-Output '{1}'
-  Start-Sleep -Seconds 1
-}}
-"#,
-                    metrics, marker
-                )
+            let (windows_command, script_body) = if metrics_plat == "windows" {
+                let command = match super::system_metrics::build_windows_streaming_metrics_exec_command() {
+                    Ok(command) => command,
+                    Err(error) => {
+                        crate::services::logging::ssh_debug(
+                            &metrics_app,
+                            &metrics_tid,
+                            format!("Windows streaming metrics command build failed: {error}"),
+                        );
+                        return;
+                    }
+                };
+                (Some(command), None)
             } else {
                 // POSIX: wrap the metrics script in a while-true loop
                 let raw = if metrics_plat == "busybox" {
@@ -2330,10 +2338,11 @@ while ($true) {{
                     "linux"
                 };
                 let metrics = super::system_metrics::build_posix_metrics_command(raw);
-                format!(
+                let script = format!(
                     "{}\nwhile true; do\n{}\necho '{}'\nsleep 1\ndone\n",
                     "cd / >/dev/null 2>&1 || true", metrics, marker
-                )
+                );
+                (None, Some(script))
             };
 
             // Open one persistent shell channel for the entire session.
@@ -2348,22 +2357,31 @@ while ($true) {{
                 }
             };
 
-            // Use a shell so we can pipe the script via stdin and keep it running.
-            if let Err(e) = channel.request_shell(true).await {
+            // Windows OpenSSH on this host stalls when a large script is sent
+            // through stdin. Match Electron's transport: gzip + base64 keeps
+            // the loader below cmd.exe's safe command-line budget, while the
+            // decoded script runs as one persistent PowerShell process.
+            let collector_start = if let Some(command) = windows_command.as_deref() {
+                channel.exec(true, command).await
+            } else {
+                channel.request_shell(true).await
+            };
+            if let Err(e) = collector_start {
                 eprintln!(
-                    "[SSH metrics] tab={} failed to request shell: {}",
+                    "[SSH metrics] tab={} failed to start collector shell: {}",
                     metrics_tid, e
                 );
                 return;
             }
 
-            // Feed the script into the shell
-            if let Err(e) = channel.data(script_body.as_bytes()).await {
-                eprintln!(
-                    "[SSH metrics] tab={} failed to write script: {}",
-                    metrics_tid, e
-                );
-                return;
+            if let Some(script) = script_body.as_deref() {
+                if let Err(e) = channel.data(script.as_bytes()).await {
+                    eprintln!(
+                        "[SSH metrics] tab={} failed to write script: {}",
+                        metrics_tid, e
+                    );
+                    return;
+                }
             }
 
             eprintln!(
@@ -2651,6 +2669,11 @@ while ($true) {{
                             if let Some(s) = sessions.get_mut(tab_id) {
                                 if let Some(cwd) = new_cwd {
                                     if s.shell_cwd.as_deref() != Some(cwd.as_str()) {
+                                        crate::services::logging::ssh_debug(
+                                            app,
+                                            tab_id,
+                                            format!("Shell CWD reported: {cwd}"),
+                                        );
                                         s.shell_cwd = Some(cwd.clone());
                                         session_state_changed = true;
                                         if s.follow_shell_cwd {
@@ -2726,6 +2749,40 @@ while ($true) {{
                         let visible = suppress_shell_setup_echo(&mut pending_shell_setup_echo, &text);
                         if !visible.is_empty() {
                             batch_buffer.extend_from_slice(visible.as_bytes());
+                        }
+
+                        if shell_setup_waiting_for_prompt {
+                            shell_prompt_buffer.push_str(&visible_shell_text(&text));
+                            if shell_prompt_buffer.len() > 4096 {
+                                let keep_from = shell_prompt_buffer.len() - 2048;
+                                shell_prompt_buffer = shell_prompt_buffer[keep_from..].to_string();
+                            }
+                        }
+
+                        if shell_setup_waiting_for_prompt
+                            && looks_like_shell_prompt(&shell_prompt_buffer)
+                        {
+                            shell_setup_waiting_for_prompt = false;
+                            shell_prompt_buffer.clear();
+                            if let Some(setup) = shell_cwd_setup_for_platform(&platform) {
+                                last_shell_setup_injection = Instant::now();
+                                let setup_command = format!(" {setup}\r");
+                                match shell_channel.data(setup_command.as_bytes()).await {
+                                    Ok(()) => {
+                                        // The banner and first prompt have already been forwarded.
+                                        // Everything after this write is internal setup output until
+                                        // the OSC marker settles, so no visible prefix is replayed.
+                                        pending_shell_setup_echo =
+                                            Some(ShellSetupEchoSuppression::new(false));
+                                    }
+                                    Err(error) => {
+                                        eprintln!(
+                                            "[SSH shell-setup] tab={} failed to write setup after first prompt: {}",
+                                            tab_id, error
+                                        );
+                                    }
+                                }
+                            }
                         }
 
                         if pending_shell_setup_echo.is_none()
@@ -4227,7 +4284,8 @@ mod tests {
     use super::{
         build_http_connect_request, format_sftp_unavailable_reason, is_password_prompt,
         looks_like_mfa_prompt, parent_remote_path, forward_local_connection, forward_socks5_connection,
-        capture_sudo_password_input, looks_like_root_prompt, remote_bind_host_matches,
+        capture_sudo_password_input, looks_like_root_prompt, looks_like_shell_prompt,
+        remote_bind_host_matches, track_cwd_and_user,
         coalesce_terminal_input,
         suppress_shell_setup_echo, track_sudo_prompt_from_terminal, ShellSetupEchoSuppression,
         SHELL_SETUP_SETTLE_DELAY,
@@ -4513,6 +4571,33 @@ mod tests {
 
         assert_eq!(visible, "Debian GNU/Linux\r\nuser@host:~$ root@host:~# ");
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn detects_common_posix_prompts_after_terminal_colours_are_removed() {
+        assert!(looks_like_shell_prompt(
+            "\u{1b}[01;32mStoffel@fnOSNAS-CN\u{1b}[0m:\u{1b}[01;34m/\u{1b}[0m$ "
+        ));
+        assert!(looks_like_shell_prompt("root@host:~# "));
+        assert!(looks_like_shell_prompt("host% "));
+        assert!(!looks_like_shell_prompt("Last login: today\r\n"));
+    }
+
+    #[test]
+    fn detects_fragmented_fn_os_prompt_and_cwd_marker() {
+        let prompt = concat!(
+            "Linux fnOSNAS-CN 6.18.18-trim\r\n",
+            "Stoffel@fnOSNAS-CN:",
+            "/$ "
+        );
+        assert!(looks_like_shell_prompt(prompt));
+
+        let mut buffer = String::new();
+        assert_eq!(track_cwd_and_user("\u{1b}]7;file:///e", &mut buffer), (None, None));
+        assert_eq!(
+            track_cwd_and_user("tc\u{7}\u{1b}]1337;RemoteUser=Stoffel\u{7}", &mut buffer),
+            (Some("/etc".to_string()), Some("Stoffel".to_string()))
+        );
     }
 
     #[test]

@@ -236,6 +236,27 @@ pub fn delete_profile(app: &AppHandle, profile_id: &str) -> Result<(), AppError>
     Ok(())
 }
 
+/// Record a successful user-initiated open so renderer "recent connections"
+/// can use the same persisted `lastUsedAt` ordering as Electron.
+pub fn touch_profile(app: &AppHandle, profile_id: &str) -> Result<(), AppError> {
+    let (mut profiles, _) = read_and_heal_profiles(app)?;
+    let mut found = false;
+    for profile in &mut profiles {
+        if profile.get("id").and_then(Value::as_str) == Some(profile_id) {
+            if let Some(object) = profile.as_object_mut() {
+                object.insert("lastUsedAt".to_string(), Value::Number(chrono_now_ms().into()));
+                found = true;
+            }
+            break;
+        }
+    }
+    if !found {
+        return Err(AppError::Storage("Profile not found".to_string()));
+    }
+    let stripped: Vec<Value> = profiles.iter().map(strip_secret_fields).collect();
+    write_json_array(app, "profiles.json", &stripped)
+}
+
 /// Update only the `trustedHostFingerprint` field on a profile. Called from
 /// the SSH worker's `check_server_key` when the user picks "accept-and-save".
 /// This avoids clobbering other profile fields (which a full `update_profile`

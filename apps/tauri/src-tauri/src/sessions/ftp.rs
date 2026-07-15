@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -19,6 +20,20 @@ const TRANSFER_CANCELED: &str = "transfer canceled";
 enum FtpClient {
     Plain(AsyncFtpStream),
     Secure(AsyncNativeTlsFtpStream),
+}
+
+#[derive(Default)]
+struct FtpListingState {
+    mlsd_disabled: bool,
+    mlst_disabled: bool,
+    size_disabled: bool,
+    resolved_types: HashMap<String, bool>,
+    resolved_sizes: HashMap<String, usize>,
+}
+
+struct ParsedFtpListing {
+    entry: ListedFile,
+    type_is_trusted: bool,
 }
 
 pub fn start_ftp_worker(
@@ -62,7 +77,8 @@ async fn run_ftp_worker(
         .unwrap_or("/")
         .to_string();
     let mut client = connect_ftp(profile, host, port).await?;
-    let initial_files = client_list(&mut client, &remote_path).await?;
+    let mut listing_state = FtpListingState::default();
+    let initial_files = client_list(&mut client, &remote_path, &mut listing_state).await?;
     set_ftp_state(
         app,
         tab_id,
@@ -76,7 +92,7 @@ async fn run_ftp_worker(
     loop {
         match command_rx.recv().await {
             Some(WorkerCmd::ListRemoteFiles { path, respond_to }) => {
-                let _ = respond_to.send(client_list(&mut client, &path).await);
+                let _ = respond_to.send(client_list(&mut client, &path, &mut listing_state).await);
             }
             Some(WorkerCmd::ReadRemoteFile {
                 path,
@@ -381,8 +397,12 @@ macro_rules! ftp_match {
     };
 }
 
-async fn client_list(client: &mut FtpClient, path: &str) -> Result<Vec<Value>, String> {
-    ftp_match!(client, ftp => list_files(ftp, path))
+async fn client_list(
+    client: &mut FtpClient,
+    path: &str,
+    state: &mut FtpListingState,
+) -> Result<Vec<Value>, String> {
+    ftp_match!(client, ftp => list_files_with_state(ftp, path, state))
 }
 
 async fn client_read(client: &mut FtpClient, path: &str, encoding: &str) -> Result<String, String> {
@@ -506,12 +526,36 @@ async fn list_files<T: TokioTlsStream + Send>(
     ftp: &mut ImplAsyncFtpStream<T>,
     path: &str,
 ) -> Result<Vec<Value>, String> {
-    let lines = match ftp.mlsd(Some(path)).await {
-        Ok(lines) => lines,
-        Err(_) => ftp
-            .list(Some(path))
+    let mut state = FtpListingState::default();
+    list_files_with_state(ftp, path, &mut state).await
+}
+
+async fn list_files_with_state<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+    state: &mut FtpListingState,
+) -> Result<Vec<Value>, String> {
+    let lines = if state.mlsd_disabled {
+        ftp.list(Some(path))
             .await
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| error.to_string())?
+    } else {
+        match ftp.mlsd(Some(path)).await {
+            Ok(lines) if lines.iter().all(|line| looks_like_mlsd_line(line)) => lines,
+            Ok(lines) => {
+                // A few embedded servers accept MLSD but return classic LIST
+                // rows. Keep those rows, but do not pay the failed capability
+                // probe again on every directory navigation.
+                state.mlsd_disabled = true;
+                lines
+            }
+            Err(_) => {
+                state.mlsd_disabled = true;
+                ftp.list(Some(path))
+                    .await
+                    .map_err(|error| error.to_string())?
+            }
+        }
     };
     let mut files = Vec::new();
     if path != "/" {
@@ -521,25 +565,41 @@ async fn list_files<T: TokioTlsStream + Send>(
         }));
     }
     for line in lines {
-        let entry = ListParser::parse_mlsd(&line).or_else(|_| line.parse::<ListedFile>());
-        let Ok(entry) = entry else { continue };
+        // `File::from_str` deliberately tries POSIX and DOS LIST formats
+        // before MLSD. Some embedded FTP servers accept MLSD but still send
+        // classic Unix LIST rows; parsing those as MLSD first succeeds with
+        // the entire row as the name and zeroed metadata.
+        let Some(parsed) = parse_ftp_listing_line(&line) else { continue };
+        let entry = parsed.entry;
         let name = entry.name();
         if matches!(name, "." | "..") {
             continue;
         }
-        let is_directory = entry.is_directory();
+        let full_path = join_remote_path(path, name);
+        let mut is_directory = entry.is_directory();
+        let mut size = entry.size();
+        if !parsed.type_is_trusted {
+            let resolved = resolve_untrusted_ftp_entry(ftp, &full_path, state).await;
+            is_directory = resolved.0;
+            if let Some(resolved_size) = resolved.1 {
+                size = resolved_size;
+            }
+        } else {
+            state.resolved_types.insert(full_path.clone(), is_directory);
+        }
         let modified = entry
             .modified()
             .duration_since(UNIX_EPOCH)
-            .map(|value| value.as_secs().to_string())
+            .map(|value| super::ssh::format_unix_ts(value.as_secs() as i64))
             .unwrap_or_default();
+        let permission = ftp_listing_permission(&line);
         files.push(serde_json::json!({
             "name": name,
-            "path": join_remote_path(path, name),
+            "path": full_path,
             "type": if is_directory { "folder" } else if entry.is_symlink() { "symlink" } else { "file" },
-            "size": if is_directory { "-".to_string() } else { format_bytes(entry.size() as u64) },
+            "size": if is_directory { "-".to_string() } else { format_bytes(size as u64) },
             "modified": modified,
-            "permission": "",
+            "permission": permission,
             "ownerGroup": match (entry.uid(), entry.gid()) { (Some(uid), Some(gid)) => format!("{uid}/{gid}"), _ => String::new() },
         }));
     }
@@ -551,6 +611,135 @@ async fn list_files<T: TokioTlsStream + Send>(
             .then_with(|| left["name"].as_str().cmp(&right["name"].as_str()))
     });
     Ok(files)
+}
+
+async fn resolve_untrusted_ftp_entry<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+    state: &mut FtpListingState,
+) -> (bool, Option<usize>) {
+    if let Some(is_directory) = state.resolved_types.get(path).copied() {
+        return (is_directory, state.resolved_sizes.get(path).copied());
+    }
+
+    if !state.mlst_disabled {
+        match ftp.mlst(Some(path)).await {
+            Ok(line) if looks_like_mlsd_line(&line) => {
+                if let Ok(entry) = ListParser::parse_mlst(&line) {
+                    let is_directory = entry.is_directory();
+                    state.resolved_types.insert(path.to_string(), is_directory);
+                    if !is_directory {
+                        state.resolved_sizes.insert(path.to_string(), entry.size());
+                    }
+                    return (is_directory, Some(entry.size()));
+                }
+                state.mlst_disabled = true;
+            }
+            Ok(_) => state.mlst_disabled = true,
+            Err(_) => state.mlst_disabled = true,
+        }
+    }
+
+    if !state.size_disabled {
+        match ftp.size(path).await {
+            Ok(size) => {
+                state.resolved_types.insert(path.to_string(), false);
+                state.resolved_sizes.insert(path.to_string(), size);
+                return (false, Some(size));
+            }
+            Err(error) => {
+                if is_unsupported_ftp_command(&error.to_string()) {
+                    state.size_disabled = true;
+                }
+            }
+        }
+    }
+
+    let previous_path = ftp.pwd().await.ok();
+    let is_directory = ftp.cwd(path).await.is_ok();
+    if is_directory {
+        if let Some(previous_path) = previous_path {
+            let _ = ftp.cwd(previous_path).await;
+        }
+    }
+    state.resolved_types.insert(path.to_string(), is_directory);
+    (is_directory, None)
+}
+
+fn parse_ftp_listing_line(line: &str) -> Option<ParsedFtpListing> {
+    if let Ok(entry) = ListParser::parse_posix(line) {
+        return Some(ParsedFtpListing {
+            entry,
+            type_is_trusted: true,
+        });
+    }
+    if let Ok(entry) = ListParser::parse_dos(line) {
+        return Some(ParsedFtpListing {
+            entry,
+            type_is_trusted: true,
+        });
+    }
+    if looks_like_mlsd_line(line) {
+        if let Ok(entry) = ListParser::parse_mlsd(line) {
+            return Some(ParsedFtpListing {
+                entry,
+                type_is_trusted: true,
+            });
+        }
+    }
+    line.parse::<ListedFile>()
+        .ok()
+        .map(|entry| ParsedFtpListing {
+            entry,
+            type_is_trusted: false,
+        })
+}
+
+fn looks_like_mlsd_line(line: &str) -> bool {
+    let facts = line.trim_start().split_once(' ').map(|value| value.0);
+    facts.is_some_and(|facts| {
+        facts.contains(';')
+            && facts.split(';').any(|fact| {
+                fact.split_once('=')
+                    .is_some_and(|(key, value)| !key.is_empty() && !value.is_empty())
+            })
+    })
+}
+
+fn is_unsupported_ftp_command(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    ["500", "501", "502", "504", "unknown command", "not implemented", "unsupported"]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+}
+
+fn ftp_listing_permission(line: &str) -> String {
+    let token = line.split_whitespace().next().unwrap_or_default();
+    if token.len() == 10 && matches!(token.as_bytes().first(), Some(b'-' | b'd' | b'l')) {
+        return token.to_string();
+    }
+
+    let lower = line.to_ascii_lowercase();
+    let Some(mode_start) = lower.find("unix.mode=") else {
+        return String::new();
+    };
+    let mode = line[mode_start + "unix.mode=".len()..]
+        .split(';')
+        .next()
+        .unwrap_or_default();
+    let mode = mode.strip_prefix('0').unwrap_or(mode);
+    if mode.len() != 3 || !mode.bytes().all(|value| matches!(value, b'0'..=b'7')) {
+        return String::new();
+    }
+    let kind = if lower.contains("type=dir;") { 'd' } else { '-' };
+    let mut permission = String::with_capacity(10);
+    permission.push(kind);
+    for value in mode.bytes().map(|value| value - b'0') {
+        permission.push(if value & 4 != 0 { 'r' } else { '-' });
+        permission.push(if value & 2 != 0 { 'w' } else { '-' });
+        permission.push(if value & 1 != 0 { 'x' } else { '-' });
+    }
+    permission
 }
 
 async fn read_file<T: TokioTlsStream + Send>(
@@ -838,12 +1027,133 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        client_quit, client_read, client_write, connect_ftp, connect_ftp_with_tls_connector,
-        join_remote_path, parent_remote_path,
+        client_list, client_quit, client_read, client_write, connect_ftp,
+        connect_ftp_with_tls_connector, ftp_listing_permission, join_remote_path,
+        parent_remote_path, parse_ftp_listing_line, FtpListingState,
     };
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn parses_classic_unix_listing_before_mlsd_fallback() {
+        let line = "drwxr-xr-x 5 0 0 4096 Jun 18 23:00 anydesk";
+        let parsed = parse_ftp_listing_line(line).expect("classic LIST row should parse");
+        let entry = parsed.entry;
+
+        assert!(parsed.type_is_trusted);
+        assert_eq!(entry.name(), "anydesk");
+        assert!(entry.is_directory());
+        assert_eq!(entry.size(), 4096);
+        assert_eq!(ftp_listing_permission(line), "drwxr-xr-x");
+    }
+
+    #[test]
+    fn keeps_standard_mlsd_listing_support() {
+        let line = "type=file;size=8192;modify=20260715163248;UNIX.mode=0644;UNIX.uid=0;UNIX.gid=0; readme.txt";
+        let parsed = parse_ftp_listing_line(line).expect("MLSD row should parse");
+        let entry = parsed.entry;
+
+        assert!(parsed.type_is_trusted);
+        assert_eq!(entry.name(), "readme.txt");
+        assert!(!entry.is_directory());
+        assert_eq!(entry.size(), 8192);
+        assert_eq!(ftp_listing_permission(line), "-rw-r--r--");
+    }
+
+    #[test]
+    fn marks_unstructured_serv_u_rows_for_capability_probe() {
+        let parsed = parse_ftp_listing_line("reports").expect("name-only row should remain visible");
+
+        assert_eq!(parsed.entry.name(), "reports");
+        assert!(!parsed.type_is_trusted);
+    }
+
+    #[tokio::test]
+    async fn remembers_mlsd_failure_and_uses_fast_classic_list_afterward() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let commands = Arc::new(Mutex::new(Vec::new()));
+        let server = tokio::spawn(run_classic_listing_server(listener, commands.clone()));
+        let profile = serde_json::json!({
+            "type": "ftp", "username": "test", "password": "test", "securityMode": "none"
+        });
+        let mut client = connect_ftp(&profile, "127.0.0.1", port).await.unwrap();
+        let mut state = FtpListingState::default();
+
+        let first = client_list(&mut client, "/", &mut state).await.unwrap();
+        let second = client_list(&mut client, "/", &mut state).await.unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first[0]["name"], "folder");
+        assert_eq!(first[0]["type"], "folder");
+        assert_eq!(first[1]["name"], "payload.bin");
+        assert_eq!(first[1]["size"], "2.0 KB");
+
+        client_quit(&mut client).await.unwrap();
+        server.await.unwrap();
+        let commands = commands.lock().await;
+        assert_eq!(commands.iter().filter(|command| *command == "MLSD").count(), 1);
+        assert_eq!(commands.iter().filter(|command| *command == "LIST").count(), 2);
+    }
+
+    async fn run_classic_listing_server(
+        listener: TcpListener,
+        commands: Arc<Mutex<Vec<String>>>,
+    ) {
+        let (control, _) = listener.accept().await.unwrap();
+        let (reader, mut writer) = control.into_split();
+        let mut reader = BufReader::new(reader);
+        let mut data_listener = None;
+        writer.write_all(b"220 Serv-U compatible fixture\r\n").await.unwrap();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await.unwrap() == 0 {
+                return;
+            }
+            let command = line.trim_end_matches(['\r', '\n']);
+            let (verb, _) = command.split_once(' ').unwrap_or((command, ""));
+            let verb = verb.to_ascii_uppercase();
+            commands.lock().await.push(verb.clone());
+            match verb.as_str() {
+                "USER" => writer.write_all(b"331 Password required\r\n").await.unwrap(),
+                "PASS" => writer.write_all(b"230 Logged in\r\n").await.unwrap(),
+                "TYPE" | "OPTS" => writer.write_all(b"200 OK\r\n").await.unwrap(),
+                "EPSV" | "PASV" => {
+                    let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let data_port = data.local_addr().unwrap().port();
+                    data_listener = Some(data);
+                    let response = if verb == "EPSV" {
+                        format!("229 Entering Extended Passive Mode (|||{data_port}|)\r\n")
+                    } else {
+                        format!(
+                            "227 Entering Passive Mode (127,0,0,1,{},{})\r\n",
+                            data_port / 256,
+                            data_port % 256
+                        )
+                    };
+                    writer.write_all(response.as_bytes()).await.unwrap();
+                }
+                "MLSD" => writer.write_all(b"500 Unknown command\r\n").await.unwrap(),
+                "LIST" => {
+                    writer.write_all(b"150 Opening data connection\r\n").await.unwrap();
+                    let (mut data, _) = data_listener.take().unwrap().accept().await.unwrap();
+                    data.write_all(
+                        b"drwxr-xr-x 2 0 0 4096 Jun 18 23:00 folder\r\n-rw-r--r-- 1 0 0 2048 Jun 18 23:00 payload.bin\r\n",
+                    )
+                    .await
+                    .unwrap();
+                    data.shutdown().await.unwrap();
+                    writer.write_all(b"226 Transfer complete\r\n").await.unwrap();
+                }
+                "QUIT" => {
+                    writer.write_all(b"221 Goodbye\r\n").await.unwrap();
+                    return;
+                }
+                _ => writer.write_all(b"200 OK\r\n").await.unwrap(),
+            }
+        }
+    }
 
     #[cfg(unix)]
     async fn run_secured_ftps_session<S>(
