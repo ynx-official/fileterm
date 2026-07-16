@@ -71,6 +71,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Windows native build dependencies
+        if: runner.os == 'Windows'
+        run: |
+          choco install nasm --no-progress --yes
+          nasm -v
+
       - name: Install Linux Tauri link dependencies
         if: runner.os == 'Linux'
         run: |
