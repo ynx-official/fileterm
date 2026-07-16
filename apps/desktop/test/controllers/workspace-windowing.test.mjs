@@ -43,15 +43,29 @@ class FakeBrowserWindow extends EventEmitter {
     super()
     this.webContents = new FakeWebContents(id)
     this.shown = false
+    this.visible = true
     this.focused = false
     this.minimized = false
     this.restored = false
     this.closed = false
     this.destroyedDirectly = false
+    this.bounds = { x: 0, y: 0, width: 800, height: 600 }
   }
 
   isDestroyed() {
     return this.closed
+  }
+
+  isVisible() {
+    return this.visible && !this.closed
+  }
+
+  isFocused() {
+    return this.focused
+  }
+
+  getBounds() {
+    return { ...this.bounds }
   }
 
   isMinimized() {
@@ -101,9 +115,11 @@ function createRegistry(initialTabIds = ['tab-a', 'tab-b'], failCloseTabId = nul
   const claims = []
   const releases = []
   const closeCalls = []
+  const placementBroadcasts = []
   let tabIds = [...initialTabIds]
   const registry = new WorkspaceWindowRegistry({
     getMainWindow: () => mainWindow,
+    ensureMainWindow: () => mainWindow,
     listTabIds: () => tabIds,
     createDetachedWindow: () => {
       const window = new FakeBrowserWindow(100 + detachedWindows.length)
@@ -119,12 +135,24 @@ function createRegistry(initialTabIds = ['tab-a', 'tab-b'], failCloseTabId = nul
       closeCalls.push(tabId)
       tabIds = tabIds.filter((entry) => entry !== tabId)
     },
-    broadcastPlacements: () => undefined,
+    broadcastPlacements: (placements) =>
+      placementBroadcasts.push({ placements, detachedClosed: detachedWindows.map((window) => window.closed) }),
     isQuitting: () => false,
     ...registryOptions
   })
   registry.registerMainWindow(mainWindow)
-  return { claims, closeCalls, detachedWindows, mainWindow, registry, releases }
+  return {
+    claims,
+    closeCalls,
+    detachedWindows,
+    mainWindow,
+    placementBroadcasts,
+    registry,
+    releases,
+    removeTab: (tabId) => {
+      tabIds = tabIds.filter((entry) => entry !== tabId)
+    }
+  }
 }
 
 function createRuntime() {
@@ -168,6 +196,46 @@ test('detached tab ownership moves only after its renderer claims the tab', () =
   ])
 })
 
+test('closing the initial workspace only closes tabs owned by that window', async () => {
+  const { closeCalls, detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b'])
+  registry.detach({ tabId: 'tab-b' })
+  registry.claim('tab-b', detachedWindows[0].webContents)
+
+  const closed = await registry.closeMainWindowTabs()
+
+  assert.equal(closed, true)
+  assert.deepEqual(closeCalls, ['tab-a'])
+  assert.equal(mainWindow.closed, false)
+  assert.equal(detachedWindows[0].closed, false)
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-b', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 0 }
+  ])
+})
+
+test('a failed initial workspace close keeps the window ownership for remaining tabs', async () => {
+  const { closeCalls, registry } = createRegistry(['tab-a', 'tab-b'], 'tab-b')
+
+  const closed = await registry.closeMainWindowTabs()
+
+  assert.equal(closed, false)
+  assert.deepEqual(closeCalls, ['tab-a'])
+  assert.deepEqual(registry.listPlacements(), [{ tabId: 'tab-b', ownerWindowId: 'main', ownerKind: 'main', order: 0 }])
+})
+
+test('new connections are placed in the workspace that opened them', () => {
+  const { detachedWindows, registry } = createRegistry(['tab-a', 'tab-new'])
+  registry.detach({ tabId: 'tab-a' })
+  const detached = detachedWindows[0]
+  registry.claim('tab-a', detached.webContents)
+
+  registry.placeNewTab('tab-new', detached.webContents)
+
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-a', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 0 },
+    { tabId: 'tab-new', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 1 }
+  ])
+})
+
 test('a detached workspace window accepts multiple ordered tabs', () => {
   const { claims, detachedWindows, registry } = createRegistry()
   registry.detach({ tabId: 'tab-a' })
@@ -206,7 +274,7 @@ test('moving one grouped tab to a new window preserves the other tabs', () => {
 })
 
 test('tabs move between detached windows and the empty source window closes', () => {
-  const { detachedWindows, registry } = createRegistry()
+  const { detachedWindows, placementBroadcasts, registry } = createRegistry()
   registry.detach({ tabId: 'tab-a' })
   registry.claim('tab-a', detachedWindows[0].webContents)
   registry.detach({ tabId: 'tab-b' })
@@ -216,10 +284,28 @@ test('tabs move between detached windows and the empty source window closes', ()
 
   assert.equal(detachedWindows[0].closed, true)
   assert.equal(detachedWindows[0].destroyedDirectly, true)
+  assert.equal(placementBroadcasts.at(-1)?.detachedClosed[0], true)
   assert.equal(detachedWindows[1].closed, false)
   assert.deepEqual(registry.listPlacements(), [
     { tabId: 'tab-a', ownerWindowId: 'detached-2', ownerKind: 'detached-session', order: 1 },
     { tabId: 'tab-b', ownerWindowId: 'detached-2', ownerKind: 'detached-session', order: 0 }
+  ])
+})
+
+test('moving the final main tab to another workspace closes the empty initial window', () => {
+  const { detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b'])
+  registry.detach({ tabId: 'tab-b' })
+  const detached = detachedWindows[0]
+  registry.claim('tab-b', detached.webContents)
+
+  registry.move({ tabId: 'tab-a', targetWindowId: 'detached-1' })
+
+  assert.equal(mainWindow.closed, true)
+  assert.equal(mainWindow.destroyedDirectly, true)
+  assert.equal(detached.closed, false)
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-a', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 1 },
+    { tabId: 'tab-b', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 0 }
   ])
 })
 
@@ -239,8 +325,20 @@ test('moving the final detached tab to main closes only the empty window', () =>
   assert.deepEqual(registry.listPlacements(), [{ tabId: 'tab-a', ownerWindowId: 'main', ownerKind: 'main', order: 0 }])
 })
 
+test('a registered source renderer late claim is ignored after ownership moves', () => {
+  const { claims, detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b', 'tab-c'])
+  registry.detach({ tabId: 'tab-a' })
+  registry.claim('tab-a', detachedWindows[0].webContents)
+  registry.move({ tabId: 'tab-b', targetWindowId: 'detached-1' })
+  const claimCountAfterMove = claims.length
+
+  assert.doesNotThrow(() => registry.claim('tab-b', mainWindow.webContents))
+  assert.equal(claims.length, claimCountAfterMove)
+  assert.equal(registry.listPlacements().find((placement) => placement.tabId === 'tab-b')?.ownerWindowId, 'detached-1')
+})
+
 test('closing a grouped detached window closes every contained connection', async () => {
-  const { claims, closeCalls, detachedWindows, mainWindow, registry } = createRegistry()
+  const { claims, closeCalls, detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b', 'tab-c'])
   registry.detach({ tabId: 'tab-a' })
   const detached = detachedWindows[0]
   registry.claim('tab-a', detached.webContents)
@@ -275,7 +373,7 @@ test('a grouped window stays open with remaining tabs when one connection fails 
 })
 
 test('renderer failure restores every grouped tab to main without closing connections', () => {
-  const { claims, closeCalls, detachedWindows, mainWindow, registry } = createRegistry()
+  const { claims, closeCalls, detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b', 'tab-c'])
   registry.detach({ tabId: 'tab-a' })
   const detached = detachedWindows[0]
   registry.claim('tab-a', detached.webContents)
@@ -292,20 +390,48 @@ test('renderer failure restores every grouped tab to main without closing connec
     ]
   )
   assert.deepEqual(registry.listPlacements(), [
-    { tabId: 'tab-a', ownerWindowId: 'main', ownerKind: 'main', order: 0 },
-    { tabId: 'tab-b', ownerWindowId: 'main', ownerKind: 'main', order: 1 }
+    { tabId: 'tab-a', ownerWindowId: 'main', ownerKind: 'main', order: 1 },
+    { tabId: 'tab-b', ownerWindowId: 'main', ownerKind: 'main', order: 2 },
+    { tabId: 'tab-c', ownerWindowId: 'main', ownerKind: 'main', order: 0 }
   ])
 })
 
-test('closing the last connection tab destroys its detached window without claiming main', () => {
-  const { claims, detachedWindows, mainWindow, registry } = createRegistry(['tab-a'])
+test('renderer failure recreates a default workspace when the initial window is unavailable', () => {
+  let registryRef
+  let recoveryWindow = null
+  const setup = createRegistry(['tab-a'], null, {
+    getMainWindow: () => null,
+    ensureMainWindow: () => {
+      recoveryWindow = new FakeBrowserWindow(9)
+      registryRef.registerMainWindow(recoveryWindow)
+      return recoveryWindow
+    }
+  })
+  registryRef = setup.registry
+  setup.registry.detach({ tabId: 'tab-a' })
+  const detached = setup.detachedWindows[0]
+  setup.registry.claim('tab-a', detached.webContents)
+
+  detached.webContents.emit('render-process-gone')
+
+  assert.ok(recoveryWindow)
+  assert.deepEqual(setup.claims.at(-1), { tabId: 'tab-a', senderId: recoveryWindow.webContents.id })
+  assert.deepEqual(setup.registry.listPlacements(), [
+    { tabId: 'tab-a', ownerWindowId: 'main', ownerKind: 'main', order: 0 }
+  ])
+})
+
+test('closing the last connection leaves its workspace available for new connections', () => {
+  const { claims, detachedWindows, mainWindow, registry, removeTab } = createRegistry(['tab-a'])
   registry.detach({ tabId: 'tab-a' })
   const detached = detachedWindows[0]
   registry.claim('tab-a', detached.webContents)
 
+  removeTab('tab-a')
   registry.closeTabWindow('tab-a')
 
-  assert.equal(detached.closed, true)
+  assert.equal(detached.closed, false)
+  assert.deepEqual(registry.listPlacements(), [])
   assert.equal(
     claims.some((claim) => claim.senderId === mainWindow.webContents.id),
     false
@@ -395,6 +521,175 @@ test('single-tab detached windows can merge but cannot detach into another windo
   )
   assert.equal(detachedWindows[0].closed, true)
   assert.equal(detachedWindows[0].destroyedDirectly, true)
+})
+
+test('native window bounds merge a single detached tab when renderer drop is missed', async () => {
+  const { detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b'])
+  mainWindow.bounds = { x: 0, y: 0, width: 900, height: 700 }
+  registry.detach({ tabId: 'tab-a' })
+  const sourceWindow = detachedWindows[0]
+  sourceWindow.bounds = { x: 1000, y: 0, width: 600, height: 500 }
+  registry.claim('tab-a', sourceWindow.webContents)
+
+  const input = { dragId: 'native-merge', tabId: 'tab-a', sourceWindowId: 'detached-1' }
+  registry.startDrag(input, sourceWindow.webContents)
+  registry.finishDrag(
+    { dragId: input.dragId, detachIfUnhandled: false, screenPoint: { x: 400, y: 300 } },
+    sourceWindow.webContents
+  )
+  await delay(100)
+
+  assert.equal(sourceWindow.closed, true)
+  assert.equal(sourceWindow.destroyedDirectly, true)
+  assert.deepEqual(
+    registry
+      .listPlacements()
+      .filter((placement) => placement.ownerWindowId === 'main')
+      .sort((left, right) => left.order - right.order)
+      .map((placement) => placement.tabId),
+    ['tab-b', 'tab-a']
+  )
+})
+
+test('native bounds fallback keeps a release inside the source window in place', async () => {
+  const { detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b'])
+  mainWindow.bounds = { x: 100, y: 100, width: 700, height: 500 }
+  registry.detach({ tabId: 'tab-a' })
+  registry.claim('tab-a', detachedWindows[0].webContents)
+  detachedWindows[0].bounds = { x: 200, y: 200, width: 700, height: 500 }
+
+  const input = { dragId: 'source-bounds', tabId: 'tab-b', sourceWindowId: 'main' }
+  registry.startDrag(input, mainWindow.webContents)
+  registry.finishDrag(
+    { dragId: input.dragId, detachIfUnhandled: false, screenPoint: { x: 300, y: 300 } },
+    mainWindow.webContents
+  )
+  await delay(100)
+
+  assert.equal(detachedWindows.length, 1)
+  assert.equal(registry.listPlacements().find((placement) => placement.tabId === 'tab-b')?.ownerWindowId, 'main')
+})
+
+test('explicit detach intent is not canceled by stale coordinates inside the source bounds', async () => {
+  const { detachedWindows, mainWindow, registry } = createRegistry(['tab-a'])
+  mainWindow.bounds = { x: 100, y: 100, width: 900, height: 700 }
+
+  const input = { dragId: 'detach-with-stale-source-point', tabId: 'tab-a', sourceWindowId: 'main' }
+  registry.startDrag(input, mainWindow.webContents)
+  registry.setDragTarget(true, mainWindow.webContents)
+  registry.setDragTarget(false, mainWindow.webContents)
+  registry.finishDrag(
+    { dragId: input.dragId, detachIfUnhandled: true, screenPoint: { x: 300, y: 300 } },
+    mainWindow.webContents
+  )
+  await delay(100)
+
+  assert.equal(detachedWindows.length, 1)
+  registry.claim('tab-a', detachedWindows[0].webContents)
+  assert.equal(registry.listPlacements().find((placement) => placement.tabId === 'tab-a')?.ownerWindowId, 'detached-1')
+})
+
+test('renderer hover target wins when the detached window overlaps the source bounds', async () => {
+  const { detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b'])
+  mainWindow.bounds = { x: 0, y: 0, width: 1200, height: 800 }
+  registry.detach({ tabId: 'tab-a' })
+  const targetWindow = detachedWindows[0]
+  targetWindow.bounds = { x: 200, y: 150, width: 700, height: 500 }
+  registry.claim('tab-a', targetWindow.webContents)
+
+  const input = { dragId: 'overlapping-hover-target', tabId: 'tab-b', sourceWindowId: 'main' }
+  registry.startDrag(input, mainWindow.webContents)
+  registry.setDragTarget(true, targetWindow.webContents)
+  registry.setDragTarget(false, targetWindow.webContents)
+  registry.finishDrag(
+    { dragId: input.dragId, detachIfUnhandled: true, screenPoint: { x: 400, y: 300 } },
+    mainWindow.webContents
+  )
+  await delay(100)
+
+  assert.deepEqual(
+    registry
+      .listPlacements()
+      .filter((placement) => placement.ownerWindowId === 'detached-1')
+      .sort((left, right) => left.order - right.order)
+      .map((placement) => placement.tabId),
+    ['tab-a', 'tab-b']
+  )
+})
+
+test('returning to the source window clears a stale overlapping hover target', async () => {
+  const { detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b'])
+  mainWindow.bounds = { x: 0, y: 0, width: 1200, height: 800 }
+  registry.detach({ tabId: 'tab-a' })
+  const targetWindow = detachedWindows[0]
+  targetWindow.bounds = { x: 200, y: 150, width: 700, height: 500 }
+  registry.claim('tab-a', targetWindow.webContents)
+
+  const input = { dragId: 'return-to-source', tabId: 'tab-b', sourceWindowId: 'main' }
+  registry.startDrag(input, mainWindow.webContents)
+  registry.setDragTarget(true, targetWindow.webContents)
+  registry.setDragTarget(true, mainWindow.webContents)
+  registry.finishDrag(
+    { dragId: input.dragId, detachIfUnhandled: true, screenPoint: { x: 400, y: 300 } },
+    mainWindow.webContents
+  )
+  await delay(100)
+
+  assert.equal(detachedWindows.length, 1)
+  assert.equal(registry.listPlacements().find((placement) => placement.tabId === 'tab-b')?.ownerWindowId, 'main')
+})
+
+test('a completed precise drop is not repeated by the native bounds fallback', async () => {
+  const { detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b'])
+  registry.detach({ tabId: 'tab-a' })
+  const targetWindow = detachedWindows[0]
+  targetWindow.bounds = { x: 1000, y: 0, width: 600, height: 500 }
+  registry.claim('tab-a', targetWindow.webContents)
+
+  const input = { dragId: 'precise-before-fallback', tabId: 'tab-b', sourceWindowId: 'main' }
+  registry.startDrag(input, mainWindow.webContents)
+  registry.drop(
+    { ...input, targetWindowId: 'detached-1', targetIndex: 0, dropZone: 'precise' },
+    targetWindow.webContents
+  )
+  registry.finishDrag(
+    { dragId: input.dragId, detachIfUnhandled: true, screenPoint: { x: 1200, y: 200 } },
+    mainWindow.webContents
+  )
+  await delay(100)
+
+  assert.equal(detachedWindows.length, 1)
+  assert.deepEqual(
+    registry
+      .listPlacements()
+      .filter((placement) => placement.ownerWindowId === 'detached-1')
+      .sort((left, right) => left.order - right.order)
+      .map((placement) => placement.tabId),
+    ['tab-b', 'tab-a']
+  )
+})
+
+test('native bounds fallback prefers the focused workspace when windows overlap', async () => {
+  const { detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b', 'tab-c'])
+  mainWindow.bounds = { x: 1200, y: 0, width: 600, height: 500 }
+  registry.detach({ tabId: 'tab-a' })
+  registry.claim('tab-a', detachedWindows[0].webContents)
+  registry.detach({ tabId: 'tab-b' })
+  registry.claim('tab-b', detachedWindows[1].webContents)
+  detachedWindows[0].bounds = { x: 0, y: 0, width: 800, height: 600 }
+  detachedWindows[1].bounds = { x: 200, y: 100, width: 800, height: 600 }
+  detachedWindows[0].focused = true
+  detachedWindows[1].focused = false
+
+  const input = { dragId: 'overlap-target', tabId: 'tab-c', sourceWindowId: 'main' }
+  registry.startDrag(input, mainWindow.webContents)
+  registry.finishDrag(
+    { dragId: input.dragId, detachIfUnhandled: true, screenPoint: { x: 400, y: 300 } },
+    mainWindow.webContents
+  )
+  await delay(100)
+
+  assert.equal(registry.listPlacements().find((placement) => placement.tabId === 'tab-c')?.ownerWindowId, 'detached-1')
 })
 
 test('multi-tab detached windows can still detach one tab into a new window', async () => {
@@ -533,6 +828,8 @@ test('unregistered standalone renderers cannot start or receive a workspace tab 
       registry.startDrag({ dragId: 'standalone-source', tabId: 'tab-a', sourceWindowId: 'main' }, standaloneRenderer),
     /source is not registered/
   )
+
+  assert.throws(() => registry.claim('tab-a', standaloneRenderer), /claim sender is not registered/)
 
   const input = { dragId: 'standalone-target', tabId: 'tab-a', sourceWindowId: 'main' }
   registry.startDrag(input, mainWindow.webContents)

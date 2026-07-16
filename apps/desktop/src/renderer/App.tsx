@@ -171,11 +171,10 @@ export function App() {
     windowCloseRequest,
     clearWindowCloseRequest,
     closeActiveRequestVersion,
-    closeCurrentWindow,
-    requestQuitApp
+    closeCurrentWindow
   } = useWorkspaceIpcSync({
     desktopApi,
-    isMainWorkspaceWindow,
+    isWorkspaceWindow,
     isConnectionManagerWindow,
     themeMode,
     locale,
@@ -244,8 +243,7 @@ export function App() {
     onBusyChange: setIsBusy,
     onStatusMessage: (msg) => setError(msg),
     onError: (scope, err) => reportError(setError, scope, err),
-    onCloseCurrentWindow: closeCurrentWindow,
-    onRequestQuit: requestQuitApp
+    onCloseCurrentWindow: closeCurrentWindow
   })
 
   const activeFilePanelHeight = activeTab ? (filePanelHeights[activeTab.id] ?? 218) : 218
@@ -567,12 +565,19 @@ export function App() {
     if (!windowCloseRequest) {
       return
     }
-    const hasActive = workspace.tabs.some((tab) =>
+    const tabsToCheck = windowCloseRequest.isQuit ? workspace.tabs : visibleWorkspaceTabs
+    const hasActive = tabsToCheck.some((tab) =>
       Boolean(tab && (tab.status === 'connecting' || tab.status === 'connected'))
     )
     requestWindowCloseConfirmation(windowCloseRequest.isQuit, hasActive)
     clearWindowCloseRequest()
-  }, [windowCloseRequest, workspace.tabs, requestWindowCloseConfirmation, clearWindowCloseRequest])
+  }, [
+    windowCloseRequest,
+    workspace.tabs,
+    visibleWorkspaceTabs,
+    requestWindowCloseConfirmation,
+    clearWindowCloseRequest
+  ])
 
   const normalizeErrorMessage = (err: unknown) => {
     const rawMessage = err instanceof Error ? err.message : String(err)
@@ -820,7 +825,7 @@ export function App() {
 
   const windowCloseConfirmProps = windowCloseConfirm
     ? {
-        confirmLabel: t.closeConfirmQuit,
+        confirmLabel: windowCloseConfirm.isQuit ? t.closeConfirmQuit : t.closeConfirmWorkspace,
         confirmVariant: 'danger' as const,
         description: (
           <>
@@ -842,8 +847,8 @@ export function App() {
           </button>
         ) : null,
         onClose: () => resolveWindowCloseConfirmation('cancel'),
-        onConfirm: () => resolveWindowCloseConfirmation('quit'),
-        title: t.closeConfirmTitle
+        onConfirm: () => resolveWindowCloseConfirmation(windowCloseConfirm.isQuit ? 'quit' : 'close-workspace'),
+        title: windowCloseConfirm.isQuit ? t.closeConfirmTitle : t.closeWorkspaceConfirmTitle
       }
     : null
 
@@ -1089,7 +1094,7 @@ export function App() {
   const tabBarProps: Omit<TabBarProps, 'homeBrandContent'> = {
     activeHomeTabId: effectiveActiveLocalTabId,
     activeSessionTabId: visibleActiveSessionTabId,
-    canAddHomeTab: isMainWorkspaceWindow,
+    canAddHomeTab: isWorkspaceWindow,
     dragFeedback: tabDragFeedback,
     isWorkspaceFocusMode,
     onAddHomeTab: addHomeTab,
@@ -1124,7 +1129,7 @@ export function App() {
       }
     },
     orderedTabs,
-    showWorkspaceTools: isMainWorkspaceWindow
+    showWorkspaceTools: isWorkspaceWindow
   }
 
   return (

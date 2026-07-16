@@ -177,7 +177,7 @@ platform probe
 
 ### 4.2.1 可组合会话窗口 ownership
 
-会话窗口采用“移动展示所有权”，不迁移或重建协议连接。主窗口和独立窗口都是 workspace tab 容器，区别仅在窗口壳与是否允许本地首页标签：
+会话窗口采用“移动展示所有权”，不迁移或重建协议连接。所有 workspace 窗口在产品能力上对等：都可以承载本地首页、创建连接、接收或拆出会话标签并独立关闭。第一个启动窗口只是默认入口；现有 `main / detached-session` kind 暂时作为窗口创建与兼容标记，不得再作为功能权限边界：
 
 ```txt
 WorkspaceSessionRuntime
@@ -194,16 +194,19 @@ Renderer
 
 边界约束：
 
-- `WorkspaceWindowRegistry` 只管理主窗口、独立 workspace 窗口、标签顺序和 placement，不管理协议连接实现。
-- 一个独立窗口可承载多个 SSH、FTP、Telnet、Serial 标签；标签可在主窗口与任意独立窗口之间移动，也可在窗口内排序。
-- 跨窗口拖放由 main process 结算：目标窗口整窗都可接收，命中具体标签时按索引插入，否则追加到目标会话列表末尾。
+- `WorkspaceWindowRegistry` 只管理 workspace 窗口、标签顺序和 placement，不管理协议连接实现；所有新建标签必须根据真实 IPC sender 显式放入发起窗口，不能依赖“无 owner 即属于 main”的 UI 推断。
+- 每个 workspace 窗口都可创建连接、打开本地首页并承载多个 SSH、FTP、Telnet、Serial 标签；标签可在任意 workspace 之间移动，也可在窗口内排序。
+- 跨窗口拖放由 main process 结算：renderer 用专用 workspace MIME 或通用 FileTerm 标签 MIME 提前识别内部拖动并显示整窗反馈，真正提交仍要求有效的 session drag record；目标窗口整窗都可接收，命中具体标签时按索引插入，否则追加到目标会话列表末尾。
+- 若标题栏原生拖拽区、终端边界等位置未产生 DOM `drop`，目标 renderer 会在进入 workspace 时登记短生命周期的可信悬停目标，main process 在 `dragend` 时优先使用该目标并用释放坐标复核；没有悬停记录时才按原生窗口边界兜底追加合并。这样重叠在源窗口上方的独立窗口不会被源窗口矩形吞掉。
 - 未被任何 FileTerm 窗口接收的拖放仅在源是主窗口或多标签独立窗口时创建新窗口；单标签独立窗口只能合并到其他 workspace，未命中目标则保持原位。
 - `WorkspaceSessionRuntime` 维护 `tabId -> WebContents` 输出 owner；`releaseTabRenderer(tabId, sender)` 必须 compare-and-release，旧 renderer 的延迟销毁不能清掉新 owner。
 - `workspace:getSnapshot` 是纯读取；窗口移动后 registry 将 tab owner 切到目标 `WebContents`，renderer 根据 placement 选择刚移入的标签。
 - 新独立窗口在 renderer 成功 claim 初始标签前仍保持原 placement，避免窗口尚未可用时源窗口提前丢失会话。
-- 标签移出后若源独立窗口为空，只销毁空窗口，不关闭已移动的连接。
-- 用户关闭独立窗口时，逐个关闭其中全部标签并断开连接；任一关闭失败时保留窗口和剩余标签，避免半完成状态失去承载窗口。
-- 独立 renderer 崩溃不视为用户关闭：其中标签恢复到主窗口，连接继续运行。
+- 标签因跨窗口移动而使任意源 workspace 为空时，必须在 placement 广播前直接销毁空源窗口；初始 `main` 窗口不保留例外，且不关闭已移动的连接，避免空 renderer 在最后一轮状态更新中再次认领标签。
+- 用户主动关闭窗口中的最后一个连接标签时保留该 workspace，并回到可新建连接的首页；“移动最后一个标签”与“关闭最后一个标签”是不同生命周期。
+- 已注册 workspace renderer 对已经移交 ownership 的标签发起迟到 claim 时按幂等 no-op 处理；未注册 standalone renderer 的 claim 仍严格拒绝。
+- 用户关闭任意 workspace 时，只逐个关闭该窗口拥有的标签并断开对应连接；任一关闭失败时保留窗口和剩余标签，其他 workspace 不受影响。关闭第一个启动窗口不等同于退出应用。
+- workspace renderer 崩溃不视为用户关闭：其中标签恢复到可用默认 workspace；默认窗口已关闭时先重建恢复窗口，连接继续运行。
 - 退出应用走统一 shutdown，不重复触发独立窗口的逐标签关闭流程。
 
 ## 4.3 传输暂停与恢复边界

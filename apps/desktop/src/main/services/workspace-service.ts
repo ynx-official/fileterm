@@ -367,7 +367,7 @@ export class WorkspaceService {
     await this.profileRepository.setCommandSendPreferences(preferences)
   }
 
-  async openProfile(profileId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+  async openProfile(profileId: string, sender: WebContents) {
     return this.tabLifecycle.openProfile(profileId, sender)
   }
 

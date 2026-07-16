@@ -897,6 +897,7 @@ export interface FileTermDesktopApi {
   attachWorkspaceTab(tabId: string): Promise<void>
   moveWorkspaceTab(input: MoveWorkspaceTabInput): Promise<void>
   startWorkspaceTabDrag(input: WorkspaceTabDragInput): Promise<void>
+  setWorkspaceTabDragTarget(active: boolean): Promise<void>
   dropWorkspaceTab(input: DropWorkspaceTabInput): Promise<void>
   finishWorkspaceTabDrag(input: FinishWorkspaceTabDragInput): Promise<void>
   claimWorkspaceTab(tabId: string): Promise<void>
@@ -1026,7 +1027,7 @@ export interface FileTermDesktopApi {
   onSshInteraction(listener: (request: SshInteractionRequest) => void): () => void
   onWindowCloseRequest(listener: (event: { isQuit: boolean }) => void): () => void
   onRequestCloseActiveWorkspaceItem(listener: () => void): () => void
-  confirmCloseWindow(action: 'quit' | 'hide' | 'cancel'): Promise<void>
+  confirmCloseWindow(action: 'quit' | 'hide' | 'close-workspace' | 'cancel'): Promise<void>
 }
 
 export type AppUpdateState =

@@ -169,7 +169,7 @@ export function useWorkspaceModals({
     setWindowCloseConfirm({ isQuit, hasActiveConnections })
   }
 
-  const resolveWindowCloseConfirmation = (action: 'quit' | 'hide' | 'cancel') => {
+  const resolveWindowCloseConfirmation = (action: 'quit' | 'hide' | 'close-workspace' | 'cancel') => {
     setWindowCloseConfirm(null)
     void desktopApi?.confirmCloseWindow(action)
   }

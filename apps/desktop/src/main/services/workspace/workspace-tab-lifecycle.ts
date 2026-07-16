@@ -24,10 +24,15 @@ export interface WorkspaceTabLifecycleOptions {
   getDisconnectedTransferMessage(): string
 }
 
+export interface OpenWorkspaceProfileResult {
+  tabId: string
+  snapshot: WorkspaceSnapshot
+}
+
 export class WorkspaceTabLifecycleService {
   constructor(private readonly options: WorkspaceTabLifecycleOptions) {}
 
-  async openProfile(profileId: string, sender: WebContents): Promise<WorkspaceSnapshot> {
+  async openProfile(profileId: string, sender: WebContents): Promise<OpenWorkspaceProfileResult> {
     const profile = await this.options.profileRepository.getById(profileId)
     if (!profile) {
       throw new Error(`Profile not found: ${profileId}`)
@@ -44,7 +49,10 @@ export class WorkspaceTabLifecycleService {
     })
     void this.options.profileRepository.touchProfile(profileId)
 
-    return this.options.getSnapshot()
+    return {
+      tabId,
+      snapshot: await this.options.getSnapshot()
+    }
   }
 
   async reconnectTab(tabId: string, sender: WebContents): Promise<WorkspaceSnapshot> {

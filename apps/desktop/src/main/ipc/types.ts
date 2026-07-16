@@ -9,6 +9,7 @@ import type { DetachWorkspaceTabInput, WorkspaceWindowContext } from '@fileterm/
 
 export interface IpcWindowOptions {
   getMainWindow(): BrowserWindow | null
+  ensureMainWindow(): BrowserWindow
   getUiPreferences(): { theme: 'default-dark' | 'default-light'; locale: 'zhCN' | 'enUS' }
   setUiPreferences(input: Partial<{ theme: 'default-dark' | 'default-light'; locale: 'zhCN' | 'enUS' }>): {
     theme: 'default-dark' | 'default-light'
@@ -32,7 +33,7 @@ export interface IpcWindowOptions {
   openLogsDirectory(): Promise<void>
   appUpdateService: AppUpdateService
   requestQuitApp(): void
-  confirmCloseWindow(action: 'quit' | 'hide' | 'cancel'): void | Promise<void>
+  confirmCloseWindow(action: 'quit' | 'hide' | 'close-workspace' | 'cancel'): void | Promise<void>
 }
 
 export interface IpcServices {

@@ -125,7 +125,7 @@ export function registerAppHandlers(options: IpcWindowOptions) {
     options.requestQuitApp()
   })
 
-  ipcMain.handle('app:confirmCloseWindow', (_event, action: 'quit' | 'hide' | 'cancel') =>
+  ipcMain.handle('app:confirmCloseWindow', (_event, action: 'quit' | 'hide' | 'close-workspace' | 'cancel') =>
     options.confirmCloseWindow(action)
   )
 }

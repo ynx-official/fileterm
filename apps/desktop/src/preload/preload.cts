@@ -119,6 +119,8 @@ const api: FileTermDesktopApi = {
     ipcRenderer.invoke('workspaceWindow:moveTab', input),
   startWorkspaceTabDrag: (input: WorkspaceTabDragInput): Promise<void> =>
     ipcRenderer.invoke('workspaceWindow:startTabDrag', input),
+  setWorkspaceTabDragTarget: (active: boolean): Promise<void> =>
+    ipcRenderer.invoke('workspaceWindow:setTabDragTarget', active),
   dropWorkspaceTab: (input: DropWorkspaceTabInput): Promise<void> =>
     ipcRenderer.invoke('workspaceWindow:dropTab', input),
   finishWorkspaceTabDrag: (input: FinishWorkspaceTabDragInput): Promise<void> =>
@@ -359,7 +361,7 @@ const api: FileTermDesktopApi = {
     ipcRenderer.on('app:close-active-workspace-item-request', wrapped)
     return () => ipcRenderer.off('app:close-active-workspace-item-request', wrapped)
   },
-  confirmCloseWindow: (action: 'quit' | 'hide' | 'cancel'): Promise<void> =>
+  confirmCloseWindow: (action: 'quit' | 'hide' | 'close-workspace' | 'cancel'): Promise<void> =>
     ipcRenderer.invoke('app:confirmCloseWindow', action)
 }
 

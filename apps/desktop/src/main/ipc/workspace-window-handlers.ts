@@ -25,6 +25,9 @@ export function registerWorkspaceWindowHandlers(services: IpcServices) {
   ipcMain.handle('workspaceWindow:startTabDrag', (event, input: WorkspaceTabDragInput) => {
     workspaceWindowRegistry.startDrag(input, event.sender)
   })
+  ipcMain.handle('workspaceWindow:setTabDragTarget', (event, active: boolean) => {
+    workspaceWindowRegistry.setDragTarget(active, event.sender)
+  })
   ipcMain.handle('workspaceWindow:dropTab', (event, input: DropWorkspaceTabInput) => {
     workspaceWindowRegistry.drop(input, event.sender)
   })

@@ -26,6 +26,7 @@ let connectionFormWindow: BrowserWindow | null = null
 let commandManagerWindow: BrowserWindow | null = null
 let commandFormWindow: BrowserWindow | null = null
 const fileEditorWindows = new Set<BrowserWindow>()
+const approvedWorkspaceWindowCloses = new WeakSet<BrowserWindow>()
 const approvedFileEditorCloses = new Set<BrowserWindow>()
 const fileEditorWindowsByKey = new Map<string, BrowserWindow>()
 const pendingFileEditorCloseRequests = new Map<
@@ -338,9 +339,20 @@ function requestQuitConfirmation() {
     return
   }
 
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    showMainWindowAndChildren()
-    mainWindow.webContents.send('app:window-close-request', { isQuit: true })
+  const detachedWorkspaceWindows = ipcServices?.workspaceWindowRegistry.getDetachedWindows() ?? []
+  const confirmationWindow =
+    mainWindow && !mainWindow.isDestroyed()
+      ? mainWindow
+      : (detachedWorkspaceWindows.find((window) => window.isFocused()) ?? detachedWorkspaceWindows[0] ?? null)
+
+  if (confirmationWindow && !confirmationWindow.isDestroyed()) {
+    if (confirmationWindow === mainWindow) {
+      showMainWindowAndChildren()
+    } else {
+      confirmationWindow.show()
+      confirmationWindow.focus()
+    }
+    confirmationWindow.webContents.send('app:window-close-request', { isQuit: true })
     return
   }
 
@@ -383,6 +395,21 @@ function hideMainWindowAndChildren() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.hide()
   }
+}
+
+function closeMainWorkspaceWindow(): Promise<void> {
+  const win = mainWindow
+  if (!win || win.isDestroyed()) {
+    return Promise.resolve()
+  }
+
+  return Promise.resolve(ipcServices?.workspaceWindowRegistry.closeMainWindowTabs() ?? false).then((closed) => {
+    if (!closed || win.isDestroyed()) {
+      return
+    }
+    approvedWorkspaceWindowCloses.add(win)
+    win.close()
+  })
 }
 
 function shutdownWorkspace() {
@@ -537,6 +564,22 @@ function loadAppWindow(
   })
 }
 
+function registerWorkspaceCloseShortcut(win: BrowserWindow) {
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') {
+      return
+    }
+
+    const isCloseShortcut = input.key.toLowerCase() === 'w' && (input.meta || input.control)
+    if (!isCloseShortcut) {
+      return
+    }
+
+    event.preventDefault()
+    win.webContents.send('app:close-active-workspace-item-request')
+  })
+}
+
 function createTray() {
   const iconPath = isMac ? (getTrayTemplateIconPath() ?? getAppIconPath()) : getAppIconPath()
   if (!iconPath) {
@@ -623,7 +666,7 @@ function createMainWindow() {
     win.setMenuBarVisibility(false)
   }
   win.on('close', (event) => {
-    if (isQuitting) {
+    if (isQuitting || approvedWorkspaceWindowCloses.has(win)) {
       return
     }
     event.preventDefault()
@@ -632,19 +675,7 @@ function createMainWindow() {
     }
     win.webContents.send('app:window-close-request', { isQuit: false })
   })
-  win.webContents.on('before-input-event', (event, input) => {
-    if (input.type !== 'keyDown') {
-      return
-    }
-
-    const isCloseShortcut = input.key.toLowerCase() === 'w' && (input.meta || input.control)
-    if (!isCloseShortcut) {
-      return
-    }
-
-    event.preventDefault()
-    win.webContents.send('app:close-active-workspace-item-request')
-  })
+  registerWorkspaceCloseShortcut(win)
 
   win.on('closed', () => {
     if (mainWindow === win) {
@@ -656,7 +687,7 @@ function createMainWindow() {
         ...fileEditorWindows
       ]
       for (const child of childWindows) {
-        if (child && !child.isDestroyed()) {
+        if (child && !child.isDestroyed() && child.getParentWindow() === win) {
           child.close()
         }
       }
@@ -721,6 +752,7 @@ function createDetachedWorkspaceWindow(context: WorkspaceWindowContext, input: D
 
   attachWindowDiagnostics(win, `detached-session:${context.windowId}`)
   registerWindowStateListeners(win)
+  registerWorkspaceCloseShortcut(win)
   if (isWindows) {
     win.setMenuBarVisibility(false)
   }
@@ -1105,6 +1137,12 @@ app.whenReady().then(() => {
   }
   ipcServices = registerIpcHandlers(app.getPath('userData'), {
     getMainWindow: () => mainWindow,
+    ensureMainWindow: () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        return mainWindow
+      }
+      return createMainWindow()
+    },
     getUiPreferences: () => uiPreferences,
     setUiPreferences: (input) => {
       const next = updateUiPreferences(input)
@@ -1142,6 +1180,8 @@ app.whenReady().then(() => {
         await quitApplication()
       } else if (action === 'hide') {
         hideMainWindowAndChildren()
+      } else if (action === 'close-workspace') {
+        await closeMainWorkspaceWindow()
       }
     }
   })
@@ -1154,9 +1194,14 @@ app.whenReady().then(() => {
       return
     }
 
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow()
+    const workspaceWindow = ipcServices?.workspaceWindowRegistry.getDetachedWindows()[0]
+    if (workspaceWindow && !workspaceWindow.isDestroyed()) {
+      workspaceWindow.show()
+      workspaceWindow.focus()
+      return
     }
+
+    createMainWindow()
   })
 })
 

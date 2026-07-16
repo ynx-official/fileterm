@@ -19,6 +19,7 @@ import {
   isWorkspaceTabPreciseDropTarget,
   resolveWorkspaceTabDropTargetIndex,
   resolveWorkspaceTabOutsideFeedback,
+  FILETERM_TAB_DRAG_MIME,
   WORKSPACE_TAB_DRAG_MIME
 } from '../features/layout/tab-drag'
 import { setLocale, t, type AppLocale } from '../i18n'
@@ -109,7 +110,6 @@ export type UseWorkspaceTabsOptions = {
   onStatusMessage(message: string | null): void
   onError(scope: string, error: unknown): void
   onCloseCurrentWindow(): void
-  onRequestQuit(): void
 }
 
 function formatSystemInfoTabTitle(sourceTabTitle: string) {
@@ -261,8 +261,7 @@ export function useWorkspaceTabs({
   onBusyChange,
   onStatusMessage,
   onError,
-  onCloseCurrentWindow,
-  onRequestQuit
+  onCloseCurrentWindow
 }: UseWorkspaceTabsOptions) {
   const initialMainTabUiState = createInitialMainTabUiState(isMainWorkspaceWindow, null)
   const [localTabs, setLocalTabs] = useState<LocalTab[]>(() => initialMainTabUiState.localTabs)
@@ -288,6 +287,7 @@ export function useWorkspaceTabs({
   const activeWorkspaceTabDragRef = useRef<WorkspaceTabDragPayload | null>(null)
   const tabOrderBeforeDragRef = useRef<string[] | null>(null)
   const workspaceTabDragEnterDepthRef = useRef(0)
+  const workspaceTabDragTargetSyncAtRef = useRef(0)
   const tabDragDetachReadyRef = useRef(false)
   const tabDragCanDetachRef = useRef(false)
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
@@ -758,8 +758,18 @@ export function useWorkspaceTabs({
       return
     }
 
+    const updateWorkspaceDragTarget = (active: boolean, force = false) => {
+      const now = Date.now()
+      if (active && !force && now - workspaceTabDragTargetSyncAtRef.current < 250) {
+        return
+      }
+      workspaceTabDragTargetSyncAtRef.current = active ? now : 0
+      void desktopApi.setWorkspaceTabDragTarget(active).catch(() => undefined)
+    }
+
     const clearWorkspaceDropFeedback = () => {
       workspaceTabDragEnterDepthRef.current = 0
+      updateWorkspaceDragTarget(false)
       if (!draggingTabKey) {
         setTabDragFeedback(null)
       }
@@ -768,6 +778,9 @@ export function useWorkspaceTabs({
     const handleWorkspaceDragEnter = (event: globalThis.DragEvent) => {
       if (!isWorkspaceTabDrag(event.dataTransfer)) {
         return
+      }
+      if (workspaceTabDragEnterDepthRef.current === 0) {
+        updateWorkspaceDragTarget(true, true)
       }
       workspaceTabDragEnterDepthRef.current += 1
       setTabDragFeedback(isWorkspaceTabPreciseDropTarget(event.target) ? 'sort' : 'attach')
@@ -778,6 +791,7 @@ export function useWorkspaceTabs({
         return
       }
       event.preventDefault()
+      updateWorkspaceDragTarget(true)
       if (event.dataTransfer) {
         event.dataTransfer.dropEffect = 'move'
       }
@@ -1289,12 +1303,12 @@ export function useWorkspaceTabs({
       return
     }
 
-    onRequestQuit()
+    onCloseCurrentWindow()
   }
 
   useEffect(() => {
     if (
-      !isMainWorkspaceWindow ||
+      !isWorkspaceWindow ||
       closeActiveRequestVersion === 0 ||
       closeActiveRequestVersion === handledCloseActiveRequestVersionRef.current
     ) {
@@ -1485,7 +1499,7 @@ export function useWorkspaceTabs({
     setDraggingTabKey(tabKey)
 
     if (!tabKey.startsWith('session:')) {
-      event.dataTransfer.setData('application/x-fileterm-tab', tabKey)
+      event.dataTransfer.setData('application/x-fileterm-local-tab', tabKey)
       return
     }
 
@@ -1499,7 +1513,7 @@ export function useWorkspaceTabs({
     activeWorkspaceTabDragRef.current = payload
     event.dataTransfer.setData(WORKSPACE_TAB_DRAG_MIME, serializedPayload)
     event.dataTransfer.setData('text/plain', serializedPayload)
-    event.dataTransfer.setData('application/x-fileterm-tab', tabKey)
+    event.dataTransfer.setData(FILETERM_TAB_DRAG_MIME, tabKey)
     void desktopApi?.startWorkspaceTabDrag(payload).catch((error) => {
       onError('开始移动标签页', error)
     })

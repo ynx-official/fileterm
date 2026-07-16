@@ -233,7 +233,13 @@ export function registerWorkspaceHandlers(services: IpcServices, options: IpcWin
   })
 
   ipcMain.handle('workspace:openProfile', async (event, profileId: string) => {
-    const snapshot = await workspaceService.openProfile(profileId, event.sender)
+    const { snapshot, tabId } = await workspaceService.openProfile(profileId, event.sender)
+    try {
+      workspaceWindowRegistry.placeNewTab(tabId, event.sender)
+    } catch (error) {
+      await workspaceService.closeTab(tabId)
+      throw error
+    }
     broadcastSnapshot(snapshot)
     return snapshot
   })
@@ -242,7 +248,13 @@ export function registerWorkspaceHandlers(services: IpcServices, options: IpcWin
     const senderWindow = BrowserWindow.fromWebContents(event.sender)
     const targetSender =
       senderWindow?.getParentWindow()?.webContents ?? options.getMainWindow()?.webContents ?? event.sender
-    const snapshot = await workspaceService.openProfile(profileId, targetSender)
+    const { snapshot, tabId } = await workspaceService.openProfile(profileId, targetSender)
+    try {
+      workspaceWindowRegistry.placeNewTab(tabId, targetSender)
+    } catch (error) {
+      await workspaceService.closeTab(tabId)
+      throw error
+    }
     broadcastSnapshot(snapshot)
     return snapshot
   })

@@ -50,6 +50,7 @@ export function registerIpcHandlers(userDataPath: string, options: IpcWindowOpti
   }
   const workspaceWindowRegistry = new WorkspaceWindowRegistry({
     getMainWindow: options.getMainWindow,
+    ensureMainWindow: options.ensureMainWindow,
     listTabIds: () => workspaceService.listWorkspaceTabIds(),
     createDetachedWindow: options.createDetachedWorkspaceWindow,
     claimTabRenderer: (tabId, sender) => workspaceService.claimTabRenderer(tabId, sender),

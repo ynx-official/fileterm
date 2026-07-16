@@ -1,4 +1,5 @@
 export const WORKSPACE_TAB_DRAG_MIME = 'application/x-fileterm-workspace-tab'
+export const FILETERM_TAB_DRAG_MIME = 'application/x-fileterm-tab'
 export const WORKSPACE_TAB_PRECISE_DROP_SELECTOR = '[data-workspace-tab-drop-zone="precise"]'
 
 export type TabDragEndState = {
@@ -18,7 +19,12 @@ export type DragDataTransferLike = {
 }
 
 export function isWorkspaceTabDrag(dataTransfer: DragDataTransferLike | null | undefined) {
-  return Boolean(dataTransfer && Array.from(dataTransfer.types).includes(WORKSPACE_TAB_DRAG_MIME))
+  if (!dataTransfer) {
+    return false
+  }
+
+  const types = Array.from(dataTransfer.types)
+  return types.includes(WORKSPACE_TAB_DRAG_MIME) || types.includes(FILETERM_TAB_DRAG_MIME)
 }
 
 export function isWorkspaceTabPreciseDropTarget(target: EventTarget | null) {

@@ -12,6 +12,7 @@ import { resolveWorkspaceTabPlacements } from './workspace-window-placement.js'
 
 const MAIN_WINDOW_ID = 'main'
 const DEFAULT_DRAG_RECORD_TTL_MS = 30_000
+const DRAG_TARGET_HOVER_GRACE_MS = 1_000
 
 type DetachedWindowRecord = {
   context: WorkspaceWindowContext & { kind: 'detached-session'; initialTabId: string }
@@ -24,12 +25,15 @@ type DetachedWindowRecord = {
 
 type TabDragRecord = WorkspaceTabDragInput & {
   dropped: boolean
+  hoverTargetWindowId?: string
+  hoverTargetAt?: number
   cleanupTimer: NodeJS.Timeout
   finishTimer?: NodeJS.Timeout
 }
 
 export interface WorkspaceWindowRegistryOptions {
   getMainWindow(): BrowserWindow | null
+  ensureMainWindow(): BrowserWindow
   listTabIds(): string[]
   createDetachedWindow(context: WorkspaceWindowContext, input: DetachWorkspaceTabInput): BrowserWindow
   claimTabRenderer(tabId: string, sender: WebContents): void
@@ -46,6 +50,7 @@ export class WorkspaceWindowRegistry {
   private readonly ownerWindowIdByTabId = new Map<string, string>()
   private readonly dragRecords = new Map<string, TabDragRecord>()
   private mainTabIds: string[] = []
+  private mainCloseInFlight = false
   private readonly options: WorkspaceWindowRegistryOptions
   private nextWindowNumber = 1
 
@@ -56,6 +61,7 @@ export class WorkspaceWindowRegistry {
 
   registerMainWindow(window: BrowserWindow) {
     const webContentsId = window.webContents.id
+    this.mainCloseInFlight = false
     this.contextsByWebContentsId.set(webContentsId, {
       windowId: MAIN_WINDOW_ID,
       kind: 'main'
@@ -160,11 +166,14 @@ export class WorkspaceWindowRegistry {
 
   claim(tabId: string, sender: WebContents) {
     this.assertTabExists(tabId)
-    const context = this.getContext(sender)
+    const context = this.getRegisteredContext(sender)
+    if (!context) {
+      throw new Error('Workspace tab claim sender is not registered')
+    }
     const ownerWindowId = this.ownerWindowIdByTabId.get(tabId) ?? MAIN_WINDOW_ID
 
     if (context.windowId !== ownerWindowId) {
-      throw new Error(`Window ${context.windowId} cannot claim tab ${tabId}; owner is ${ownerWindowId}`)
+      return
     }
 
     const detached = context.kind === 'detached-session' ? this.detachedByWindowId.get(context.windowId) : undefined
@@ -194,6 +203,33 @@ export class WorkspaceWindowRegistry {
     }
   }
 
+  placeNewTab(tabId: string, sender: WebContents) {
+    this.assertTabExists(tabId)
+    const context = this.getRegisteredContext(sender)
+    if (!context || !this.canAcceptDrop(context, sender)) {
+      throw new Error('Workspace tab placement sender is not registered')
+    }
+
+    this.mainTabIds = this.mainTabIds.filter((entry) => entry !== tabId)
+    for (const record of this.detachedByWindowId.values()) {
+      record.tabIds = record.tabIds.filter((entry) => entry !== tabId)
+    }
+
+    if (context.kind === 'main') {
+      this.ownerWindowIdByTabId.delete(tabId)
+      this.mainTabIds.push(tabId)
+    } else {
+      const target = this.detachedByWindowId.get(context.windowId)
+      if (!target) {
+        throw new Error(`Workspace window not found: ${context.windowId}`)
+      }
+      target.tabIds.push(tabId)
+      this.ownerWindowIdByTabId.set(tabId, context.windowId)
+    }
+
+    this.emitPlacements()
+  }
+
   attach(tabId: string) {
     this.move({ tabId, targetWindowId: MAIN_WINDOW_ID })
   }
@@ -203,7 +239,12 @@ export class WorkspaceWindowRegistry {
     const sourceWindowId = this.ownerWindowIdByTabId.get(input.tabId) ?? MAIN_WINDOW_ID
     const targetWindowId = input.targetWindowId
 
-    if (targetWindowId !== MAIN_WINDOW_ID) {
+    if (targetWindowId === MAIN_WINDOW_ID) {
+      const mainWindow = this.options.getMainWindow()
+      if (this.mainCloseInFlight || !mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+        throw new Error(`Target workspace window is not available: ${targetWindowId}`)
+      }
+    } else {
       const target = this.detachedByWindowId.get(targetWindowId)
       if (
         !target ||
@@ -250,12 +291,14 @@ export class WorkspaceWindowRegistry {
       this.options.claimTabRenderer(input.tabId, targetWindow.webContents)
     }
 
+    if (sourceRecord && sourceRecord.tabIds.length === 0) {
+      this.closeEmptyWindow(sourceRecord)
+    } else if (sourceWindowId === MAIN_WINDOW_ID && this.mainTabIds.length === 0) {
+      this.closeEmptyMainWindow()
+    }
     this.emitPlacements()
     if (targetWindow && !targetWindow.isDestroyed()) {
       this.activateWindow(targetWindow)
-    }
-    if (sourceRecord && sourceRecord.tabIds.length === 0) {
-      this.closeEmptyWindow(sourceRecord)
     }
   }
 
@@ -297,6 +340,36 @@ export class WorkspaceWindowRegistry {
     }
     drag.cleanupTimer.unref()
     this.dragRecords.set(input.dragId, drag)
+  }
+
+  setDragTarget(active: boolean, sender: WebContents) {
+    const targetContext = this.getRegisteredContext(sender)
+    if (!targetContext || !this.canAcceptDrop(targetContext, sender)) {
+      return
+    }
+
+    const now = Date.now()
+    for (const drag of this.dragRecords.values()) {
+      if (drag.dropped) {
+        continue
+      }
+      if (drag.sourceWindowId === targetContext.windowId) {
+        if (active) {
+          drag.hoverTargetWindowId = targetContext.windowId
+          drag.hoverTargetAt = now
+        } else if (drag.hoverTargetWindowId === targetContext.windowId) {
+          drag.hoverTargetWindowId = undefined
+          drag.hoverTargetAt = undefined
+        }
+        continue
+      }
+      if (active) {
+        drag.hoverTargetWindowId = targetContext.windowId
+        drag.hoverTargetAt = now
+      } else if (drag.hoverTargetWindowId === targetContext.windowId) {
+        drag.hoverTargetAt = now
+      }
+    }
   }
 
   drop(input: DropWorkspaceTabInput, sender: WebContents) {
@@ -344,7 +417,8 @@ export class WorkspaceWindowRegistry {
     if (!sourceContext || sourceContext.windowId !== drag.sourceWindowId) {
       return
     }
-    if (!input.detachIfUnhandled || !this.canDetachUnhandledDrag(drag)) {
+    const canDetach = input.detachIfUnhandled && this.canDetachUnhandledDrag(drag)
+    if (!input.screenPoint && !canDetach) {
       this.deleteDragRecord(input.dragId)
       return
     }
@@ -357,11 +431,32 @@ export class WorkspaceWindowRegistry {
         return
       }
       const currentOwnerWindowId = this.ownerWindowIdByTabId.get(pending.tabId) ?? MAIN_WINDOW_ID
-      if (
-        currentOwnerWindowId !== pending.sourceWindowId ||
-        !this.options.listTabIds().includes(pending.tabId) ||
-        !this.canDetachUnhandledDrag(pending)
-      ) {
+      if (currentOwnerWindowId !== pending.sourceWindowId || !this.options.listTabIds().includes(pending.tabId)) {
+        this.deleteDragRecord(input.dragId)
+        return
+      }
+
+      const hoveredTargetWindowId = input.screenPoint
+        ? this.resolveRecentHoveredDropTarget(pending, input.screenPoint)
+        : null
+      if (hoveredTargetWindowId === pending.sourceWindowId) {
+        this.deleteDragRecord(input.dragId)
+        return
+      }
+      const fallbackTargetWindowId =
+        hoveredTargetWindowId ??
+        (input.screenPoint ? this.findWorkspaceDropTargetAtPoint(input.screenPoint, pending.sourceWindowId) : null)
+      if (fallbackTargetWindowId === pending.sourceWindowId && !canDetach) {
+        this.deleteDragRecord(input.dragId)
+        return
+      }
+      if (fallbackTargetWindowId && fallbackTargetWindowId !== pending.sourceWindowId) {
+        pending.dropped = true
+        this.move({ tabId: pending.tabId, targetWindowId: fallbackTargetWindowId })
+        return
+      }
+
+      if (!canDetach || !this.canDetachUnhandledDrag(pending)) {
         this.deleteDragRecord(input.dragId)
         return
       }
@@ -372,6 +467,27 @@ export class WorkspaceWindowRegistry {
       })
     }, 80)
     drag.finishTimer.unref()
+  }
+
+  async closeMainWindowTabs() {
+    if (this.mainCloseInFlight) {
+      return false
+    }
+
+    this.mainCloseInFlight = true
+    try {
+      for (const tabId of [...this.mainTabIds]) {
+        await this.options.closeTab(tabId)
+        this.clearDragRecordsForTab(tabId)
+        this.mainTabIds = this.mainTabIds.filter((entry) => entry !== tabId)
+        this.emitPlacements()
+      }
+      return true
+    } catch {
+      return false
+    } finally {
+      this.mainCloseInFlight = false
+    }
   }
 
   closeTabWindow(tabId: string) {
@@ -389,9 +505,6 @@ export class WorkspaceWindowRegistry {
 
     record.tabIds = record.tabIds.filter((entry) => entry !== tabId)
     this.emitPlacements()
-    if (record.tabIds.length === 0) {
-      this.closeEmptyWindow(record)
-    }
   }
 
   closeAll() {
@@ -424,7 +537,9 @@ export class WorkspaceWindowRegistry {
     }
     if (context.kind === 'main') {
       const mainWindow = this.options.getMainWindow()
-      return Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === sender.id)
+      return Boolean(
+        !this.mainCloseInFlight && mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === sender.id
+      )
     }
 
     const record = this.detachedByWindowId.get(context.windowId)
@@ -436,6 +551,83 @@ export class WorkspaceWindowRegistry {
       record.ready &&
       !record.approvedClose &&
       !record.closeInFlight
+    )
+  }
+
+  private resolveRecentHoveredDropTarget(drag: TabDragRecord, point: { x: number; y: number }) {
+    if (
+      !drag.hoverTargetWindowId ||
+      !drag.hoverTargetAt ||
+      Date.now() - drag.hoverTargetAt > DRAG_TARGET_HOVER_GRACE_MS
+    ) {
+      return null
+    }
+
+    const targetWindow = this.getWindow(drag.hoverTargetWindowId)
+    if (!targetWindow || !this.isPointInsideVisibleWindow(point, targetWindow)) {
+      return null
+    }
+    if (drag.hoverTargetWindowId === MAIN_WINDOW_ID) {
+      return drag.hoverTargetWindowId
+    }
+
+    const targetRecord = this.detachedByWindowId.get(drag.hoverTargetWindowId)
+    return targetRecord && this.canAcceptNativeDrop(targetRecord) ? drag.hoverTargetWindowId : null
+  }
+
+  private findWorkspaceDropTargetAtPoint(point: { x: number; y: number }, sourceWindowId: string) {
+    const sourceWindow = this.getWindow(sourceWindowId)
+    if (sourceWindow && this.isPointInsideVisibleWindow(point, sourceWindow)) {
+      return sourceWindowId
+    }
+
+    const candidates: Array<{ windowId: string; window: BrowserWindow; priority: number }> = []
+    const mainWindow = this.options.getMainWindow()
+    if (sourceWindowId !== MAIN_WINDOW_ID && mainWindow) {
+      candidates.push({ windowId: MAIN_WINDOW_ID, window: mainWindow, priority: 0 })
+    }
+
+    let detachedPriority = 1
+    for (const [windowId, record] of this.detachedByWindowId) {
+      if (windowId === sourceWindowId || !this.canAcceptNativeDrop(record)) {
+        continue
+      }
+      candidates.push({ windowId, window: record.window, priority: detachedPriority++ })
+    }
+
+    return (
+      candidates
+        .filter(({ window }) => this.isPointInsideVisibleWindow(point, window))
+        .sort((left, right) => {
+          const focusDifference = Number(right.window.isFocused()) - Number(left.window.isFocused())
+          return focusDifference || right.priority - left.priority
+        })[0]?.windowId ?? null
+    )
+  }
+
+  private canAcceptNativeDrop(record: DetachedWindowRecord) {
+    return (
+      !this.options.isQuitting() &&
+      !record.window.isDestroyed() &&
+      !record.window.webContents.isDestroyed() &&
+      record.window.isVisible() &&
+      record.ready &&
+      !record.approvedClose &&
+      !record.closeInFlight
+    )
+  }
+
+  private isPointInsideVisibleWindow(point: { x: number; y: number }, window: BrowserWindow) {
+    if (this.options.isQuitting() || window.isDestroyed() || window.webContents.isDestroyed() || !window.isVisible()) {
+      return false
+    }
+
+    const bounds = window.getBounds()
+    return (
+      point.x >= bounds.x &&
+      point.x < bounds.x + bounds.width &&
+      point.y >= bounds.y &&
+      point.y < bounds.y + bounds.height
     )
   }
 
@@ -557,11 +749,13 @@ export class WorkspaceWindowRegistry {
       return
     }
 
-    const mainWindow = this.options.getMainWindow()
+    const existingMainWindow = this.options.getMainWindow()
+    const mainWindow =
+      existingMainWindow && !existingMainWindow.isDestroyed() ? existingMainWindow : this.options.ensureMainWindow()
     for (const tabId of [...record.tabIds]) {
       this.options.releaseTabRenderer(tabId, record.window.webContents)
       this.ownerWindowIdByTabId.delete(tabId)
-      if (mainWindow && !mainWindow.isDestroyed()) {
+      if (!mainWindow.isDestroyed()) {
         this.options.claimTabRenderer(tabId, mainWindow.webContents)
       }
     }
@@ -574,6 +768,13 @@ export class WorkspaceWindowRegistry {
     }
     if (!record.window.isDestroyed()) {
       record.window.close()
+    }
+  }
+
+  private closeEmptyMainWindow() {
+    const mainWindow = this.options.getMainWindow()
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.destroy()
     }
   }
 

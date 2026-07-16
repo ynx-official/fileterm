@@ -6,6 +6,7 @@ import {
   isWorkspaceTabDrag,
   resolveWorkspaceTabDropTargetIndex,
   resolveWorkspaceTabOutsideFeedback,
+  FILETERM_TAB_DRAG_MIME,
   WORKSPACE_TAB_DRAG_MIME
 } from '../../src/renderer/features/layout/tab-drag.ts'
 
@@ -20,9 +21,12 @@ test('detects a release beyond the native window bounds', () => {
   assert.equal(isTabDragReleasedOutsideWindow({ screenX: 600, screenY: 500 }, windowBounds), false)
 })
 
-test('accepts only the internal workspace tab MIME', () => {
+test('recognizes either trusted FileTerm tab MIME without claiming external drags', () => {
   assert.equal(isWorkspaceTabDrag({ types: [WORKSPACE_TAB_DRAG_MIME, 'text/plain'] }), true)
+  assert.equal(isWorkspaceTabDrag({ types: [FILETERM_TAB_DRAG_MIME] }), true)
   assert.equal(isWorkspaceTabDrag({ types: ['Files', 'text/plain'] }), false)
+  assert.equal(isWorkspaceTabDrag({ types: ['text/plain'] }), false)
+  assert.equal(isWorkspaceTabDrag({ types: ['application/x-fileterm-local-tab'] }), false)
   assert.equal(isWorkspaceTabDrag(null), false)
 })
 
