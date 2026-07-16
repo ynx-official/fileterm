@@ -55,12 +55,13 @@ export class WorkspaceWindowRegistry {
   }
 
   registerMainWindow(window: BrowserWindow) {
-    this.contextsByWebContentsId.set(window.webContents.id, {
+    const webContentsId = window.webContents.id
+    this.contextsByWebContentsId.set(webContentsId, {
       windowId: MAIN_WINDOW_ID,
       kind: 'main'
     })
     window.webContents.once('destroyed', () => {
-      this.contextsByWebContentsId.delete(window.webContents.id)
+      this.contextsByWebContentsId.delete(webContentsId)
       this.clearDragRecordsForWindow(MAIN_WINDOW_ID)
     })
   }
@@ -113,6 +114,7 @@ export class WorkspaceWindowRegistry {
       initialTabId: input.tabId
     }
     const window = this.options.createDetachedWindow(context, input)
+    const webContentsId = window.webContents.id
     const record: DetachedWindowRecord = {
       context,
       window,
@@ -124,7 +126,7 @@ export class WorkspaceWindowRegistry {
 
     this.detachedByWindowId.set(context.windowId, record)
     this.ownerWindowIdByTabId.set(input.tabId, context.windowId)
-    this.contextsByWebContentsId.set(window.webContents.id, context)
+    this.contextsByWebContentsId.set(webContentsId, context)
 
     window.on('close', (event) => {
       if (this.options.isQuitting() || record.approvedClose) {
@@ -142,7 +144,7 @@ export class WorkspaceWindowRegistry {
     })
 
     window.on('closed', () => {
-      this.contextsByWebContentsId.delete(window.webContents.id)
+      this.contextsByWebContentsId.delete(webContentsId)
       this.clearDragRecordsForWindow(context.windowId)
       if (this.detachedByWindowId.get(context.windowId) !== record) {
         return
@@ -342,7 +344,7 @@ export class WorkspaceWindowRegistry {
     if (!sourceContext || sourceContext.windowId !== drag.sourceWindowId) {
       return
     }
-    if (!input.detachIfUnhandled) {
+    if (!input.detachIfUnhandled || !this.canDetachUnhandledDrag(drag)) {
       this.deleteDragRecord(input.dragId)
       return
     }
@@ -355,7 +357,11 @@ export class WorkspaceWindowRegistry {
         return
       }
       const currentOwnerWindowId = this.ownerWindowIdByTabId.get(pending.tabId) ?? MAIN_WINDOW_ID
-      if (currentOwnerWindowId !== pending.sourceWindowId || !this.options.listTabIds().includes(pending.tabId)) {
+      if (
+        currentOwnerWindowId !== pending.sourceWindowId ||
+        !this.options.listTabIds().includes(pending.tabId) ||
+        !this.canDetachUnhandledDrag(pending)
+      ) {
         this.deleteDragRecord(input.dragId)
         return
       }
@@ -431,6 +437,15 @@ export class WorkspaceWindowRegistry {
       !record.approvedClose &&
       !record.closeInFlight
     )
+  }
+
+  private canDetachUnhandledDrag(drag: WorkspaceTabDragInput) {
+    if (drag.sourceWindowId === MAIN_WINDOW_ID) {
+      return true
+    }
+
+    const source = this.detachedByWindowId.get(drag.sourceWindowId)
+    return Boolean(source && source.tabIds.length > 1 && source.tabIds.includes(drag.tabId))
   }
 
   private deleteDragRecord(dragId: string) {
@@ -566,7 +581,7 @@ export class WorkspaceWindowRegistry {
     record.approvedClose = true
     this.removeDetachedRecord(record)
     if (!record.window.isDestroyed()) {
-      record.window.close()
+      record.window.destroy()
     }
   }
 

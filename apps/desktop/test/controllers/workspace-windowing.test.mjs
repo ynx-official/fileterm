@@ -7,13 +7,21 @@ import { WorkspaceWindowRegistry } from '../../dist-electron/main/services/windo
 class FakeWebContents extends EventEmitter {
   constructor(id) {
     super()
-    this.id = id
+    this._id = id
     this.destroyed = false
+    this.throwOnDestroyedIdAccess = false
     this.sent = []
     this.mainFrame = {
       detached: false,
       isDestroyed: () => this.destroyed
     }
+  }
+
+  get id() {
+    if (this.destroyed && this.throwOnDestroyedIdAccess) {
+      throw new TypeError('Object has been destroyed')
+    }
+    return this._id
   }
 
   isDestroyed() {
@@ -39,6 +47,7 @@ class FakeBrowserWindow extends EventEmitter {
     this.minimized = false
     this.restored = false
     this.closed = false
+    this.destroyedDirectly = false
   }
 
   isDestroyed() {
@@ -72,6 +81,15 @@ class FakeBrowserWindow extends EventEmitter {
     this.emit('close', event)
     if (event.defaultPrevented || this.closed) return
     this.closed = true
+    this.webContents.destroy()
+    this.emit('closed')
+  }
+
+  destroy() {
+    if (this.closed) return
+    this.destroyedDirectly = true
+    this.closed = true
+    this.webContents.throwOnDestroyedIdAccess = true
     this.webContents.destroy()
     this.emit('closed')
   }
@@ -197,6 +215,7 @@ test('tabs move between detached windows and the empty source window closes', ()
   registry.move({ tabId: 'tab-a', targetWindowId: 'detached-2', targetIndex: 1 })
 
   assert.equal(detachedWindows[0].closed, true)
+  assert.equal(detachedWindows[0].destroyedDirectly, true)
   assert.equal(detachedWindows[1].closed, false)
   assert.deepEqual(registry.listPlacements(), [
     { tabId: 'tab-a', ownerWindowId: 'detached-2', ownerKind: 'detached-session', order: 1 },
@@ -213,6 +232,7 @@ test('moving the final detached tab to main closes only the empty window', () =>
   registry.attach('tab-a')
 
   assert.equal(detachedWindows[0].closed, true)
+  assert.equal(detachedWindows[0].destroyedDirectly, true)
   assert.equal(mainWindow.restored, true)
   assert.equal(mainWindow.focused, true)
   assert.deepEqual(claims.at(-1), { tabId: 'tab-a', senderId: mainWindow.webContents.id })
@@ -346,6 +366,54 @@ test('exact tab-bar drop inserts at the requested target index', () => {
       .map((placement) => placement.tabId),
     ['tab-c', 'tab-a', 'tab-b']
   )
+})
+
+test('single-tab detached windows can merge but cannot detach into another window', async () => {
+  const { detachedWindows, mainWindow, registry } = createRegistry(['tab-a', 'tab-b'])
+  registry.detach({ tabId: 'tab-a' })
+  registry.claim('tab-a', detachedWindows[0].webContents)
+
+  const unhandled = { dragId: 'single-detach', tabId: 'tab-a', sourceWindowId: 'detached-1' }
+  registry.startDrag(unhandled, detachedWindows[0].webContents)
+  registry.finishDrag({ dragId: unhandled.dragId, detachIfUnhandled: true }, detachedWindows[0].webContents)
+  await delay(100)
+
+  assert.equal(detachedWindows.length, 1)
+  assert.equal(registry.listPlacements().find((placement) => placement.tabId === 'tab-a')?.ownerWindowId, 'detached-1')
+
+  const merge = { dragId: 'single-merge', tabId: 'tab-a', sourceWindowId: 'detached-1' }
+  registry.startDrag(merge, detachedWindows[0].webContents)
+  registry.drop({ ...merge, targetWindowId: 'detached-1', dropZone: 'workspace' }, mainWindow.webContents)
+
+  assert.deepEqual(
+    registry
+      .listPlacements()
+      .filter((placement) => placement.ownerWindowId === 'main')
+      .sort((left, right) => left.order - right.order)
+      .map((placement) => placement.tabId),
+    ['tab-b', 'tab-a']
+  )
+  assert.equal(detachedWindows[0].closed, true)
+  assert.equal(detachedWindows[0].destroyedDirectly, true)
+})
+
+test('multi-tab detached windows can still detach one tab into a new window', async () => {
+  const { detachedWindows, registry } = createRegistry(['tab-a', 'tab-b'])
+  registry.detach({ tabId: 'tab-a' })
+  registry.claim('tab-a', detachedWindows[0].webContents)
+  registry.move({ tabId: 'tab-b', targetWindowId: 'detached-1' })
+
+  const input = { dragId: 'group-detach', tabId: 'tab-b', sourceWindowId: 'detached-1' }
+  registry.startDrag(input, detachedWindows[0].webContents)
+  registry.finishDrag({ dragId: input.dragId, detachIfUnhandled: true }, detachedWindows[0].webContents)
+  await delay(100)
+  registry.claim('tab-b', detachedWindows[1].webContents)
+
+  assert.equal(detachedWindows.length, 2)
+  assert.deepEqual(registry.listPlacements(), [
+    { tabId: 'tab-a', ownerWindowId: 'detached-1', ownerKind: 'detached-session', order: 0 },
+    { tabId: 'tab-b', ownerWindowId: 'detached-2', ownerKind: 'detached-session', order: 0 }
+  ])
 })
 
 test('same-window content drop is handled without reordering or detaching', async () => {

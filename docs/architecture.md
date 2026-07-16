@@ -196,7 +196,8 @@ Renderer
 
 - `WorkspaceWindowRegistry` 只管理主窗口、独立 workspace 窗口、标签顺序和 placement，不管理协议连接实现。
 - 一个独立窗口可承载多个 SSH、FTP、Telnet、Serial 标签；标签可在主窗口与任意独立窗口之间移动，也可在窗口内排序。
-- 跨窗口拖放由 main process 结算：目标窗口提交 `tabId + targetWindowId + targetIndex`；未被任何 FileTerm 窗口接收的拖放才创建新窗口。
+- 跨窗口拖放由 main process 结算：目标窗口整窗都可接收，命中具体标签时按索引插入，否则追加到目标会话列表末尾。
+- 未被任何 FileTerm 窗口接收的拖放仅在源是主窗口或多标签独立窗口时创建新窗口；单标签独立窗口只能合并到其他 workspace，未命中目标则保持原位。
 - `WorkspaceSessionRuntime` 维护 `tabId -> WebContents` 输出 owner；`releaseTabRenderer(tabId, sender)` 必须 compare-and-release，旧 renderer 的延迟销毁不能清掉新 owner。
 - `workspace:getSnapshot` 是纯读取；窗口移动后 registry 将 tab owner 切到目标 `WebContents`，renderer 根据 placement 选择刚移入的标签。
 - 新独立窗口在 renderer 成功 claim 初始标签前仍保持原 placement，避免窗口尚未可用时源窗口提前丢失会话。

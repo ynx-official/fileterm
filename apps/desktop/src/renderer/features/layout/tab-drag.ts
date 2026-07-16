@@ -57,6 +57,17 @@ export function resolveWorkspaceTabDropTargetIndex({
   return Math.max(0, targetIndex)
 }
 
+export function canDetachWorkspaceTabFromWindow(windowKind: 'main' | 'detached-session', sessionTabCount: number) {
+  return windowKind === 'main' || sessionTabCount > 1
+}
+
+export function resolveWorkspaceTabOutsideFeedback(isSessionTab: boolean, canDetach: boolean) {
+  if (!isSessionTab) {
+    return 'blocked' as const
+  }
+  return canDetach ? ('detach' as const) : ('attach' as const)
+}
+
 export function isTabDragReleasedOutsideWindow(dragEnd: TabDragEndState, windowBounds: WindowScreenBounds, margin = 8) {
   // Chromium may clear dragend coordinates when the pointer is released outside
   // the native window. The document dragleave state handles that ambiguous case.

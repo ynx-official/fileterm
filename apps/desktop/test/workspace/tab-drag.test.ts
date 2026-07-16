@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
+  canDetachWorkspaceTabFromWindow,
   isTabDragReleasedOutsideWindow,
   isWorkspaceTabDrag,
   resolveWorkspaceTabDropTargetIndex,
+  resolveWorkspaceTabOutsideFeedback,
   WORKSPACE_TAB_DRAG_MIME
 } from '../../src/renderer/features/layout/tab-drag.ts'
 
@@ -22,6 +24,18 @@ test('accepts only the internal workspace tab MIME', () => {
   assert.equal(isWorkspaceTabDrag({ types: [WORKSPACE_TAB_DRAG_MIME, 'text/plain'] }), true)
   assert.equal(isWorkspaceTabDrag({ types: ['Files', 'text/plain'] }), false)
   assert.equal(isWorkspaceTabDrag(null), false)
+})
+
+test('allows unhandled detach only from main or a multi-session detached window', () => {
+  assert.equal(canDetachWorkspaceTabFromWindow('main', 1), true)
+  assert.equal(canDetachWorkspaceTabFromWindow('detached-session', 2), true)
+  assert.equal(canDetachWorkspaceTabFromWindow('detached-session', 1), false)
+})
+
+test('uses merge feedback for a single-tab detached window instead of blocking the drag', () => {
+  assert.equal(resolveWorkspaceTabOutsideFeedback(true, false), 'attach')
+  assert.equal(resolveWorkspaceTabOutsideFeedback(true, true), 'detach')
+  assert.equal(resolveWorkspaceTabOutsideFeedback(false, false), 'blocked')
 })
 
 test('appends a cross-window fallback drop to the target session list', () => {

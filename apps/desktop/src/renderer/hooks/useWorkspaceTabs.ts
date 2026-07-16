@@ -13,10 +13,12 @@ import { findTabMovedToWindow } from '../app/workspace-tab-placement'
 import { resolveSelectedTabIds, type SendScope, type SessionSendTarget } from '../features/common/session-send-targets'
 import type { OrderedTabEntry, TabContextTarget, TabDragFeedback } from '../features/layout/TabBar'
 import {
+  canDetachWorkspaceTabFromWindow,
   isTabDragReleasedOutsideWindow,
   isWorkspaceTabDrag,
   isWorkspaceTabPreciseDropTarget,
   resolveWorkspaceTabDropTargetIndex,
+  resolveWorkspaceTabOutsideFeedback,
   WORKSPACE_TAB_DRAG_MIME
 } from '../features/layout/tab-drag'
 import { setLocale, t, type AppLocale } from '../i18n'
@@ -287,6 +289,7 @@ export function useWorkspaceTabs({
   const tabOrderBeforeDragRef = useRef<string[] | null>(null)
   const workspaceTabDragEnterDepthRef = useRef(0)
   const tabDragDetachReadyRef = useRef(false)
+  const tabDragCanDetachRef = useRef(false)
   const pendingHomeReplacementKeyRef = useRef<string | null>(null)
   const pendingProfileOpenIdRef = useRef<string | null>(null)
   const hasSanitizedStoredPlaceholderRef = useRef(false)
@@ -302,7 +305,8 @@ export function useWorkspaceTabs({
     }
 
     const isSessionTab = draggingTabKey.startsWith('session:')
-    const detachableFeedback: TabDragFeedback = 'detach'
+    const canDetach = isSessionTab && tabDragCanDetachRef.current
+    const outsideFeedback = resolveWorkspaceTabOutsideFeedback(isSessionTab, canDetach)
 
     const updateDragFeedback = (event: globalThis.DragEvent) => {
       event.preventDefault()
@@ -316,16 +320,16 @@ export function useWorkspaceTabs({
         event.clientX >= window.innerWidth - edgeThreshold ||
         event.clientY <= edgeThreshold ||
         event.clientY >= window.innerHeight - edgeThreshold
-      tabDragDetachReadyRef.current = isSessionTab && isNearWindowEdge
-      setTabDragFeedback(isNearWindowEdge ? (isSessionTab ? detachableFeedback : 'blocked') : 'sort')
+      tabDragDetachReadyRef.current = canDetach && isNearWindowEdge
+      setTabDragFeedback(isNearWindowEdge ? outsideFeedback : 'sort')
     }
 
     const markOutsideWindow = (event: globalThis.DragEvent) => {
       if (event.relatedTarget) {
         return
       }
-      tabDragDetachReadyRef.current = isSessionTab
-      setTabDragFeedback(isSessionTab ? detachableFeedback : 'blocked')
+      tabDragDetachReadyRef.current = canDetach
+      setTabDragFeedback(outsideFeedback)
     }
 
     document.addEventListener('dragover', updateDragFeedback)
@@ -1476,6 +1480,7 @@ export function useWorkspaceTabs({
     event.dataTransfer.effectAllowed = 'move'
     tabOrderBeforeDragRef.current = [...tabOrder]
     tabDragDetachReadyRef.current = false
+    tabDragCanDetachRef.current = false
     setTabDragFeedback('sort')
     setDraggingTabKey(tabKey)
 
@@ -1489,6 +1494,7 @@ export function useWorkspaceTabs({
       tabId: tabKey.slice('session:'.length),
       sourceWindowId: windowContext.windowId
     }
+    tabDragCanDetachRef.current = canDetachWorkspaceTabFromWindow(windowContext.kind, visibleWorkspaceTabs.length)
     const serializedPayload = JSON.stringify(payload)
     activeWorkspaceTabDragRef.current = payload
     event.dataTransfer.setData(WORKSPACE_TAB_DRAG_MIME, serializedPayload)
@@ -1524,9 +1530,11 @@ export function useWorkspaceTabs({
   const endTabDrag = (event: DragEvent<HTMLElement>) => {
     const draggedTabKey = draggingTabKey
     const activeDrag = activeWorkspaceTabDragRef.current
-    const isDetachReady = tabDragDetachReadyRef.current
+    const canDetach = tabDragCanDetachRef.current
+    const isDetachReady = canDetach && tabDragDetachReadyRef.current
     tabOrderBeforeDragRef.current = null
     tabDragDetachReadyRef.current = false
+    tabDragCanDetachRef.current = false
     activeWorkspaceTabDragRef.current = null
     setDraggingTabKey(null)
     setTabDragFeedback(null)
@@ -1547,7 +1555,7 @@ export function useWorkspaceTabs({
     void desktopApi
       .finishWorkspaceTabDrag({
         dragId: activeDrag.dragId,
-        detachIfUnhandled: isDetachReady || releasedOutsideWindow,
+        detachIfUnhandled: canDetach && (isDetachReady || releasedOutsideWindow),
         ...(hasScreenPoint ? { screenPoint: { x: event.screenX, y: event.screenY } } : {})
       })
       .catch((error) => {
