@@ -59,7 +59,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        # windows-latest currently resolves to the rolling VS 2026 image, which
+        # intermittently produces test executables that fail during DLL loading.
+        os: [macos-latest, ubuntu-latest, windows-2022]
     runs-on: ${{ matrix.os }}
 
     steps:
