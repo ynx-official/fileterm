@@ -6,6 +6,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_socks::tcp::Socks5Stream;
 
+use super::telnet_direct::connect_direct_telnet;
 use super::terminal::{decode_terminal, emit_terminal_data, encode_terminal, set_terminal_state};
 use super::WorkerCmd;
 
@@ -236,10 +237,9 @@ async fn connect_transport(
         .and_then(Value::as_str)
         .unwrap_or("none");
     if proxy_type == "none" {
-        return TcpStream::connect((host, port))
+        return connect_direct_telnet(host, port)
             .await
-            .map(|stream| Box::new(stream) as Box<dyn TelnetTransport>)
-            .map_err(|error| format!("Telnet connect failed: {error}"));
+            .map(|stream| Box::new(stream) as Box<dyn TelnetTransport>);
     }
     let proxy_host = proxy
         .and_then(|proxy| proxy.get("host"))

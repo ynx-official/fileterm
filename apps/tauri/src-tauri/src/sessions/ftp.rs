@@ -1130,10 +1130,12 @@ fn format_bytes(bytes: u64) -> String {
 mod tests {
     use std::sync::Arc;
 
+    #[cfg(unix)]
+    use super::connect_ftp_with_tls_connector;
     use super::{
-        client_list, client_quit, client_read, client_write, connect_ftp,
-        connect_ftp_with_tls_connector, ftp_listing_permission, join_remote_path,
-        parent_remote_path, parse_ftp_listing_line, upload_file, FtpClient, FtpListingState,
+        client_list, client_quit, client_read, client_write, connect_ftp, ftp_listing_permission,
+        join_remote_path, parent_remote_path, parse_ftp_listing_line, upload_file, FtpClient,
+        FtpListingState,
     };
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;

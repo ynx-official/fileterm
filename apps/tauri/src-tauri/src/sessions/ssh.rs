@@ -4541,20 +4541,23 @@ fn format_perm(perm: u32, is_dir: bool, is_link: bool) -> String {
 mod tests {
     use super::{
         build_http_connect_request, capture_sudo_password_input, coalesce_terminal_input,
-        format_sftp_unavailable_reason, forward_local_connection, forward_socks5_connection,
-        is_password_prompt, looks_like_mfa_prompt, looks_like_root_prompt, looks_like_shell_prompt,
-        parent_remote_path, remote_bind_host_matches, resource_monitoring_enabled,
-        suppress_shell_setup_echo, track_cwd_and_user, track_sudo_prompt_from_terminal,
+        format_sftp_unavailable_reason, is_password_prompt, looks_like_mfa_prompt,
+        looks_like_root_prompt, looks_like_shell_prompt, parent_remote_path,
+        remote_bind_host_matches, resource_monitoring_enabled, suppress_shell_setup_echo,
+        track_cwd_and_user, track_sudo_prompt_from_terminal,
         try_keyboard_interactive_with_responder, tunnel_bind_address, validate_tunnel_rule,
         KeyboardInteractiveRequest, ShellSetupEchoSuppression, SshTunnelRule,
         SHELL_SETUP_SETTLE_DELAY,
     };
+    #[cfg(unix)]
+    use super::{forward_local_connection, forward_socks5_connection};
     use std::borrow::Cow;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
     use russh::keys::PrivateKey;
     use russh::{client, server};
+    #[cfg(unix)]
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::time::{timeout, Duration};

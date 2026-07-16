@@ -3,6 +3,7 @@ pub mod system_metrics;
 pub mod local_files;
 pub mod serial;
 pub mod telnet;
+mod telnet_direct;
 pub mod terminal;
 pub mod ftp;
 

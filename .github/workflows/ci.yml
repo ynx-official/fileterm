@@ -59,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: [macos-latest, ubuntu-latest, windows-2022]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -76,8 +76,16 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Verify direct Telnet socket release
+        if: runner.os != 'Windows'
         working-directory: apps/tauri/src-tauri
         run: cargo test sessions::telnet::tests::direct_transport_drop_releases_socket_on_every_desktop_platform
+
+      - name: Verify direct Telnet socket release without desktop runtime DLLs
+        if: runner.os == 'Windows'
+        # The full Tauri lib test binary loads unrelated desktop runtime DLLs
+        # before this socket test starts. Compile the extracted production
+        # transport module in a minimal fixture to keep this check deterministic.
+        run: cargo test --manifest-path .github/fixtures/tauri-socket-lifecycle/Cargo.toml --locked
 
   tauri-serial-virtual:
     name: Tauri virtual serial (ubuntu-latest)
