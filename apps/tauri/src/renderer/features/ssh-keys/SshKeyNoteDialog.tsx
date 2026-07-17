@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { SshKeyFileSelection } from '@fileterm/core'
+import { AppIcon } from '../common/AppIcon'
 import { ConfirmActionDialog } from '../common/ConfirmActionDialog'
 
 export function SshKeyNoteDialog({
@@ -112,12 +113,17 @@ export function SshKeyNoteDialog({
                   <span>{selectedFile?.fileName ?? '尚未选择私钥文件'}</span>
                 </div>
                 <button
-                  className="flat-button compact"
+                  className="flat-button compact ssh-key-import-dialog__file-button"
                   disabled={isSubmitting || isSelectingFile}
                   onClick={() => void selectFile()}
                   type="button"
                 >
-                  {isSelectingFile ? '选择中…' : selectedFile ? '重新选择' : '选择文件'}
+                  {isSelectingFile ? (
+                    <span aria-hidden="true" className="button-spinner" />
+                  ) : (
+                    <AppIcon name="folder" size={14} />
+                  )}
+                  <span>{isSelectingFile ? '选择中…' : selectedFile ? '重新选择' : '选择文件'}</span>
                 </button>
               </div>
               {selectedFile?.existingKey ? (
@@ -142,7 +148,12 @@ export function SshKeyNoteDialog({
       isSubmitting={isSubmitting}
       onClose={onClose}
       onConfirm={submit}
-      title={mode === 'import' ? '导入 SSH 私钥' : '修改密钥备注'}
+      title={
+        <span className="ssh-key-import-dialog__title-content">
+          <AppIcon name="key" size={16} />
+          <span>{mode === 'import' ? '导入 SSH 私钥' : '修改密钥备注'}</span>
+        </span>
+      }
     />
   )
 }

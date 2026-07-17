@@ -29,7 +29,7 @@ export type StoredMainTabUiState = {
   activeLocalTabId: string | null
   nextHomeTabNumber: number
   tabOrder: string[]
-  isSystemSidebarCollapsed: boolean
+  systemSidebarCollapsedByTabId: Record<string, boolean>
 }
 
 export type TerminalDockSendState = {
@@ -135,6 +135,16 @@ function parseStoredMainTabUiState(raw: string | null | undefined): StoredMainTa
     const tabOrder = Array.isArray(parsed.tabOrder)
       ? uniqueStrings(parsed.tabOrder.filter((entry): entry is string => typeof entry === 'string'))
       : []
+    const systemSidebarCollapsedByTabId =
+      parsed.systemSidebarCollapsedByTabId &&
+      typeof parsed.systemSidebarCollapsedByTabId === 'object' &&
+      !Array.isArray(parsed.systemSidebarCollapsedByTabId)
+        ? Object.fromEntries(
+            Object.entries(parsed.systemSidebarCollapsedByTabId).filter(
+              ([tabId, collapsed]) => tabId.length > 0 && typeof collapsed === 'boolean'
+            )
+          )
+        : {}
 
     return {
       localTabs,
@@ -144,7 +154,7 @@ function parseStoredMainTabUiState(raw: string | null | undefined): StoredMainTa
           ? Math.max(1, Math.floor(parsed.nextHomeTabNumber))
           : 1,
       tabOrder,
-      isSystemSidebarCollapsed: parsed.isSystemSidebarCollapsed === true
+      systemSidebarCollapsedByTabId
     }
   } catch {
     return null
@@ -158,7 +168,7 @@ function createInitialMainTabUiState(enabled: boolean, stored: StoredMainTabUiSt
       activeLocalTabId: null,
       nextHomeTabNumber: 1,
       tabOrder: [],
-      isSystemSidebarCollapsed: false
+      systemSidebarCollapsedByTabId: {}
     }
   }
 
@@ -171,7 +181,7 @@ function createInitialMainTabUiState(enabled: boolean, stored: StoredMainTabUiSt
     activeLocalTabId: 'home-1',
     nextHomeTabNumber: 2,
     tabOrder: ['home:home-1'],
-    isSystemSidebarCollapsed: false
+    systemSidebarCollapsedByTabId: {}
   }
 }
 
@@ -234,8 +244,8 @@ export function useWorkspaceTabs({
   const [tabContextMenu, setTabContextMenu] = useState<WorkspaceTabContextMenu | null>(null)
   const [shortcutCloseConfirm, setShortcutCloseConfirm] = useState<ShortcutCloseConfirm | null>(null)
   const [closingSessionTabIds, setClosingSessionTabIds] = useState<string[]>([])
-  const [isSystemSidebarCollapsed, setIsSystemSidebarCollapsed] = useState(
-    () => initialMainTabUiState.isSystemSidebarCollapsed
+  const [systemSidebarCollapsedByTabId, setSystemSidebarCollapsedByTabId] = useState<Record<string, boolean>>(
+    () => initialMainTabUiState.systemSidebarCollapsedByTabId
   )
 
   const localTabsRef = useRef(localTabs)
@@ -269,7 +279,7 @@ export function useWorkspaceTabs({
         setActiveLocalTabId(storedState.activeLocalTabId)
         setNextHomeTabNumber(storedState.nextHomeTabNumber)
         setTabOrder(storedState.tabOrder)
-        setIsSystemSidebarCollapsed(storedState.isSystemSidebarCollapsed)
+        setSystemSidebarCollapsedByTabId(storedState.systemSidebarCollapsedByTabId)
       } catch {
         // Fall back to the initial local tab state when persisted UI state cannot be read.
       } finally {
@@ -440,7 +450,7 @@ export function useWorkspaceTabs({
         activeLocalTabId,
         nextHomeTabNumber,
         tabOrder,
-        isSystemSidebarCollapsed
+        systemSidebarCollapsedByTabId
       } satisfies StoredMainTabUiState)
     )
   }, [
@@ -449,9 +459,9 @@ export function useWorkspaceTabs({
     hasHydratedMainTabUiState,
     hasLoadedInitialSnapshot,
     isMainWorkspaceWindow,
-    isSystemSidebarCollapsed,
     localTabs,
     nextHomeTabNumber,
+    systemSidebarCollapsedByTabId,
     tabOrder
   ])
 
@@ -481,6 +491,26 @@ export function useWorkspaceTabs({
     ? (visibleWorkspaceTabs.find((tab) => tab.id === displayedSessionTabId) ?? null)
     : null
   const activeSession = activeTab ? (workspace.sessions[activeTab.id] ?? null) : null
+  const isSystemSidebarCollapsed = activeTab ? (systemSidebarCollapsedByTabId[activeTab.id] ?? false) : false
+  const setIsSystemSidebarCollapsed = (nextCollapsed: boolean) => {
+    if (!activeTab) {
+      return
+    }
+
+    const tabId = activeTab.id
+    setSystemSidebarCollapsedByTabId((currentByTabId) => {
+      const currentCollapsed = currentByTabId[tabId] ?? false
+      if (currentCollapsed === nextCollapsed) {
+        return currentByTabId
+      }
+      if (!nextCollapsed) {
+        const nextByTabId = { ...currentByTabId }
+        delete nextByTabId[tabId]
+        return nextByTabId
+      }
+      return { ...currentByTabId, [tabId]: true }
+    })
+  }
   const workspaceStageKind: WorkspaceStageKind =
     activeLocalTab?.kind === 'system' ? 'system' : activeTab && activeSession && !activeLocalTab ? 'session' : 'home'
   const isHomeWorkspaceVisible = workspaceStageKind === 'home'
@@ -572,12 +602,20 @@ export function useWorkspaceTabs({
     : createDefaultTerminalDockSendState()
 
   useEffect(() => {
+    if (!hasLoadedInitialSnapshot) {
+      return
+    }
+
     const validTabIds = new Set(visibleWorkspaceTabs.map((tab) => tab.id))
     setTerminalDockSendStateByTabId((current) => {
       const next = Object.fromEntries(Object.entries(current).filter(([tabId]) => validTabIds.has(tabId)))
       return Object.keys(next).length === Object.keys(current).length ? current : next
     })
-  }, [visibleWorkspaceTabs])
+    setSystemSidebarCollapsedByTabId((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([tabId]) => validTabIds.has(tabId)))
+      return Object.keys(next).length === Object.keys(current).length ? current : next
+    })
+  }, [hasLoadedInitialSnapshot, visibleWorkspaceTabs])
 
   useEffect(() => {
     const availableTargetIds = new Set(sessionSendTargets.map((target) => target.tabId))

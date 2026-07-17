@@ -206,7 +206,7 @@ export function App() {
     localTabs,
     tabContextMenu,
     shortcutCloseConfirm,
-    isSystemSidebarCollapsed,
+    isSystemSidebarCollapsed: isSystemSidebarUserCollapsed,
     visibleWorkspaceTabs,
     activeLocalTab,
     visibleActiveSessionTabId,
@@ -264,6 +264,8 @@ export function App() {
   const isWorkspaceFocusMode = activeWorkspaceFocusKey ? (workspaceFocusModes[activeWorkspaceFocusKey] ?? false) : false
   const isResourceMonitoringAvailable =
     activeProfile?.type === 'ssh' && activeProfile.enableResourceMonitoring !== false
+  const isSystemSidebarCollapsed =
+    isSystemSidebarUserCollapsed || Boolean(activeTab && (isWorkspaceFocusMode || !isResourceMonitoringAvailable))
   const activeTabId = activeTab?.id ?? null
   const setActiveFilePanelHeight = useCallback(
     (next: SetStateAction<number>) => {
@@ -298,23 +300,6 @@ export function App() {
     setFilePanelHeights((currentHeights) => retainOpenTabUiState(currentHeights, openTabIds))
     setWorkspaceFocusModes((currentModes) => retainOpenTabUiState(currentModes, openTabIds))
   }, [localTabs, visibleWorkspaceTabs])
-
-  useEffect(() => {
-    if (!activeWorkspaceFocusKey || isHomeWorkspaceVisible) {
-      return
-    }
-
-    setIsSystemSidebarCollapsed(isWorkspaceFocusMode || !isResourceMonitoringAvailable)
-    if (!isWorkspaceFocusMode) {
-      setSidebarWidth(214)
-    }
-  }, [
-    activeWorkspaceFocusKey,
-    isHomeWorkspaceVisible,
-    isResourceMonitoringAvailable,
-    isWorkspaceFocusMode,
-    setIsSystemSidebarCollapsed
-  ])
 
   // 3. Workspace Modals Hook
   const {
@@ -1163,7 +1148,6 @@ export function App() {
         ...currentModes,
         [activeWorkspaceFocusKey]: nextFocusMode
       }))
-      setIsSystemSidebarCollapsed(nextFocusMode)
       if (!nextFocusMode) {
         setSidebarWidth(214)
       }

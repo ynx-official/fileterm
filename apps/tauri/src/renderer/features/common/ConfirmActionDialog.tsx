@@ -27,7 +27,7 @@ export function ConfirmActionDialog({
   isSubmitting?: boolean
   onClose(): void
   onConfirm(): void
-  title: string
+  title: ReactNode
 }) {
   const titleId = useId()
   const descriptionId = useId()

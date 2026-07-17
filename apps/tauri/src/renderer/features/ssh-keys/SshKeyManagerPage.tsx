@@ -635,7 +635,7 @@ export function SshKeyManagerPage({
             onDrop={handleRootDrop}
           >
             <span className="connection-manager-sidebar-icon">
-              <AppIcon name="brand" size={14} />
+              <AppIcon name="key" size={14} />
             </span>
             <span className="connection-manager-sidebar-label">全部密钥</span>
             <span className="connection-manager-sidebar-count">{keys.length}</span>
@@ -735,7 +735,6 @@ export function SshKeyManagerPage({
                             >
                               <AppIcon name="chevron-right" size={12} />
                             </span>
-                            <AppIcon name="folder" size={14} />
                             {editingFolder?.id === folder.id ? (
                               <input
                                 autoFocus
@@ -752,7 +751,7 @@ export function SshKeyManagerPage({
                                 }}
                               />
                             ) : (
-                              <strong>{folder.name}</strong>
+                              <span className="manager-node-name">{folder.name}</span>
                             )}
                           </span>
                           <span>--</span>
@@ -932,7 +931,12 @@ function SshKeyRow({
       onDragEnd={onDragEnd}
     >
       <span className="ssh-key-name-cell">
-        <strong>{item.name}</strong>
+        <span className="manager-name-cell ssh-key-name-primary">
+          <span className="manager-node-icon">
+            <AppIcon name="key" size={14} />
+          </span>
+          <span className="manager-node-name">{item.name}</span>
+        </span>
         <small>{item.encrypted ? '已加密' : '未加密'}</small>
       </span>
       <span className="ssh-key-fingerprint-cell">

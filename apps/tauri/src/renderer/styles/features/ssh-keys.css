@@ -71,6 +71,7 @@
 .ssh-key-manager-table .manager-row {
   min-height: 36px;
   height: 36px;
+  border-bottom: 0;
   padding-top: 0;
   padding-bottom: 0;
   line-height: 1.35;
@@ -83,7 +84,7 @@
   gap: 3px;
 }
 
-.ssh-key-name-cell strong,
+.ssh-key-name-cell .manager-node-name,
 .ssh-key-name-cell small,
 .ssh-key-fingerprint-cell span,
 .ssh-key-fingerprint-cell code,
@@ -94,8 +95,12 @@
   white-space: nowrap;
 }
 
-.ssh-key-name-cell strong {
-  font-weight: 500;
+.ssh-key-name-primary {
+  gap: 7px;
+}
+
+.ssh-key-name-cell small {
+  padding-left: 21px;
 }
 
 .ssh-key-name-cell small,
@@ -157,16 +162,8 @@
   text-align: left;
 }
 
-.ssh-key-folder-row strong {
-  font-weight: 500;
-}
-
-.ssh-key-nested-row {
-  background: color-mix(in srgb, var(--bg-hover) 42%, transparent) !important;
-}
-
 .ssh-key-nested-row .ssh-key-name-cell {
-  padding-left: 20px;
+  padding-left: 18px;
 }
 
 .ssh-key-empty-folder {
@@ -176,7 +173,7 @@
 
 .ssh-key-empty-folder span {
   grid-column: 1 / -1;
-  padding-left: 28px;
+  padding-left: 36px;
 }
 
 .ssh-private-key-field {
@@ -240,6 +237,36 @@
 .ssh-private-key-notice {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.ssh-key-import-dialog {
+  --ssh-key-dialog-padding: 24px;
+  overflow: hidden;
+}
+
+.ssh-key-import-dialog .confirm-action-dialog__title {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  box-sizing: border-box;
+  margin: calc(-1 * var(--ssh-key-dialog-padding)) calc(-1 * var(--ssh-key-dialog-padding)) 10px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--bg-sidebar);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.ssh-key-import-dialog__title-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ssh-key-import-dialog__title-content .app-icon {
+  flex: 0 0 auto;
+  color: var(--text-muted);
 }
 
 .ssh-key-import-dialog__form {
@@ -321,9 +348,39 @@
   white-space: nowrap;
 }
 
-.ssh-key-import-dialog__file-row .flat-button.compact {
-  min-height: 40px;
+.ssh-key-import-dialog__file-row .ssh-key-import-dialog__file-button {
+  display: inline-flex;
+  min-width: 112px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
   padding: 0 14px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text-main);
+  font-size: 13px;
+  font-weight: 500;
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease;
+}
+
+.ssh-key-import-dialog__file-row .ssh-key-import-dialog__file-button .app-icon {
+  color: var(--text-muted);
+}
+
+.ssh-key-import-dialog__file-row .ssh-key-import-dialog__file-button:hover:not(:disabled) {
+  border-color: var(--text-muted);
+  background: var(--bg-active);
+}
+
+.ssh-key-import-dialog__file-row .ssh-key-import-dialog__file-button:focus-visible {
+  outline: none;
+  border-color: var(--copy-link);
+  box-shadow: 0 0 0 3px var(--input-focus-ring);
 }
 
 .ssh-key-import-dialog__duplicate-notice {
@@ -381,6 +438,12 @@
   border-color: var(--button-primary-hover);
 }
 
+@media (max-width: 640px) {
+  .ssh-key-import-dialog {
+    --ssh-key-dialog-padding: 20px;
+  }
+}
+
 @media (max-width: 760px) {
   .ssh-key-manager-page {
     overflow: auto;
@@ -420,7 +483,7 @@
     grid-template-columns: 1fr;
   }
 
-  .ssh-key-import-dialog__file-row .flat-button.compact {
-    justify-self: start;
+  .ssh-key-import-dialog__file-row .ssh-key-import-dialog__file-button {
+    width: 100%;
   }
 }

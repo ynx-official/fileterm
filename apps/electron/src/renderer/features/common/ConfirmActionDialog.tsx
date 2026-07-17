@@ -27,7 +27,7 @@ export function ConfirmActionDialog({
   isSubmitting?: boolean
   onClose(): void
   onConfirm(): void
-  title: string
+  title: ReactNode
 }) {
   const confirmButtonClassName =
     confirmVariant === 'primary'
