@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import type { SshForwardRule, SshTunnelSnapshot } from '@fileterm/core'
 import { AppIcon } from '../common/AppIcon'
@@ -20,14 +20,24 @@ export function SshTunnelPanel({ tabId }: { tabId: string }) {
   const [tunnels, setTunnels] = useState<SshTunnelSnapshot[]>([])
   const [draft, setDraft] = useState(initialDraft)
   const [isAdding, setIsAdding] = useState(false)
+  const [isLoading, setIsLoading] = useState(true)
+  const [isCreating, setIsCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const isLoadingRef = useRef(false)
+  const isCreatingRef = useRef(false)
 
   const load = async () => {
+    if (isLoadingRef.current) return
+    isLoadingRef.current = true
+    setIsLoading(true)
     try {
       setTunnels((await window.fileterm?.listSshTunnels(tabId)) ?? [])
       setError(null)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      isLoadingRef.current = false
+      setIsLoading(false)
     }
   }
 
@@ -35,16 +45,8 @@ export function SshTunnelPanel({ tabId }: { tabId: string }) {
     void load()
   }, [tabId])
 
-  const run = async (action: () => Promise<SshTunnelSnapshot[]>) => {
-    try {
-      setTunnels(await action())
-      setError(null)
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause))
-    }
-  }
-
-  const saveDraft = () => {
+  const saveDraft = async () => {
+    if (isCreatingRef.current) return
     const rule: SshForwardRule = {
       ...draft,
       name: draft.name?.trim() ?? '',
@@ -54,12 +56,19 @@ export function SshTunnelPanel({ tabId }: { tabId: string }) {
         ? { targetHost: undefined, targetPort: undefined }
         : { targetHost: draft.targetHost?.trim(), targetPort: Number(draft.targetPort) })
     }
-    void run(async () => {
-      const created = await window.fileterm!.createSshTunnel(tabId, rule)
+    isCreatingRef.current = true
+    setIsCreating(true)
+    setError(null)
+    try {
+      setTunnels(await window.fileterm!.createSshTunnel(tabId, rule))
       setDraft(initialDraft())
       setIsAdding(false)
-      return created
-    })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      isCreatingRef.current = false
+      setIsCreating(false)
+    }
   }
 
   const tunnelKindHint =
@@ -78,10 +87,25 @@ export function SshTunnelPanel({ tabId }: { tabId: string }) {
           <p>把端口接入当前 SSH 的加密通道，关闭标签后自动回收。</p>
         </div>
         <div className="ssh-tunnel-header-actions">
-          <button aria-label="刷新隧道状态" className="tunnel-icon-button" type="button" onClick={() => void load()}>
+          <button
+            aria-label={isLoading ? '正在刷新隧道状态' : '刷新隧道状态'}
+            aria-busy={isLoading}
+            className="tunnel-icon-button"
+            disabled={isLoading}
+            type="button"
+            onClick={() => void load()}
+          >
             <AppIcon name="refresh" size={15} />
           </button>
-          <button className="primary-button ssh-tunnel-create-button" type="button" onClick={() => setIsAdding(true)}>
+          <button
+            className="primary-button ssh-tunnel-create-button"
+            disabled={isCreating}
+            type="button"
+            onClick={() => {
+              setError(null)
+              setIsAdding(true)
+            }}
+          >
             <AppIcon name="plus" size={14} /> 新增隧道
           </button>
         </div>
@@ -109,8 +133,12 @@ export function SshTunnelPanel({ tabId }: { tabId: string }) {
             <span>创建后会立即绑定端口，并在当前 SSH 会话断开时自动停止。</span>
             <button
               className="flat-button compact ssh-tunnel-secondary-action"
+              disabled={isCreating}
               type="button"
-              onClick={() => setIsAdding(true)}
+              onClick={() => {
+                setError(null)
+                setIsAdding(true)
+              }}
             >
               创建第一个隧道
             </button>
@@ -118,86 +146,100 @@ export function SshTunnelPanel({ tabId }: { tabId: string }) {
         )}
       </div>
       {isAdding ? (
-        <TunnelEditorDialog onClose={() => setIsAdding(false)}>
+        <TunnelEditorDialog
+          isSubmitting={isCreating}
+          onClose={() => {
+            if (!isCreatingRef.current) setIsAdding(false)
+          }}
+        >
           <form
+            aria-busy={isCreating}
             className="ssh-tunnel-form"
             onSubmit={(event) => {
               event.preventDefault()
-              saveDraft()
+              void saveDraft()
             }}
           >
-            <label>
-              类型
-              <select
-                value={draft.kind}
-                onChange={(event) =>
-                  setDraft((value) => ({ ...value, kind: event.target.value as SshForwardRule['kind'] }))
-                }
-              >
-                <option value="local">本地 -L</option>
-                <option value="remote">远程 -R</option>
-                <option value="dynamic">动态 -D (SOCKS5)</option>
-              </select>
-            </label>
-            <p className="ssh-tunnel-kind-hint">{tunnelKindHint}</p>
-            <label>
-              名称
-              <input
-                value={draft.name}
-                placeholder="例如：数据库"
-                onChange={(event) => setDraft((value) => ({ ...value, name: event.target.value }))}
-              />
-            </label>
-            <label>
-              监听地址
-              <input
-                value={draft.bindHost}
-                required
-                onChange={(event) => setDraft((value) => ({ ...value, bindHost: event.target.value }))}
-              />
-            </label>
-            <label>
-              监听端口
-              <input
-                min="1"
-                max="65535"
-                required
-                type="number"
-                value={draft.bindPort || ''}
-                onChange={(event) => setDraft((value) => ({ ...value, bindPort: Number(event.target.value) }))}
-              />
-            </label>
-            {draft.kind !== 'dynamic' ? (
-              <>
-                <label>
-                  目标主机
-                  <input
-                    value={draft.targetHost}
-                    required
-                    onChange={(event) => setDraft((value) => ({ ...value, targetHost: event.target.value }))}
-                  />
-                </label>
-                <label>
-                  目标端口
-                  <input
-                    min="1"
-                    max="65535"
-                    required
-                    type="number"
-                    value={draft.targetPort || ''}
-                    onChange={(event) => setDraft((value) => ({ ...value, targetPort: Number(event.target.value) }))}
-                  />
-                </label>
-              </>
-            ) : null}
-            <div className="ssh-tunnel-form-actions">
-              <button className="flat-button" type="button" onClick={() => setIsAdding(false)}>
-                取消
-              </button>
-              <button className="primary-button" type="submit">
-                添加并启动
-              </button>
-            </div>
+            <fieldset className="ssh-tunnel-form-fields" disabled={isCreating}>
+              <label>
+                类型
+                <select
+                  value={draft.kind}
+                  onChange={(event) =>
+                    setDraft((value) => ({ ...value, kind: event.target.value as SshForwardRule['kind'] }))
+                  }
+                >
+                  <option value="local">本地 -L</option>
+                  <option value="remote">远程 -R</option>
+                  <option value="dynamic">动态 -D (SOCKS5)</option>
+                </select>
+              </label>
+              <p className="ssh-tunnel-kind-hint">{tunnelKindHint}</p>
+              <label>
+                名称
+                <input
+                  value={draft.name}
+                  placeholder="例如：数据库"
+                  onChange={(event) => setDraft((value) => ({ ...value, name: event.target.value }))}
+                />
+              </label>
+              <label>
+                监听地址
+                <input
+                  value={draft.bindHost}
+                  required
+                  onChange={(event) => setDraft((value) => ({ ...value, bindHost: event.target.value }))}
+                />
+              </label>
+              <label>
+                监听端口
+                <input
+                  min="1"
+                  max="65535"
+                  required
+                  type="number"
+                  value={draft.bindPort || ''}
+                  onChange={(event) => setDraft((value) => ({ ...value, bindPort: Number(event.target.value) }))}
+                />
+              </label>
+              {draft.kind !== 'dynamic' ? (
+                <>
+                  <label>
+                    目标主机
+                    <input
+                      value={draft.targetHost}
+                      required
+                      onChange={(event) => setDraft((value) => ({ ...value, targetHost: event.target.value }))}
+                    />
+                  </label>
+                  <label>
+                    目标端口
+                    <input
+                      min="1"
+                      max="65535"
+                      required
+                      type="number"
+                      value={draft.targetPort || ''}
+                      onChange={(event) => setDraft((value) => ({ ...value, targetPort: Number(event.target.value) }))}
+                    />
+                  </label>
+                </>
+              ) : null}
+              {error ? (
+                <p className="ssh-tunnel-error ssh-tunnel-dialog-error" role="alert">
+                  {error}
+                </p>
+              ) : null}
+              <div className="ssh-tunnel-form-actions">
+                <button className="flat-button" type="button" onClick={() => setIsAdding(false)}>
+                  取消
+                </button>
+                <button className="primary-button" type="submit">
+                  {isCreating ? <span aria-hidden="true" className="button-spinner" /> : null}
+                  {isCreating ? '添加中' : '添加并启动'}
+                </button>
+              </div>
+            </fieldset>
           </form>
         </TunnelEditorDialog>
       ) : null}
@@ -205,10 +247,24 @@ export function SshTunnelPanel({ tabId }: { tabId: string }) {
   )
 }
 
-function TunnelEditorDialog({ children, onClose }: { children: ReactNode; onClose(): void }) {
+function TunnelEditorDialog({
+  children,
+  isSubmitting,
+  onClose
+}: {
+  children: ReactNode
+  isSubmitting: boolean
+  onClose(): void
+}) {
   const dialog = (
-    <div className="modal-backdrop ssh-tunnel-dialog-backdrop" onClick={onClose}>
+    <div
+      className="modal-backdrop ssh-tunnel-dialog-backdrop"
+      onClick={() => {
+        if (!isSubmitting) onClose()
+      }}
+    >
       <div
+        aria-busy={isSubmitting}
         aria-labelledby="ssh-tunnel-dialog-title"
         aria-modal="true"
         className="modal-card ssh-tunnel-dialog"
@@ -220,7 +276,7 @@ function TunnelEditorDialog({ children, onClose }: { children: ReactNode; onClos
             <AppIcon name="connections" size={16} />
             <span id="ssh-tunnel-dialog-title">新增运行时隧道</span>
           </div>
-          <CloseButton aria-label="关闭新增隧道窗口" onClick={onClose} size="compact" />
+          <CloseButton aria-label="关闭新增隧道窗口" disabled={isSubmitting} onClick={onClose} size="compact" />
         </header>
         {children}
       </div>
@@ -244,32 +300,46 @@ function TunnelRow({
   const running = tunnel.status === 'running' || tunnel.status === 'starting'
   const target = tunnel.kind === 'dynamic' ? 'SOCKS5' : `${tunnel.targetHost}:${tunnel.targetPort}`
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false)
-  const [isDeleting, setIsDeleting] = useState(false)
-  const update = async (action: () => Promise<SshTunnelSnapshot[]>) => {
+  const [pendingAction, setPendingAction] = useState<'start' | 'stop' | 'delete' | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const pendingActionRef = useRef<typeof pendingAction>(null)
+  const update = async (kind: 'start' | 'stop', action: () => Promise<SshTunnelSnapshot[]>) => {
+    if (pendingActionRef.current) return
+    pendingActionRef.current = kind
+    setPendingAction(kind)
     try {
       onChange(await action())
       onError(null)
     } catch (cause) {
       onError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      pendingActionRef.current = null
+      setPendingAction(null)
     }
   }
 
   const deleteTunnel = async () => {
-    setIsDeleting(true)
+    if (pendingActionRef.current) return
+    pendingActionRef.current = 'delete'
+    setPendingAction('delete')
+    setDeleteError(null)
     try {
       onChange(await window.fileterm!.deleteSshTunnel(tabId, tunnel.id))
       onError(null)
       setIsDeleteConfirmOpen(false)
     } catch (cause) {
-      onError(cause instanceof Error ? cause.message : String(cause))
+      const message = cause instanceof Error ? cause.message : String(cause)
+      setDeleteError(message)
+      onError(message)
     } finally {
-      setIsDeleting(false)
+      pendingActionRef.current = null
+      setPendingAction(null)
     }
   }
 
   return (
     <>
-      <article className="ssh-tunnel-row">
+      <article aria-busy={Boolean(pendingAction)} className="ssh-tunnel-row">
         <span className={`ssh-tunnel-status is-${tunnel.status}`} aria-label={tunnel.status} />
         <div className="ssh-tunnel-description">
           <strong>{tunnel.name || `${tunnel.kind.toUpperCase()} ${tunnel.bindPort}`}</strong>
@@ -281,19 +351,28 @@ function TunnelRow({
         <span className="ssh-tunnel-state">{tunnel.status}</span>
         <div className="ssh-tunnel-actions">
           <button
+            disabled={Boolean(pendingAction)}
             type="button"
             onClick={() =>
-              void update(() =>
+              void update(running ? 'stop' : 'start', () =>
                 running
                   ? window.fileterm!.stopSshTunnel(tabId, tunnel.id)
                   : window.fileterm!.startSshTunnel(tabId, tunnel.id)
               )
             }
           >
-            {running ? '停止' : '启动'}
+            {pendingAction === 'stop' ? '停止中' : pendingAction === 'start' ? '启动中' : running ? '停止' : '启动'}
           </button>
           {tunnel.runtimeOnly ? (
-            <button type="button" className="danger" onClick={() => setIsDeleteConfirmOpen(true)}>
+            <button
+              type="button"
+              className="danger"
+              disabled={Boolean(pendingAction)}
+              onClick={() => {
+                setDeleteError(null)
+                setIsDeleteConfirmOpen(true)
+              }}
+            >
               删除
             </button>
           ) : null}
@@ -303,9 +382,13 @@ function TunnelRow({
         <ConfirmActionDialog
           confirmLabel="删除"
           description={`确定删除隧道“${tunnel.name || `${tunnel.kind.toUpperCase()} ${tunnel.bindPort}`}”吗？删除后 ${tunnel.bindHost}:${tunnel.bindPort} 的监听会立即停止，且无法恢复。`}
-          isSubmitting={isDeleting}
+          errorMessage={deleteError}
+          isSubmitting={pendingAction === 'delete'}
           onClose={() => {
-            if (!isDeleting) setIsDeleteConfirmOpen(false)
+            if (!pendingActionRef.current) {
+              setDeleteError(null)
+              setIsDeleteConfirmOpen(false)
+            }
           }}
           onConfirm={() => void deleteTunnel()}
           title="删除隧道"

@@ -6,7 +6,14 @@ import type {
   WorkspaceSnapshot,
   WorkspaceTab
 } from '@fileterm/core'
-import { copyText, homeTabKey, insertTabKeyAfter, reorderTabKeys, sessionTabKey } from '../app/app-utils'
+import {
+  copyText,
+  homeTabKey,
+  insertTabKeyAfter,
+  reorderTabKeys,
+  sessionTabKey,
+  settledResultsError
+} from '../app/app-utils'
 import { resolveSelectedTabIds, type SendScope, type SessionSendTarget } from '../features/common/session-send-targets'
 import type { OrderedTabEntry, TabContextTarget } from '../features/layout/TabBar'
 import { setLocale, t, type AppLocale } from '../i18n'
@@ -22,7 +29,7 @@ export type StoredMainTabUiState = {
   activeLocalTabId: string | null
   nextHomeTabNumber: number
   tabOrder: string[]
-  isSystemSidebarCollapsed: boolean
+  systemSidebarCollapsedByTabId: Record<string, boolean>
 }
 
 export type TerminalDockSendState = {
@@ -128,6 +135,16 @@ function parseStoredMainTabUiState(raw: string | null | undefined): StoredMainTa
     const tabOrder = Array.isArray(parsed.tabOrder)
       ? uniqueStrings(parsed.tabOrder.filter((entry): entry is string => typeof entry === 'string'))
       : []
+    const systemSidebarCollapsedByTabId =
+      parsed.systemSidebarCollapsedByTabId &&
+      typeof parsed.systemSidebarCollapsedByTabId === 'object' &&
+      !Array.isArray(parsed.systemSidebarCollapsedByTabId)
+        ? Object.fromEntries(
+            Object.entries(parsed.systemSidebarCollapsedByTabId).filter(
+              ([tabId, collapsed]) => tabId.length > 0 && typeof collapsed === 'boolean'
+            )
+          )
+        : {}
 
     return {
       localTabs,
@@ -137,7 +154,7 @@ function parseStoredMainTabUiState(raw: string | null | undefined): StoredMainTa
           ? Math.max(1, Math.floor(parsed.nextHomeTabNumber))
           : 1,
       tabOrder,
-      isSystemSidebarCollapsed: parsed.isSystemSidebarCollapsed === true
+      systemSidebarCollapsedByTabId
     }
   } catch {
     return null
@@ -151,7 +168,7 @@ function createInitialMainTabUiState(enabled: boolean, stored: StoredMainTabUiSt
       activeLocalTabId: null,
       nextHomeTabNumber: 1,
       tabOrder: [],
-      isSystemSidebarCollapsed: false
+      systemSidebarCollapsedByTabId: {}
     }
   }
 
@@ -164,7 +181,7 @@ function createInitialMainTabUiState(enabled: boolean, stored: StoredMainTabUiSt
     activeLocalTabId: 'home-1',
     nextHomeTabNumber: 2,
     tabOrder: ['home:home-1'],
-    isSystemSidebarCollapsed: false
+    systemSidebarCollapsedByTabId: {}
   }
 }
 
@@ -227,8 +244,8 @@ export function useWorkspaceTabs({
   const [tabContextMenu, setTabContextMenu] = useState<WorkspaceTabContextMenu | null>(null)
   const [shortcutCloseConfirm, setShortcutCloseConfirm] = useState<ShortcutCloseConfirm | null>(null)
   const [closingSessionTabIds, setClosingSessionTabIds] = useState<string[]>([])
-  const [isSystemSidebarCollapsed, setIsSystemSidebarCollapsed] = useState(
-    () => initialMainTabUiState.isSystemSidebarCollapsed
+  const [systemSidebarCollapsedByTabId, setSystemSidebarCollapsedByTabId] = useState<Record<string, boolean>>(
+    () => initialMainTabUiState.systemSidebarCollapsedByTabId
   )
 
   const localTabsRef = useRef(localTabs)
@@ -262,7 +279,7 @@ export function useWorkspaceTabs({
         setActiveLocalTabId(storedState.activeLocalTabId)
         setNextHomeTabNumber(storedState.nextHomeTabNumber)
         setTabOrder(storedState.tabOrder)
-        setIsSystemSidebarCollapsed(storedState.isSystemSidebarCollapsed)
+        setSystemSidebarCollapsedByTabId(storedState.systemSidebarCollapsedByTabId)
       } catch {
         // Fall back to the initial local tab state when persisted UI state cannot be read.
       } finally {
@@ -433,7 +450,7 @@ export function useWorkspaceTabs({
         activeLocalTabId,
         nextHomeTabNumber,
         tabOrder,
-        isSystemSidebarCollapsed
+        systemSidebarCollapsedByTabId
       } satisfies StoredMainTabUiState)
     )
   }, [
@@ -442,9 +459,9 @@ export function useWorkspaceTabs({
     hasHydratedMainTabUiState,
     hasLoadedInitialSnapshot,
     isMainWorkspaceWindow,
-    isSystemSidebarCollapsed,
     localTabs,
     nextHomeTabNumber,
+    systemSidebarCollapsedByTabId,
     tabOrder
   ])
 
@@ -474,6 +491,26 @@ export function useWorkspaceTabs({
     ? (visibleWorkspaceTabs.find((tab) => tab.id === displayedSessionTabId) ?? null)
     : null
   const activeSession = activeTab ? (workspace.sessions[activeTab.id] ?? null) : null
+  const isSystemSidebarCollapsed = activeTab ? (systemSidebarCollapsedByTabId[activeTab.id] ?? false) : false
+  const setIsSystemSidebarCollapsed = (nextCollapsed: boolean) => {
+    if (!activeTab) {
+      return
+    }
+
+    const tabId = activeTab.id
+    setSystemSidebarCollapsedByTabId((currentByTabId) => {
+      const currentCollapsed = currentByTabId[tabId] ?? false
+      if (currentCollapsed === nextCollapsed) {
+        return currentByTabId
+      }
+      if (!nextCollapsed) {
+        const nextByTabId = { ...currentByTabId }
+        delete nextByTabId[tabId]
+        return nextByTabId
+      }
+      return { ...currentByTabId, [tabId]: true }
+    })
+  }
   const workspaceStageKind: WorkspaceStageKind =
     activeLocalTab?.kind === 'system' ? 'system' : activeTab && activeSession && !activeLocalTab ? 'session' : 'home'
   const isHomeWorkspaceVisible = workspaceStageKind === 'home'
@@ -565,12 +602,20 @@ export function useWorkspaceTabs({
     : createDefaultTerminalDockSendState()
 
   useEffect(() => {
+    if (!hasLoadedInitialSnapshot) {
+      return
+    }
+
     const validTabIds = new Set(visibleWorkspaceTabs.map((tab) => tab.id))
     setTerminalDockSendStateByTabId((current) => {
       const next = Object.fromEntries(Object.entries(current).filter(([tabId]) => validTabIds.has(tabId)))
       return Object.keys(next).length === Object.keys(current).length ? current : next
     })
-  }, [visibleWorkspaceTabs])
+    setSystemSidebarCollapsedByTabId((current) => {
+      const next = Object.fromEntries(Object.entries(current).filter(([tabId]) => validTabIds.has(tabId)))
+      return Object.keys(next).length === Object.keys(current).length ? current : next
+    })
+  }, [hasLoadedInitialSnapshot, visibleWorkspaceTabs])
 
   useEffect(() => {
     const availableTargetIds = new Set(sessionSendTargets.map((target) => target.tabId))
@@ -657,7 +702,11 @@ export function useWorkspaceTabs({
       // invoke 加了 send 超时，但并行化能进一步保证单个慢 tab 不影响
       // 其他 tab 的投递时序。allSettled 确保一个失败不影响其余。
       const payload = `${terminalCommand}\r`
-      await Promise.allSettled(targetIds.map((tabId) => desktopApi.writeTerminal(tabId, payload)))
+      const results = await Promise.allSettled(targetIds.map((tabId) => desktopApi.writeTerminal(tabId, payload)))
+      const failure = settledResultsError('发送终端命令', results)
+      if (failure) {
+        throw failure
+      }
     } catch (error) {
       onError('发送终端命令', error)
       throw error

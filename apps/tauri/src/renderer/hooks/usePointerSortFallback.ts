@@ -15,6 +15,7 @@ type PointerSortState<T> = {
   originTop: number
   dragStartX: number
   dragStartY: number
+  pointerId: number
   active: boolean
 } | null
 
@@ -127,14 +128,21 @@ export function usePointerSortFallback<T>({
       const state = stateRef.current
       if (!state) return
       stateRef.current = null
+      if (state.sourceElement.hasPointerCapture(state.pointerId)) {
+        state.sourceElement.releasePointerCapture(state.pointerId)
+      }
       removeGhost()
       if (!state.active) return
       callbacksRef.current.onDrop(state.source, resolveTarget(event.clientX, event.clientY), event.clientY)
     }
 
     const handlePointerCancel = () => {
-      if (!stateRef.current) return
+      const state = stateRef.current
+      if (!state) return
       stateRef.current = null
+      if (state.sourceElement.hasPointerCapture(state.pointerId)) {
+        state.sourceElement.releasePointerCapture(state.pointerId)
+      }
       removeGhost()
       callbacksRef.current.onCancel()
     }
@@ -142,10 +150,14 @@ export function usePointerSortFallback<T>({
     window.addEventListener('pointermove', handlePointerMove, true)
     window.addEventListener('pointerup', handlePointerUp, true)
     window.addEventListener('pointercancel', handlePointerCancel, true)
+    window.addEventListener('lostpointercapture', handlePointerCancel, true)
+    window.addEventListener('blur', handlePointerCancel)
     return () => {
       window.removeEventListener('pointermove', handlePointerMove, true)
       window.removeEventListener('pointerup', handlePointerUp, true)
       window.removeEventListener('pointercancel', handlePointerCancel, true)
+      window.removeEventListener('lostpointercapture', handlePointerCancel, true)
+      window.removeEventListener('blur', handlePointerCancel)
       removeGhost()
     }
   }, [])
@@ -154,6 +166,12 @@ export function usePointerSortFallback<T>({
     if (event.button !== 0 || !event.isPrimary) return
     if (event.target instanceof Element && event.target.closest(INTERACTIVE_SELECTOR)) return
     const rect = event.currentTarget.getBoundingClientRect()
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    } catch {
+      // Window-level listeners remain the fallback on WebViews that reject
+      // pointer capture for a synthetic or already-released pointer.
+    }
     stateRef.current = {
       source,
       sourceElement: event.currentTarget as HTMLElement,
@@ -163,6 +181,7 @@ export function usePointerSortFallback<T>({
       originTop: rect.top,
       dragStartX: event.clientX,
       dragStartY: event.clientY,
+      pointerId: event.pointerId,
       active: false
     }
   }

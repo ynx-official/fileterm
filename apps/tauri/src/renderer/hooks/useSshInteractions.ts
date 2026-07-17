@@ -27,6 +27,7 @@ export type UseSshInteractionsResult = {
   hostVerificationRequest: SshHostVerificationRequest | null
   keyPassphraseRequest: SshKeyPassphrasePromptRequest | null
   errorMessage: string | null
+  isResolving: boolean
   resolve(requestId: string, response: SshInteractionResponse): Promise<void>
   cancelCredentials(): Promise<void>
   submitCredentials(input: SshCredentialsInput): Promise<void>
@@ -42,6 +43,7 @@ export type UseSshInteractionsResult = {
 export function useSshInteractions({ desktopApi, onError }: UseSshInteractionsOptions): UseSshInteractionsResult {
   const [requests, setRequests] = useState<SshInteractionRequest[]>([])
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [resolvingRequestId, setResolvingRequestId] = useState<string | null>(null)
   const resolvingRequestIdsRef = useRef(new Set<string>())
 
   useEffect(() => {
@@ -75,6 +77,7 @@ export function useSshInteractions({ desktopApi, onError }: UseSshInteractionsOp
       }
 
       resolvingRequestIdsRef.current.add(requestId)
+      setResolvingRequestId(requestId)
       try {
         await desktopApi.resolveSshInteraction(requestId, response)
         setRequests((current) => current.filter((item) => item.requestId !== requestId))
@@ -84,6 +87,7 @@ export function useSshInteractions({ desktopApi, onError }: UseSshInteractionsOp
         setErrorMessage(error instanceof Error ? error.message : String(error))
       } finally {
         resolvingRequestIdsRef.current.delete(requestId)
+        setResolvingRequestId((current) => (current === requestId ? null : current))
       }
     },
     [desktopApi, onError]
@@ -196,6 +200,7 @@ export function useSshInteractions({ desktopApi, onError }: UseSshInteractionsOp
     hostVerificationRequest,
     keyPassphraseRequest,
     errorMessage,
+    isResolving: Boolean(request && resolvingRequestId === request.requestId),
     resolve,
     cancelCredentials,
     submitCredentials,

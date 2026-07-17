@@ -15,10 +15,11 @@ use russh::client::{Handle, Handler};
 use russh::ChannelMsg;
 use tokio::time::timeout;
 
-// A few SSH servers emit EOF/CLOSE before the final stdout packet is drained.
-// Keep a very short grace window after that marker: it preserves output while
-// still guaranteeing that servers which omit ExitStatus cannot hold a caller
-// until its much longer command watchdog fires.
+// A few SSH transports deliver a terminal channel marker before the final
+// stdout packet is drained. Keep a very short grace window after EOF, CLOSE,
+// or ExitStatus: it preserves output while still guaranteeing that servers
+// which omit the remaining markers cannot hold a caller until its much longer
+// command watchdog fires.
 const EXEC_CHANNEL_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub async fn probe_remote_platform<H: Handler>(handle: &Handle<H>) -> String {
@@ -102,10 +103,12 @@ pub async fn exec_command<H: Handler>(handle: &Handle<H>, cmd: &str) -> Result<S
             Some(ChannelMsg::ExtendedData { data, .. }) => {
                 output.extend_from_slice(data.as_ref());
             }
-            Some(ChannelMsg::ExitStatus { .. }) | None => break,
-            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) => {
+            Some(ChannelMsg::ExitStatus { .. })
+            | Some(ChannelMsg::Eof)
+            | Some(ChannelMsg::Close) => {
                 draining_after_close = true;
             }
+            None => break,
             _ => {}
         }
     }
@@ -125,7 +128,10 @@ pub async fn exec_command_with_stdin<H: Handler>(
         .map_err(|e| e.to_string())?;
     channel.exec(true, cmd).await.map_err(|e| e.to_string())?;
     let stdin_bytes = stdin.as_bytes().to_vec();
-    channel.data(&stdin_bytes[..]).await.map_err(|e| e.to_string())?;
+    channel
+        .data(&stdin_bytes[..])
+        .await
+        .map_err(|e| e.to_string())?;
     channel.eof().await.map_err(|e| e.to_string())?;
 
     let mut output: Vec<u8> = Vec::new();
@@ -146,10 +152,12 @@ pub async fn exec_command_with_stdin<H: Handler>(
             Some(ChannelMsg::ExtendedData { data, .. }) => {
                 output.extend_from_slice(data.as_ref());
             }
-            Some(ChannelMsg::ExitStatus { .. }) | None => break,
-            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) => {
+            Some(ChannelMsg::ExitStatus { .. })
+            | Some(ChannelMsg::Eof)
+            | Some(ChannelMsg::Close) => {
                 draining_after_close = true;
             }
+            None => break,
             _ => {}
         }
     }
@@ -195,10 +203,18 @@ fn format_network_bytes(bytes: f64) -> String {
     if bytes >= 1024.0 * 1024.0 * 1024.0 * 1024.0 {
         format!("{:.1} TB", bytes / 1024.0 / 1024.0 / 1024.0 / 1024.0)
     } else if bytes >= 1024.0 * 1024.0 * 1024.0 {
-        let decimals = if bytes >= 10.0 * 1024.0 * 1024.0 * 1024.0 { 0 } else { 1 };
+        let decimals = if bytes >= 10.0 * 1024.0 * 1024.0 * 1024.0 {
+            0
+        } else {
+            1
+        };
         format!("{:.*} GB", decimals, bytes / 1024.0 / 1024.0 / 1024.0)
     } else if bytes >= 1024.0 * 1024.0 {
-        let decimals = if bytes >= 10.0 * 1024.0 * 1024.0 { 0 } else { 1 };
+        let decimals = if bytes >= 10.0 * 1024.0 * 1024.0 {
+            0
+        } else {
+            1
+        };
         format!("{:.*} MB", decimals, bytes / 1024.0 / 1024.0)
     } else if bytes >= 1024.0 {
         format!("{} KB", (bytes / 1024.0).round() as i64)
@@ -267,8 +283,8 @@ pub fn parse_system_metrics(raw: &str, fallback_platform: &str) -> serde_json::V
 
     let read_line = |key: &str| -> String {
         for line in &lines {
-            if line.starts_with(key) {
-                return line[key.len()..].trim().to_string();
+            if let Some(stripped) = line.strip_prefix(key) {
+                return stripped.trim().to_string();
             }
         }
         "".to_string()
@@ -344,13 +360,48 @@ pub fn parse_system_metrics(raw: &str, fallback_platform: &str) -> serde_json::V
         .unwrap_or("0")
         .parse::<f64>()
         .unwrap_or(0.0);
-    let cpu_system = cpu_parts.get(1).copied().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-    let cpu_nice = cpu_parts.get(2).copied().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-    let cpu_idle = cpu_parts.get(3).copied().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-    let cpu_iowait = cpu_parts.get(4).copied().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-    let cpu_irq = cpu_parts.get(5).copied().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-    let cpu_softirq = cpu_parts.get(6).copied().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
-    let cpu_steal = cpu_parts.get(7).copied().unwrap_or("0").parse::<f64>().unwrap_or(0.0);
+    let cpu_system = cpu_parts
+        .get(1)
+        .copied()
+        .unwrap_or("0")
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let cpu_nice = cpu_parts
+        .get(2)
+        .copied()
+        .unwrap_or("0")
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let cpu_idle = cpu_parts
+        .get(3)
+        .copied()
+        .unwrap_or("0")
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let cpu_iowait = cpu_parts
+        .get(4)
+        .copied()
+        .unwrap_or("0")
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let cpu_irq = cpu_parts
+        .get(5)
+        .copied()
+        .unwrap_or("0")
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let cpu_softirq = cpu_parts
+        .get(6)
+        .copied()
+        .unwrap_or("0")
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let cpu_steal = cpu_parts
+        .get(7)
+        .copied()
+        .unwrap_or("0")
+        .parse::<f64>()
+        .unwrap_or(0.0);
 
     let rates_line = read_line("__RATES__");
     let rates_parts: Vec<&str> = rates_line.split('|').collect();
@@ -404,22 +455,31 @@ pub fn parse_system_metrics(raw: &str, fallback_platform: &str) -> serde_json::V
                 "rxRate": format_rate(rx),
             }));
 
-            network_rates_by_interface.insert(name.clone(), serde_json::json!({
-                "rx": format_rate(rx),
-                "tx": format_rate(tx),
-            }));
+            network_rates_by_interface.insert(
+                name.clone(),
+                serde_json::json!({
+                    "rx": format_rate(rx),
+                    "tx": format_rate(tx),
+                }),
+            );
 
-            network_samples_by_interface.insert(name.clone(), serde_json::json!([
-                { "rx": rx, "tx": tx }
-            ]));
+            network_samples_by_interface.insert(
+                name.clone(),
+                serde_json::json!([
+                    { "rx": rx, "tx": tx }
+                ]),
+            );
 
-            network_raw_by_interface.insert(name.clone(), serde_json::json!({
-                "name": name,
-                "rxBytes": rx_total,
-                "txBytes": tx_total,
-                "rxBytesPerSecond": rx,
-                "txBytesPerSecond": tx,
-            }));
+            network_raw_by_interface.insert(
+                name.clone(),
+                serde_json::json!({
+                    "name": name,
+                    "rxBytes": rx_total,
+                    "txBytes": tx_total,
+                    "rxBytesPerSecond": rx,
+                    "txBytesPerSecond": tx,
+                }),
+            );
         }
     }
 
@@ -504,8 +564,9 @@ pub fn parse_system_metrics(raw: &str, fallback_platform: &str) -> serde_json::V
     // formatted all values, then compiled a Regex for every comparison while
     // sorting. On hosts with large process tables that consumed multiple CPU
     // cores continuously and starved Tauri's window/event loop.
-    let mut grouped_processes: Vec<(String, (f64, f64, f64))> = grouped_processes.into_iter().collect();
-    grouped_processes.sort_by(|a, b| b.1.0.total_cmp(&a.1.0));
+    let mut grouped_processes: Vec<(String, (f64, f64, f64))> =
+        grouped_processes.into_iter().collect();
+    grouped_processes.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
     let top_processes: Vec<serde_json::Value> = grouped_processes
         .into_iter()
         .take(128)
@@ -564,8 +625,7 @@ pub fn parse_system_metrics(raw: &str, fallback_platform: &str) -> serde_json::V
     });
 
     let has_mem_app = mem_app.parse::<f64>().unwrap_or(0.0) > 0.0 || mem_app_bytes_num > 0.0;
-    let has_mem_cache =
-        mem_cache.parse::<f64>().unwrap_or(0.0) > 0.0 || mem_cache_bytes_num > 0.0;
+    let has_mem_cache = mem_cache.parse::<f64>().unwrap_or(0.0) > 0.0 || mem_cache_bytes_num > 0.0;
     let has_mem_kernel =
         mem_kernel.parse::<f64>().unwrap_or(0.0) > 0.0 || mem_kernel_bytes_num > 0.0;
 
@@ -693,7 +753,8 @@ pub fn parse_system_metrics(raw: &str, fallback_platform: &str) -> serde_json::V
 
 pub fn build_posix_metrics_command(platform: &str) -> String {
     let complete_marker = "__FILETERM_METRICS_COMPLETE__";
-    format!(r#"cd / >/dev/null 2>&1 || true
+    format!(
+        r#"cd / >/dev/null 2>&1 || true
 sleep_interval="0.15"
 sleep "$sleep_interval" >/dev/null 2>&1 || sleep_interval="1"
 run_bounded() {{
@@ -1116,7 +1177,9 @@ echo "__PROCS_START__"
 echo "$procs"
 echo "__PROCS_END__"
 echo "{}"
-"#, platform, complete_marker)
+"#,
+        platform, complete_marker
+    )
 }
 
 /// PowerShell-based metrics script for Windows remotes.

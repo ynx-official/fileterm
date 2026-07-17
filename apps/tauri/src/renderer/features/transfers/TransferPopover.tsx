@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { TransferTask } from '@fileterm/core'
 import { CloseButton } from '../common/CloseButton'
 import { formatTransferBytes, isActiveTransfer, isCompletedTransfer, transferStatusText } from '../../app/app-utils'
@@ -22,6 +22,9 @@ export function TransferPopover({
   const [statusFilter, setStatusFilter] = useState<'running' | 'completed' | 'all'>('running')
   const [directionFilter, setDirectionFilter] = useState<'all' | 'download' | 'upload'>('all')
   const [pendingActions, setPendingActions] = useState<Record<string, 'pause' | 'resume' | 'discard'>>({})
+  const [isClearing, setIsClearing] = useState(false)
+  const pendingTransferIdsRef = useRef(new Set<string>())
+  const isClearingRef = useRef(false)
   const visibleTransfers: TransferTask[] = []
   for (const transfer of transfers) {
     if (statusFilter === 'running' && isCompletedTransfer(transfer)) {
@@ -65,16 +68,32 @@ export function TransferPopover({
     action: 'pause' | 'resume' | 'discard',
     handler: (id: string) => Promise<void> | void
   ) => {
+    if (pendingTransferIdsRef.current.has(transferId)) return
+    pendingTransferIdsRef.current.add(transferId)
     setPendingActions((current) => ({ ...current, [transferId]: action }))
     void Promise.resolve()
       .then(() => handler(transferId))
       .catch(() => undefined)
       .finally(() => {
+        pendingTransferIdsRef.current.delete(transferId)
         setPendingActions((current) => {
           const next = { ...current }
           delete next[transferId]
           return next
         })
+      })
+  }
+
+  const clearTransfers = () => {
+    if (!clearableTransferIds.length || isClearingRef.current) return
+    isClearingRef.current = true
+    setIsClearing(true)
+    void Promise.resolve()
+      .then(() => onClearTransfers(clearableTransferIds))
+      .catch(() => undefined)
+      .finally(() => {
+        isClearingRef.current = false
+        setIsClearing(false)
       })
   }
 
@@ -95,16 +114,12 @@ export function TransferPopover({
           {statusFilter === 'completed' ? (
             <button
               className="transfer-clear-button"
-              disabled={!clearableTransferIds.length}
-              onClick={() => {
-                if (!clearableTransferIds.length) {
-                  return
-                }
-                void Promise.resolve(onClearTransfers(clearableTransferIds))
-              }}
+              disabled={!clearableTransferIds.length || isClearing}
+              onClick={clearTransfers}
               type="button"
             >
-              {t.clearTransferHistory}
+              {isClearing ? <span aria-hidden="true" className="button-spinner" /> : null}
+              {isClearing ? t.clearingTransferHistory : t.clearTransferHistory}
             </button>
           ) : null}
           <CloseButton onClick={onClose} />
@@ -165,7 +180,11 @@ export function TransferPopover({
             const transferSizeText = getTransferSizeText(transfer)
             const progress = Math.round(Math.max(0, Math.min(100, Number(transfer.progress) || 0)))
             return (
-              <div className={`transfer-row transfer-${transfer.status}`} key={transfer.id}>
+              <div
+                aria-busy={Boolean(pendingActions[transfer.id])}
+                className={`transfer-row transfer-${transfer.status}`}
+                key={transfer.id}
+              >
                 <div className="transfer-row-head">
                   <strong title={transfer.name}>{transfer.name}</strong>
                   {(transfer.status === 'running' || transfer.status === 'queued') && transfer.resumable ? (

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 import { t } from '../../i18n'
 
@@ -27,9 +27,28 @@ export function ContextMenu({
   viewportMargin?: number
 }) {
   const menuRef = useRef<HTMLDivElement | null>(null)
+  const previousFocusRef = useRef<HTMLElement | null>(null)
   const [resolvedPosition, setResolvedPosition] = useState(position)
 
+  const focusMenuItem = useCallback((direction: 'first' | 'last' | 'next' | 'previous') => {
+    const menu = menuRef.current
+    if (!menu) return
+    const buttons = Array.from(menu.querySelectorAll<HTMLButtonElement>('button:not(:disabled)'))
+    if (!buttons.length) return
+    const currentIndex = buttons.indexOf(document.activeElement as HTMLButtonElement)
+    const nextIndex =
+      direction === 'first'
+        ? 0
+        : direction === 'last'
+          ? buttons.length - 1
+          : direction === 'next'
+            ? (Math.max(currentIndex, -1) + 1) % buttons.length
+            : (currentIndex <= 0 ? buttons.length : currentIndex) - 1
+    buttons[nextIndex]?.focus()
+  }, [])
+
   useEffect(() => {
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
     const handlePointerDown = (event: PointerEvent) => {
       const menu = menuRef.current
       const target = event.target
@@ -49,16 +68,33 @@ export function ContextMenu({
     }
 
     const handleBlur = () => onClose()
+    const handleViewportChange = () => onClose()
 
     window.addEventListener('pointerdown', handlePointerDown, true)
     window.addEventListener('keydown', handleEscape)
     window.addEventListener('blur', handleBlur)
+    window.addEventListener('resize', handleViewportChange)
+    window.addEventListener('scroll', handleViewportChange, true)
     return () => {
       window.removeEventListener('pointerdown', handlePointerDown, true)
       window.removeEventListener('keydown', handleEscape)
       window.removeEventListener('blur', handleBlur)
+      window.removeEventListener('resize', handleViewportChange)
+      window.removeEventListener('scroll', handleViewportChange, true)
+      const previousFocus = previousFocusRef.current
+      if (
+        previousFocus?.isConnected &&
+        (document.activeElement === document.body || menuRef.current?.contains(document.activeElement))
+      ) {
+        previousFocus.focus()
+      }
     }
   }, [onClose])
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => focusMenuItem('first'))
+    return () => window.cancelAnimationFrame(frame)
+  }, [focusMenuItem, items, position])
 
   useLayoutEffect(() => {
     const menu = menuRef.current
@@ -82,20 +118,40 @@ export function ContextMenu({
       ref={menuRef}
       className={`context-menu ${className ?? ''}`.trim()}
       onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowDown') {
+          event.preventDefault()
+          focusMenuItem('next')
+        } else if (event.key === 'ArrowUp') {
+          event.preventDefault()
+          focusMenuItem('previous')
+        } else if (event.key === 'Home') {
+          event.preventDefault()
+          focusMenuItem('first')
+        } else if (event.key === 'End') {
+          event.preventDefault()
+          focusMenuItem('last')
+        }
+      }}
+      role="menu"
       style={{ left: resolvedPosition.x, top: resolvedPosition.y } as CSSProperties}
     >
       {items.map((item, index) =>
         item.separator ? (
-          <span key={`sep-${index}`} className="context-menu-separator" />
+          <span key={`sep-${index}`} className="context-menu-separator" role="separator" />
         ) : (
           <button
             key={`${item.label}-${index}`}
             className={item.danger ? 'is-danger' : ''}
             disabled={item.disabled}
             onClick={() => {
-              item.action?.()
-              onClose()
+              try {
+                item.action?.()
+              } finally {
+                onClose()
+              }
             }}
+            role="menuitem"
             type="button"
           >
             <span>{item.label}</span>
@@ -103,7 +159,7 @@ export function ContextMenu({
           </button>
         )
       )}
-      <button className="context-close" type="button" onClick={onClose}>
+      <button className="context-close" role="menuitem" type="button" onClick={onClose}>
         {t.closeTab}
       </button>
     </div>

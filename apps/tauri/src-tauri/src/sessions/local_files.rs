@@ -1,10 +1,11 @@
+use crate::AppError;
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
-use crate::AppError;
 
 #[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct LocalFileItem {
     pub path: String,
     pub name: String,
@@ -16,18 +17,36 @@ pub struct LocalFileItem {
 }
 
 #[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct DirectorySnapshot {
     pub path: String,
     pub items: Vec<LocalFileItem>,
 }
 
+#[derive(Clone, Copy, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum PermissionApplyTarget {
+    All,
+    Files,
+    Directories,
+}
+
+impl PermissionApplyTarget {
+    fn includes(self, is_directory: bool) -> bool {
+        matches!(self, Self::All)
+            || matches!(self, Self::Files) && !is_directory
+            || matches!(self, Self::Directories) && is_directory
+    }
+}
+
 #[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PermissionChangeOptions {
-    pub mode: String,
+    mode: String,
     #[serde(default)]
-    pub recursive: bool,
+    recursive: bool,
     #[serde(default)]
-    pub apply_to: Option<String>,
+    apply_to: Option<PermissionApplyTarget>,
 }
 
 fn home_dir() -> Option<PathBuf> {
@@ -84,7 +103,14 @@ fn format_modified(secs: u64) -> String {
         remaining -= days;
         month += 1;
     }
-    format!("{:04}/{:02}/{:02} {:02}:{:02}", year, month, remaining + 1, h, m)
+    format!(
+        "{:04}/{:02}/{:02} {:02}:{:02}",
+        year,
+        month,
+        remaining + 1,
+        h,
+        m
+    )
 }
 
 fn leap(y: i32) -> bool {
@@ -153,15 +179,12 @@ pub fn app_list_local_directory(dir_path: Option<String>) -> Result<DirectorySna
     let entries = match fs::read_dir(&root) {
         Ok(e) => e,
         Err(error) => {
-            crate::services::logging::error_global(
-                "local",
-                format!("list failed error={error}"),
-            );
+            crate::services::logging::error_global("local", format!("list failed error={error}"));
             return Err(AppError::Storage(format!(
                 "Failed to read directory {}: {}",
                 root.display(),
                 error
-            )))
+            )));
         }
     };
 
@@ -178,9 +201,17 @@ pub fn app_list_local_directory(dir_path: Option<String>) -> Result<DirectorySna
         items.push(LocalFileItem {
             path: full_path,
             name,
-            r#type: if is_dir { "folder".to_string() } else { "file".to_string() },
+            r#type: if is_dir {
+                "folder".to_string()
+            } else {
+                "file".to_string()
+            },
             modified: format_modified(modified_secs(&meta)),
-            size: if is_dir { "-".to_string() } else { format_size(meta.len()) },
+            size: if is_dir {
+                "-".to_string()
+            } else {
+                format_size(meta.len())
+            },
             permission: format_permission_bits(mode, is_dir),
             owner_group: owner_group(&meta),
         });
@@ -286,7 +317,9 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), AppError> {
         let name = entry.file_name();
         let src_child = entry.path();
         let dst_child = dst.join(&name);
-        let meta = entry.metadata().map_err(|e| AppError::Storage(e.to_string()))?;
+        let meta = entry
+            .metadata()
+            .map_err(|e| AppError::Storage(e.to_string()))?;
         if meta.is_dir() {
             copy_dir_recursive(&src_child, &dst_child)?;
         } else {
@@ -377,22 +410,29 @@ pub fn app_change_local_permissions(
     options: PermissionChangeOptions,
 ) -> Result<(), AppError> {
     let mode = parse_mode(&options.mode)?;
-    apply_permissions(&target_path, mode)?;
-
     if !options.recursive {
-        return Ok(());
+        return apply_permissions(&target_path, mode);
     }
-    let meta = fs::metadata(&target_path).map_err(|e| AppError::Storage(e.to_string()))?;
+
+    let meta = fs::symlink_metadata(&target_path).map_err(|e| AppError::Storage(e.to_string()))?;
+    if meta.file_type().is_symlink() {
+        return Err(AppError::Storage(
+            "递归修改权限不允许以符号链接作为根路径".to_string(),
+        ));
+    }
+    let apply_to = options.apply_to.unwrap_or(PermissionApplyTarget::All);
+    if apply_to.includes(meta.is_dir()) {
+        apply_permissions(&target_path, mode)?;
+    }
     if !meta.is_dir() {
         return Ok(());
     }
-    let apply_to = options.apply_to.unwrap_or_else(|| "all".to_string());
-    apply_permissions_recursive(&target_path, mode, &apply_to)
+    apply_permissions_recursive(&target_path, mode, apply_to)
 }
 
 fn parse_mode(mode: &str) -> Result<u32, AppError> {
     let trimmed = mode.trim();
-    if !trimmed.chars().all(|c| c >= '0' && c <= '7') || !(3..=4).contains(&trimmed.len()) {
+    if !trimmed.chars().all(|c| ('0'..='7').contains(&c)) || !(3..=4).contains(&trimmed.len()) {
         return Err(AppError::Storage(
             "权限值必须是 3 到 4 位八进制数字，例如 755".to_string(),
         ));
@@ -413,20 +453,24 @@ fn apply_permissions(_path: &str, _mode: u32) -> Result<(), AppError> {
 }
 
 #[cfg(unix)]
-fn apply_permissions_recursive(target: &str, mode: u32, apply_to: &str) -> Result<(), AppError> {
+fn apply_permissions_recursive(
+    target: &str,
+    mode: u32,
+    apply_to: PermissionApplyTarget,
+) -> Result<(), AppError> {
     use std::os::unix::fs::PermissionsExt;
     let entries = fs::read_dir(target).map_err(|e| AppError::Storage(e.to_string()))?;
     for entry in entries.flatten() {
         let path = entry.path();
-        let meta = match entry.metadata() {
+        let meta = match fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(_) => continue,
         };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
         let is_dir = meta.is_dir();
-        let should_apply = apply_to == "all"
-            || (apply_to == "files" && !is_dir)
-            || (apply_to == "directories" && is_dir);
-        if should_apply {
+        if apply_to.includes(is_dir) {
             fs::set_permissions(&path, fs::Permissions::from_mode(mode))
                 .map_err(|e| AppError::Storage(e.to_string()))?;
         }
@@ -438,7 +482,11 @@ fn apply_permissions_recursive(target: &str, mode: u32, apply_to: &str) -> Resul
 }
 
 #[cfg(not(unix))]
-fn apply_permissions_recursive(_target: &str, _mode: u32, _apply_to: &str) -> Result<(), AppError> {
+fn apply_permissions_recursive(
+    _target: &str,
+    _mode: u32,
+    _apply_to: PermissionApplyTarget,
+) -> Result<(), AppError> {
     Ok(())
 }
 
@@ -454,11 +502,11 @@ pub async fn app_select_local_files(
     // 不加 "All files" filter（&["*"] 在某些平台不匹配任何文件，导致
     // 对话框里所有文件灰显不可选——用户报告"点上传选不到任何文件"）。
     // 不加 filter 默认显示所有文件。
-    let result = dialog
-        .pick_files()
-        .await
-        .unwrap_or_default();
-    Ok(result.into_iter().map(|h| h.path().to_string_lossy().into_owned()).collect())
+    let result = dialog.pick_files().await.unwrap_or_default();
+    Ok(result
+        .into_iter()
+        .map(|h| h.path().to_string_lossy().into_owned())
+        .collect())
 }
 
 #[tauri::command]
@@ -490,4 +538,123 @@ fn encode_text(text: &str, encoding: &str) -> Vec<u8> {
     let enc = encoding_for(encoding);
     let (cow, _, _) = enc.encode(text);
     cow.into_owned()
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::{
+        app_change_local_permissions, LocalFileItem, PermissionApplyTarget, PermissionChangeOptions,
+    };
+
+    #[test]
+    fn local_file_items_serialize_with_core_camel_case_fields() {
+        let item = LocalFileItem {
+            path: "/tmp/demo".to_string(),
+            name: "demo".to_string(),
+            r#type: "file".to_string(),
+            modified: "-".to_string(),
+            size: "1 B".to_string(),
+            permission: "0644".to_string(),
+            owner_group: "user:staff".to_string(),
+        };
+        let value = serde_json::to_value(item).unwrap();
+        assert_eq!(value["ownerGroup"], "user:staff");
+        assert!(value.get("owner_group").is_none());
+    }
+
+    #[test]
+    fn reads_camel_case_apply_to() {
+        let options: PermissionChangeOptions = serde_json::from_value(serde_json::json!({
+            "mode": "644",
+            "recursive": true,
+            "applyTo": "files"
+        }))
+        .expect("camelCase local permission options should deserialize");
+        assert_eq!(options.apply_to, Some(PermissionApplyTarget::Files));
+
+        let snake_case = serde_json::from_value::<PermissionChangeOptions>(serde_json::json!({
+            "mode": "644",
+            "recursive": true,
+            "apply_to": "files"
+        }));
+        assert!(snake_case.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_files_only_preserves_directory_traverse_bits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "fileterm-local-permissions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let nested = root.join("nested");
+        let file = nested.join("config.txt");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(&file, b"config").unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&nested, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        app_change_local_permissions(
+            root.to_string_lossy().into_owned(),
+            PermissionChangeOptions {
+                mode: "644".to_string(),
+                recursive: true,
+                apply_to: Some(PermissionApplyTarget::Files),
+            },
+        )
+        .unwrap();
+
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&root), 0o755);
+        assert_eq!(mode(&nested), 0o755);
+        assert_eq!(mode(&file), 0o644);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_permissions_do_not_follow_directory_symlinks() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = std::env::temp_dir().join(format!(
+            "fileterm-local-permission-symlink-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "fileterm-local-permission-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let outside_file = outside.join("keep.txt");
+        std::fs::write(&outside_file, b"keep").unwrap();
+        std::fs::set_permissions(&outside_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&outside, root.join("outside-link")).unwrap();
+
+        app_change_local_permissions(
+            root.to_string_lossy().into_owned(),
+            PermissionChangeOptions {
+                mode: "644".to_string(),
+                recursive: true,
+                apply_to: Some(PermissionApplyTarget::Files),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&outside_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o600
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
 }

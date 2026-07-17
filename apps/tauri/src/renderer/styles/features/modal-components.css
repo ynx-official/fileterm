@@ -165,14 +165,33 @@
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 14px 16px 10px;
-  border-bottom: 1px solid color-mix(in srgb, var(--border-light) 76%, transparent);
+  min-height: 48px;
+  box-sizing: border-box;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-light);
+  background: var(--bg-sidebar);
 }
 
-.file-permission-dialog__eyebrow {
-  font-size: 14px;
-  font-weight: 700;
+.file-permission-dialog__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
   color: var(--text-main);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.file-permission-dialog__title .material-symbols-outlined {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 16px;
+  font-variation-settings:
+    'wght' 300,
+    'opsz' 16,
+    'GRAD' 0,
+    'FILL' 0;
 }
 
 .file-permission-dialog__close {
@@ -1333,7 +1352,8 @@
 .webdav-sync-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  column-gap: 16px;
+  row-gap: 14px;
   margin-top: 14px;
 }
 
@@ -1354,19 +1374,68 @@
   font: inherit;
 }
 .webdav-sync-form .webdav-checkbox {
-  grid-column: span 2;
   display: flex;
   align-items: center;
   gap: 8px;
   cursor: pointer;
   color: var(--text-main);
 }
+
+.webdav-sync-options {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 12px;
+  padding-top: 4px;
+}
+
+.webdav-sync-actions {
+  gap: 12px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-light);
+}
+
+.webdav-sync-actions .primary-button.compact,
+.webdav-sync-actions .flat-button.compact {
+  display: inline-flex;
+  min-width: 76px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 16px;
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.webdav-sync-actions .flat-button.compact {
+  background: var(--bg-hover);
+  color: var(--text-main);
+}
+
+.webdav-sync-actions .flat-button.compact:hover:not(:disabled) {
+  border-color: var(--text-muted);
+  background: var(--bg-active);
+}
+
+.webdav-sync-actions button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--input-focus-ring);
+}
+
 @media (max-width: 640px) {
   .webdav-sync-form {
     grid-template-columns: 1fr;
   }
-  .webdav-sync-form .webdav-checkbox {
-    grid-column: auto;
+
+  .webdav-sync-options {
+    grid-column: 1;
+  }
+
+  .webdav-sync-actions {
+    flex-wrap: wrap;
   }
 }
 

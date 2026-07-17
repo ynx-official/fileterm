@@ -25,17 +25,22 @@ import type {
   SshKeyImportResult,
   SshKeyMetadata,
   ImportSshKeyInput,
-  LocalFileItem
+  LocalFileItem,
+  SshForwardRule,
+  SshTunnelSnapshot,
+  CommandExecutionResult
 } from '@fileterm/core'
-
-const unsupported = (name: string, ..._args: unknown[]) =>
-  Promise.reject(new Error(`Tauri command not implemented yet: ${name}`))
 
 let latestNativeDropPaths: string[] = []
 let latestNativeDropAt = 0
 const terminalDataListeners = new Set<(payload: TerminalDataPayload) => void>()
 let terminalDataChannel: Channel<TerminalDataPayload> | null = null
 let terminalDataRegistration: Promise<void> | null = null
+
+function clearNativeDropFallback() {
+  latestNativeDropPaths = []
+  latestNativeDropAt = 0
+}
 
 function ensureTerminalDataChannel() {
   if (terminalDataChannel || terminalDataRegistration) {
@@ -94,6 +99,7 @@ void getCurrentWindow()
         new CustomEvent('fileterm:tauri-native-drop', {
           detail: {
             paths,
+            consume: clearNativeDropFallback,
             position: {
               x: event.payload.position.x,
               y: event.payload.position.y
@@ -102,10 +108,10 @@ void getCurrentWindow()
         })
       )
 
-      // The custom event is the primary path. Clear the fallback immediately
-      // so a second DOM drop callback cannot enqueue the same files twice.
-      latestNativeDropPaths = []
-      latestNativeDropAt = 0
+      // Keep the fallback until the renderer confirms that the native drop
+      // hit its remote-pane target. If coordinate probing or listener setup
+      // rejects this custom event, the following DOM drop can still consume
+      // the same absolute paths instead of silently doing nothing.
     }
   })
   .catch(() => undefined)
@@ -117,8 +123,7 @@ function takeNativeDropPaths(files: File[]) {
   // requiring equal counts made external macOS Finder drops look like no-op.
   if (isFresh && (files.length === 0 || latestNativeDropPaths.length === files.length)) {
     const paths = latestNativeDropPaths
-    latestNativeDropPaths = []
-    latestNativeDropAt = 0
+    clearNativeDropFallback()
     return paths
   }
   // 拿不到原生路径时返回空数组，而不是返回 file.name（仅文件名非完整路径，
@@ -210,17 +215,21 @@ function subscribe<T>(eventName: string, listener: (payload: T) => void) {
   return cleanup
 }
 
-export function createTauriApi(): FileTermDesktopApi {
-  const userAgent = navigator.userAgent.toLowerCase()
-  const platform = userAgent.includes('mac') ? 'darwin' : userAgent.includes('win') ? 'win32' : 'linux'
-  const arch = 'unknown'
+export async function createTauriApi(): Promise<FileTermDesktopApi> {
+  const [nativePlatform, arch, runtimeVersion, appVersion, appName] = await Promise.all([
+    invoke<string>('app_get_platform'),
+    invoke<string>('app_get_arch'),
+    invoke<string>('app_get_runtime_version'),
+    getVersion(),
+    getName()
+  ])
   const api = {
-    platform,
+    platform: normalizePlatform(nativePlatform),
     arch,
-    appVersion: '0.0.0',
-    appName: 'FileTerm',
+    appVersion,
+    appName,
     runtimeName: 'Tauri',
-    runtimeVersion: '0.0.0',
+    runtimeVersion,
     isDesktop: true,
     getUpdateStatus: () => invoke<AppUpdateStatus>('app_get_update_status'),
     checkForUpdates: () => invoke<AppUpdateStatus>('app_check_for_updates'),
@@ -261,7 +270,7 @@ export function createTauriApi(): FileTermDesktopApi {
           source: input.source,
           path: input.path,
           name: input.name,
-          tab_id: input.tabId,
+          tabId: input.tabId,
           encoding: input.encoding
         }
       }),
@@ -401,7 +410,13 @@ export function createTauriApi(): FileTermDesktopApi {
       commandId: string,
       args: string[] = [],
       options?: { appendCarriageReturn?: boolean }
-    ) => invoke('app_execute_command_template', { tabId, commandId, args, options: options ?? null }),
+    ) =>
+      invoke<CommandExecutionResult>('app_execute_command_template', {
+        tabId,
+        commandId,
+        args,
+        options: options ?? null
+      }),
     openProfile: (profileId: string) => invoke<WorkspaceSnapshot>('app_open_profile', { profileId }),
     openProfileFromManager: (profileId: string) => invoke<WorkspaceSnapshot>('app_open_profile', { profileId }),
     activateTab: (tabId: string) => invoke<WorkspaceSnapshot>('app_activate_tab', { tabId }),
@@ -438,11 +453,15 @@ export function createTauriApi(): FileTermDesktopApi {
       invoke<void>('app_resolve_ssh_interaction', { requestId, response }),
     setRemoteFileAccessMode: (tabId: string, mode: 'user' | 'root', options?: RemoteFileAccessOptions) =>
       invoke<WorkspaceSnapshot>('app_set_remote_file_access_mode', { tabId, mode, options }),
-    listSshTunnels: (tabId: string) => invoke('app_list_ssh_tunnels', { tabId }),
-    createSshTunnel: (tabId: string, rule: unknown) => invoke('app_create_ssh_tunnel', { tabId, rule }),
-    startSshTunnel: (tabId: string, ruleId: string) => invoke('app_start_ssh_tunnel', { tabId, ruleId }),
-    stopSshTunnel: (tabId: string, ruleId: string) => invoke('app_stop_ssh_tunnel', { tabId, ruleId }),
-    deleteSshTunnel: (tabId: string, ruleId: string) => invoke('app_delete_ssh_tunnel', { tabId, ruleId }),
+    listSshTunnels: (tabId: string) => invoke<SshTunnelSnapshot[]>('app_list_ssh_tunnels', { tabId }),
+    createSshTunnel: (tabId: string, rule: SshForwardRule) =>
+      invoke<SshTunnelSnapshot[]>('app_create_ssh_tunnel', { tabId, rule }),
+    startSshTunnel: (tabId: string, ruleId: string) =>
+      invoke<SshTunnelSnapshot[]>('app_start_ssh_tunnel', { tabId, ruleId }),
+    stopSshTunnel: (tabId: string, ruleId: string) =>
+      invoke<SshTunnelSnapshot[]>('app_stop_ssh_tunnel', { tabId, ruleId }),
+    deleteSshTunnel: (tabId: string, ruleId: string) =>
+      invoke<SshTunnelSnapshot[]>('app_delete_ssh_tunnel', { tabId, ruleId }),
 
     getDroppedFilePaths: (files: File[]) => takeNativeDropPaths(files),
     onUiPreferencesChanged: (
@@ -473,34 +492,7 @@ export function createTauriApi(): FileTermDesktopApi {
       }
       return invoke<void>('app_window_action', { action: 'hide' })
     }
-  } as unknown as FileTermDesktopApi
+  } satisfies FileTermDesktopApi
 
-  // The core API exposes these as synchronous fields for Electron parity.
-  // Tauri resolves app metadata asynchronously, so start with safe values and
-  // hydrate them from the Rust runtime as soon as IPC is available.
-  void Promise.all([
-    invoke<string>('app_get_platform'),
-    invoke<string>('app_get_arch'),
-    invoke<string>('app_get_runtime_version'),
-    getVersion(),
-    getName()
-  ])
-    .then(([nativePlatform, nativeArch, runtimeVersion, appVersion, appName]) => {
-      Object.assign(api, {
-        platform: normalizePlatform(nativePlatform),
-        arch: nativeArch,
-        runtimeVersion,
-        appVersion,
-        appName
-      })
-    })
-    .catch(() => undefined)
-
-  return new Proxy(api as FileTermDesktopApi, {
-    get(target, property, receiver) {
-      if (property in target) return Reflect.get(target, property, receiver)
-      if (typeof property !== 'string') return undefined
-      return (...args: unknown[]) => unsupported(property, ...args)
-    }
-  })
+  return api
 }

@@ -4,6 +4,7 @@ export type AppIconName =
   | 'menu'
   | 'server'
   | 'connections'
+  | 'key'
   | 'folder'
   | 'file'
   | 'archive'
@@ -90,6 +91,12 @@ export function AppIcon({ name, size = 14 }: { name: AppIconName; size?: number 
           <path {...commonProps} d="M7 5.1h2" />
           <path {...commonProps} d="M5.2 7.2 6.8 9" />
           <path {...commonProps} d="M10.8 7.2 9.2 9" />
+        </>
+      ) : null}
+      {name === 'key' ? (
+        <>
+          <circle {...commonProps} cx="5.25" cy="8" r="2.5" />
+          <path {...commonProps} d="M7.75 8h5.75M10.6 8v2M12.7 8v1.5" />
         </>
       ) : null}
       {name === 'folder' ? (

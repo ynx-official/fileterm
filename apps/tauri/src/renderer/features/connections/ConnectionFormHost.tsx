@@ -7,6 +7,7 @@ export function ConnectionFormHost({
   errorMessage,
   form,
   groupOptions,
+  isSubmitting,
   mode,
   profiles,
   setForm,
@@ -19,6 +20,7 @@ export function ConnectionFormHost({
   errorMessage: string | null
   form: CreateProfileInput
   groupOptions: string[]
+  isSubmitting?: boolean
   mode: ConnectionFormMode
   profiles: ConnectionProfile[]
   setForm(updater: CreateProfileInput | ((current: CreateProfileInput) => CreateProfileInput)): void
@@ -42,6 +44,7 @@ export function ConnectionFormHost({
     <ConnectionModal
       errorMessage={errorMessage}
       groupOptions={groupOptions}
+      isSubmitting={isSubmitting}
       mode={mode}
       form={form}
       profiles={profiles}

@@ -6,11 +6,13 @@ import { t } from '../../i18n'
 export function SshKeyboardInteractiveModal({
   request,
   errorMessage,
+  isSubmitting = false,
   onCancel,
   onSubmit
 }: {
   request: SshKeyboardInteractiveRequest
   errorMessage?: string | null
+  isSubmitting?: boolean
   onCancel(): void
   onSubmit(answers: string[]): void
 }) {
@@ -24,7 +26,7 @@ export function SshKeyboardInteractiveModal({
       <div className="modal-card ssh-interaction-modal">
         <div className="modal-header">
           <span>SSH keyboard-interactive</span>
-          <CloseButton onClick={onCancel} />
+          <CloseButton disabled={isSubmitting} onClick={onCancel} />
         </div>
         {request.instructions ? <div className="root-access-description">{request.instructions}</div> : null}
         <div className="root-access-meta">
@@ -36,6 +38,7 @@ export function SshKeyboardInteractiveModal({
             <span>{prompt.prompt || `Challenge ${index + 1}`}</span>
             <input
               autoFocus={index === 0}
+              disabled={isSubmitting}
               type={prompt.echo ? 'text' : 'password'}
               value={answers[index] ?? ''}
               onChange={(event) =>
@@ -51,11 +54,17 @@ export function SshKeyboardInteractiveModal({
         ))}
         {errorMessage ? <div className="modal-error">{errorMessage}</div> : null}
         <div className="form-actions">
-          <button className="flat-button" onClick={onCancel} type="button">
+          <button className="flat-button" disabled={isSubmitting} onClick={onCancel} type="button">
             {t.cancel}
           </button>
-          <button className="primary-button" disabled={!canSubmit} onClick={() => onSubmit(answers)} type="button">
-            {t.sshAuthPromptConfirm}
+          <button
+            className="primary-button"
+            disabled={!canSubmit || isSubmitting}
+            onClick={() => onSubmit(answers)}
+            type="button"
+          >
+            {isSubmitting ? <span aria-hidden="true" className="button-spinner" /> : null}
+            <span>{t.sshAuthPromptConfirm}</span>
           </button>
         </div>
       </div>

@@ -1,9 +1,10 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::sessions::WorkerCmd;
@@ -11,7 +12,13 @@ use crate::AppError;
 
 const JOURNAL_VERSION: u8 = 1;
 const UPDATE_INTERVAL: Duration = Duration::from_millis(200);
+const SPEED_SAMPLE_INTERVAL: Duration = Duration::from_millis(120);
+const TRANSFER_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 const PARTIAL_SUFFIX: &str = ".fileterm-part";
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -84,6 +91,10 @@ pub struct TransferTask {
     #[serde(default)]
     pub resumable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub cleanup_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<u64>,
@@ -117,6 +128,12 @@ fn now_ms() -> u64 {
 
 fn transfer_error(message: impl Into<String>) -> AppError {
     AppError::Command(message.into())
+}
+
+fn progress_event_due(previous: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    previous
+        .map(|previous| now.saturating_duration_since(previous) >= UPDATE_INTERVAL)
+        .unwrap_or(true)
 }
 
 fn task_name(path: &str) -> String {
@@ -168,11 +185,13 @@ fn normalize_root_upload_staging(task: &mut TransferTask) {
         (task.destination_path.as_deref(), task.partial_path.clone())
     {
         if task.staging_path.is_none() {
-            task.staging_path = Some(if current_partial.starts_with("/tmp/fileterm-root-upload-") {
-                current_partial
-            } else {
-                root_staging_path(&task.name)
-            });
+            task.staging_path = Some(
+                if current_partial.starts_with("/tmp/fileterm-root-upload-") {
+                    current_partial
+                } else {
+                    root_staging_path(&task.name)
+                },
+            );
         }
         task.partial_path = Some(partial_path(destination));
     }
@@ -267,9 +286,20 @@ pub async fn ensure_loaded(app: &AppHandle) -> Result<(), AppError> {
     }
     let tasks = read_journal(app)?;
     *state.transfers.write().await = tasks.clone();
+    {
+        let _write = state.transfer_journal_write.lock().await;
+        write_journal(app, &tasks)?;
+    }
+    // Publish the loaded flag only after the normalized journal is durable.
+    // Otherwise a concurrent mutation can write a newer snapshot and then be
+    // overwritten by this initial, stale `tasks` clone.
     *loaded = true;
     drop(loaded);
-    write_journal(app, &tasks)
+    // `retry_pending_local_cleanup` updates the now-loaded journal through the
+    // normal patch path. Box this one-time continuation so the compiler does
+    // not have to construct a recursively sized future for the fast-path
+    // `ensure_loaded` call inside that patch path.
+    Box::pin(retry_pending_local_cleanup(app)).await
 }
 
 pub async fn list(app: &AppHandle) -> Result<Vec<TransferTask>, AppError> {
@@ -281,6 +311,7 @@ pub async fn list(app: &AppHandle) -> Result<Vec<TransferTask>, AppError> {
 
 async fn persist(app: &AppHandle) -> Result<(), AppError> {
     let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _write = state.transfer_journal_write.lock().await;
     let tasks = state.transfers.read().await.clone();
     write_journal(app, &tasks)
 }
@@ -294,11 +325,18 @@ async fn emit_task(app: &AppHandle, task: TransferTask, snapshot: bool) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PatchDelivery {
+    Silent,
+    Event,
+    Snapshot,
+}
+
 async fn patch_task(
     app: &AppHandle,
     transfer_id: &str,
     patch: impl FnOnce(&mut TransferTask),
-    immediate: bool,
+    delivery: PatchDelivery,
 ) -> Result<Option<TransferTask>, AppError> {
     ensure_loaded(app).await?;
     let state = app.state::<crate::services::workspace::WorkspaceState>();
@@ -311,10 +349,14 @@ async fn patch_task(
         task.updated_at = Some(now_ms());
         task.clone()
     };
-    if immediate {
+    if matches!(delivery, PatchDelivery::Snapshot) {
         persist(app).await?;
     }
-    emit_task(app, task.clone(), immediate).await;
+    match delivery {
+        PatchDelivery::Silent => {}
+        PatchDelivery::Event => emit_task(app, task.clone(), false).await,
+        PatchDelivery::Snapshot => emit_task(app, task.clone(), true).await,
+    }
     Ok(Some(task))
 }
 
@@ -323,22 +365,51 @@ pub async fn report_progress(app: &AppHandle, transfer_id: &str, transferred: u6
     let should_emit = {
         let mut last_events = state.transfer_last_event.lock().await;
         let now = std::time::Instant::now();
-        let should_emit = last_events
-            .get(transfer_id)
-            .map(|last| now.duration_since(*last) >= UPDATE_INTERVAL)
-            .unwrap_or(true);
+        let should_emit = progress_event_due(last_events.get(transfer_id).copied(), now);
         if should_emit {
             last_events.insert(transfer_id.to_string(), now);
         }
         should_emit
     };
+    let speed = {
+        let now = std::time::Instant::now();
+        let mut samples = state.transfer_progress_samples.lock().await;
+        match samples.get_mut(transfer_id) {
+            Some(sample)
+                if transferred >= sample.bytes
+                    && now.saturating_duration_since(sample.sampled_at)
+                        >= SPEED_SAMPLE_INTERVAL =>
+            {
+                let elapsed = now
+                    .saturating_duration_since(sample.sampled_at)
+                    .as_secs_f64();
+                let bytes_per_second = (transferred - sample.bytes) as f64 / elapsed;
+                sample.bytes = transferred;
+                sample.sampled_at = now;
+                format_transfer_speed(bytes_per_second)
+            }
+            Some(sample) if transferred < sample.bytes => {
+                sample.bytes = transferred;
+                sample.sampled_at = now;
+                None
+            }
+            Some(_) => None,
+            None => {
+                samples.insert(
+                    transfer_id.to_string(),
+                    crate::services::workspace::TransferProgressSample {
+                        bytes: transferred,
+                        sampled_at: now,
+                    },
+                );
+                None
+            }
+        }
+    };
     let _ = patch_task(
         app,
         transfer_id,
         |task| {
-            let previous_bytes = task.transferred_bytes.unwrap_or(0);
-            let previous_updated = task.updated_at.unwrap_or_else(now_ms);
-            let now = now_ms();
             let (aggregate_transferred, aggregate_total) =
                 if let Some(manifest) = task.manifest.as_mut() {
                     if let Some(entry) = manifest
@@ -367,17 +438,16 @@ pub async fn report_progress(app: &AppHandle, transfer_id: &str, transferred: u6
                         .unwrap_or_else(|| task.name.clone()),
                 );
             }
-            if now.saturating_sub(previous_updated) >= 120
-                && aggregate_transferred >= previous_bytes
-            {
-                task.speed = format_transfer_speed(
-                    (aggregate_transferred - previous_bytes) as f64
-                        / ((now.saturating_sub(previous_updated) as f64) / 1000.0),
-                );
+            if let Some(speed) = speed {
+                task.speed = Some(speed);
             }
             task.resumable = true;
         },
-        should_emit,
+        if should_emit {
+            PatchDelivery::Event
+        } else {
+            PatchDelivery::Silent
+        },
     )
     .await;
 }
@@ -512,9 +582,7 @@ async fn prepare_remote_upload(
     let partial_size = stat_remote_transfer_size(app, tab_id, partial_path).await?;
     let resume_offset = partial_size.unwrap_or(0);
     if resume_offset > source_size {
-        return Err(transfer_error(
-            "断点文件大于源文件，请丢弃断点后重新传输",
-        ));
+        return Err(transfer_error("断点文件大于源文件，请丢弃断点后重新传输"));
     }
     Ok(RemoteUploadPlan {
         upload_path: partial_path.to_string(),
@@ -722,12 +790,29 @@ async fn collect_remote_tree(
 }
 
 fn relative_remote_path(root: &str, path: &str) -> Result<String, AppError> {
-    let root = root.trim_end_matches('/');
-    path.strip_prefix(root)
-        .and_then(|value| value.strip_prefix('/'))
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| transfer_error(format!("路径 {path} 不在根目录 {root} 内")))
+    fn normalized_segments(value: &str) -> Result<Vec<&str>, AppError> {
+        let mut segments = Vec::new();
+        for segment in value.split('/') {
+            match segment {
+                "" | "." => {}
+                ".." => {
+                    segments.pop().ok_or_else(|| {
+                        transfer_error(format!("远端路径包含越界父目录：{value}"))
+                    })?;
+                }
+                _ => segments.push(segment),
+            }
+        }
+        Ok(segments)
+    }
+
+    let root_segments = normalized_segments(root)?;
+    let path_segments = normalized_segments(path)?;
+    let relative = path_segments
+        .strip_prefix(root_segments.as_slice())
+        .filter(|segments| !segments.is_empty())
+        .ok_or_else(|| transfer_error(format!("路径 {path} 不在根目录 {root} 内")))?;
+    Ok(relative.join("/"))
 }
 
 fn manifest_totals(manifest: &TransferManifest) -> (u64, u64) {
@@ -787,10 +872,11 @@ pub async fn create_upload(
     target_name: Option<String>,
 ) -> Result<(), AppError> {
     ensure_loaded(app).await?;
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
     let metadata = tokio::fs::metadata(&local_path)
         .await
         .map_err(|error| transfer_error(format!("无法读取本地上传文件: {error}")))?;
-    let state = app.state::<crate::services::workspace::WorkspaceState>();
     let tab = state
         .tabs
         .read()
@@ -830,8 +916,8 @@ pub async fn create_upload(
                     .replace('\\', "/");
                 let entry_destination = join_remote_path(&destination_path, &relative_path);
                 let entry_partial = partial_path(&entry_destination);
-                let entry_staging = (file_access_mode == "root")
-                    .then(|| root_staging_path(&relative_path));
+                let entry_staging =
+                    (file_access_mode == "root").then(|| root_staging_path(&relative_path));
                 TransferManifestEntry {
                     relative_path,
                     source_path: source.to_string_lossy().into_owned(),
@@ -873,13 +959,15 @@ pub async fn create_upload(
             source_identity: None,
             manifest: Some(manifest),
             resumable: true,
+            retry_attempt: None,
+            cleanup_pending: false,
             created_at: Some(now),
             updated_at: Some(now),
         };
         state.transfers.write().await.push(task.clone());
         persist(app).await?;
         emit_task(app, task.clone(), true).await;
-        start(app.clone(), task.id);
+        start(app.clone(), task.id).await?;
         return Ok(());
     }
     if !metadata.is_file() {
@@ -917,13 +1005,15 @@ pub async fn create_upload(
         }),
         manifest: None,
         resumable: true,
+        retry_attempt: None,
+        cleanup_pending: false,
         created_at: Some(now),
         updated_at: Some(now),
     };
     state.transfers.write().await.push(task.clone());
     persist(app).await?;
     emit_task(app, task.clone(), true).await;
-    start(app.clone(), task.id);
+    start(app.clone(), task.id).await?;
     Ok(())
 }
 
@@ -936,6 +1026,7 @@ pub async fn create_download(
 ) -> Result<(), AppError> {
     ensure_loaded(app).await?;
     let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
     let tab = state
         .tabs
         .read()
@@ -986,13 +1077,15 @@ pub async fn create_download(
         }),
         manifest: None,
         resumable: true,
+        retry_attempt: None,
+        cleanup_pending: false,
         created_at: Some(now),
         updated_at: Some(now),
     };
     state.transfers.write().await.push(task.clone());
     persist(app).await?;
     emit_task(app, task.clone(), true).await;
-    start(app.clone(), task.id);
+    start(app.clone(), task.id).await?;
     Ok(())
 }
 
@@ -1005,6 +1098,7 @@ pub async fn create_download_directory(
 ) -> Result<(), AppError> {
     ensure_loaded(app).await?;
     let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
     let tab = state
         .tabs
         .read()
@@ -1081,25 +1175,123 @@ pub async fn create_download_directory(
         source_identity: None,
         manifest: Some(manifest),
         resumable: true,
+        retry_attempt: None,
+        cleanup_pending: false,
         created_at: Some(now),
         updated_at: Some(now),
     };
     state.transfers.write().await.push(task.clone());
     persist(app).await?;
     emit_task(app, task.clone(), true).await;
-    start(app.clone(), task.id);
+    start(app.clone(), task.id).await?;
     Ok(())
 }
 
-fn start(app: AppHandle, transfer_id: String) {
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) = run(app.clone(), transfer_id.clone()).await {
-            let _ = fail_if_running(&app, &transfer_id, error.to_string()).await;
-        }
-    });
+async fn remove_transfer_run_if_generation(app: &AppHandle, transfer_id: &str, generation: u64) {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let mut runs = state.transfer_runs.write().await;
+    if runs
+        .get(transfer_id)
+        .is_some_and(|handle| handle.generation == generation)
+    {
+        runs.remove(transfer_id);
+    }
 }
 
-async fn run(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
+async fn clear_transfer_progress_runtime(app: &AppHandle, transfer_id: &str) {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    state.transfer_last_event.lock().await.remove(transfer_id);
+    state
+        .transfer_progress_samples
+        .lock()
+        .await
+        .remove(transfer_id);
+}
+
+async fn cancel_and_wait_transfer_run(app: &AppHandle, transfer_id: &str) -> Result<(), AppError> {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let handle = state.transfer_runs.read().await.get(transfer_id).cloned();
+    let Some(handle) = handle else {
+        return Ok(());
+    };
+
+    handle.cancel.cancel();
+    let generation = handle.generation;
+    tokio::time::timeout(TRANSFER_STOP_TIMEOUT, handle.wait_until_settled())
+        .await
+        .map_err(|_| transfer_error("等待当前传输停止超时；未执行后续状态变更"))?;
+    remove_transfer_run_if_generation(app, transfer_id, generation).await;
+    clear_transfer_progress_runtime(app, transfer_id).await;
+    Ok(())
+}
+
+async fn cancel_and_wait_all_transfer_runs(app: &AppHandle) -> Result<(), AppError> {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let handles = state
+        .transfer_runs
+        .read()
+        .await
+        .iter()
+        .map(|(transfer_id, handle)| (transfer_id.clone(), handle.clone()))
+        .collect::<Vec<_>>();
+    for (_, handle) in &handles {
+        handle.cancel.cancel();
+    }
+
+    tokio::time::timeout(TRANSFER_STOP_TIMEOUT, async {
+        for (_, handle) in &handles {
+            handle.clone().wait_until_settled().await;
+        }
+    })
+    .await
+    .map_err(|_| transfer_error("等待活动传输停止超时，已取消退出以保护断点数据"))?;
+
+    for (transfer_id, handle) in handles {
+        remove_transfer_run_if_generation(app, &transfer_id, handle.generation).await;
+        clear_transfer_progress_runtime(app, &transfer_id).await;
+    }
+    Ok(())
+}
+
+async fn start(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let generation = state
+        .next_transfer_generation
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
+    let cancel = CancellationToken::new();
+    let (settled_tx, settled_rx) = watch::channel(false);
+    {
+        let mut runs = state.transfer_runs.write().await;
+        if runs.contains_key(&transfer_id) {
+            return Err(transfer_error("该传输已有活动任务，不能重复启动"));
+        }
+        runs.insert(
+            transfer_id.clone(),
+            crate::services::workspace::TransferRunHandle {
+                generation,
+                cancel: cancel.clone(),
+                settled: settled_rx,
+            },
+        );
+    }
+
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = run(app.clone(), transfer_id.clone(), cancel).await {
+            let _ = fail_if_running(&app, &transfer_id, error.to_string()).await;
+        }
+        clear_transfer_progress_runtime(&app, &transfer_id).await;
+        let _ = settled_tx.send(true);
+        remove_transfer_run_if_generation(&app, &transfer_id, generation).await;
+    });
+    Ok(())
+}
+
+async fn run(
+    app: AppHandle,
+    transfer_id: String,
+    cancel: CancellationToken,
+) -> Result<(), AppError> {
     let mut task = task_for(&app, &transfer_id).await?;
     if task.terminal() || task.status == "paused" {
         return Ok(());
@@ -1146,12 +1338,6 @@ async fn run(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
             "文件访问权限模式已变化，请切换回创建任务时的视图后再传输",
         ));
     }
-    let cancel = CancellationToken::new();
-    state
-        .transfer_controls
-        .write()
-        .await
-        .insert(transfer_id.clone(), cancel.clone());
     task = patch_task(
         &app,
         &transfer_id,
@@ -1161,7 +1347,7 @@ async fn run(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
             task.message = Some("正在检查断点...".to_string());
             task.speed = None;
         },
-        true,
+        PatchDelivery::Snapshot,
     )
     .await?
     .ok_or_else(|| transfer_error("传输任务不存在"))?;
@@ -1242,27 +1428,16 @@ async fn run(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
             };
             if !resume_requested {
                 if task.direction == "upload" {
-                    remove_remote_upload_artifacts(
-                        &app,
-                        &tab_id,
-                        &partial,
-                        staging.as_deref(),
-                    )
-                    .await?;
+                    remove_remote_upload_artifacts(&app, &tab_id, &partial, staging.as_deref())
+                        .await?;
                 } else {
                     let _ = tokio::fs::remove_file(&partial).await;
                 }
             }
             let upload_plan = if task.direction == "upload" {
                 Some(
-                    prepare_remote_upload(
-                        &app,
-                        &tab_id,
-                        &partial,
-                        staging.as_deref(),
-                        source_size,
-                    )
-                    .await?,
+                    prepare_remote_upload(&app, &tab_id, &partial, staging.as_deref(), source_size)
+                        .await?,
                 )
             } else {
                 None
@@ -1296,7 +1471,7 @@ async fn run(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
                     });
                     task.resumable = true;
                 },
-                true,
+                PatchDelivery::Snapshot,
             )
             .await?;
             if task.direction == "upload" {
@@ -1340,7 +1515,7 @@ async fn run(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
                     task.message = Some("正在校验文件大小...".to_string());
                     task.speed = None;
                 },
-                true,
+                PatchDelivery::Snapshot,
             )
             .await?;
             let completed_size = if task.direction == "upload" {
@@ -1370,7 +1545,7 @@ async fn run(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
                     task.status = "finalizing".to_string();
                     task.message = Some("正在替换目标文件...".to_string());
                 },
-                true,
+                PatchDelivery::Snapshot,
             )
             .await?;
             if task.direction == "upload" {
@@ -1402,7 +1577,7 @@ async fn run(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
                     task.total_bytes = Some(source_size);
                     task.resumable = false;
                 },
-                true,
+                PatchDelivery::Snapshot,
             )
             .await?;
             if task.direction == "upload" {
@@ -1418,7 +1593,6 @@ async fn run(app: AppHandle, transfer_id: String) -> Result<(), AppError> {
         }
         .await
     };
-    state.transfer_controls.write().await.remove(&transfer_id);
     if result.is_ok() {
         if let Ok(current) = task_for(&app, &transfer_id).await {
             crate::services::logging::info(
@@ -1490,7 +1664,11 @@ async fn update_directory_manifest(
                 task.speed = None;
             }
         },
-        immediate,
+        if immediate {
+            PatchDelivery::Snapshot
+        } else {
+            PatchDelivery::Event
+        },
     )
     .await?;
     Ok(())
@@ -1788,7 +1966,13 @@ async fn run_directory_transfer(
 
     update_directory_manifest(app, transfer_id, &manifest, "done", None, true).await?;
     if task.direction == "upload" {
-        refresh_remote_listing(app, tab_id).await?;
+        if let Err(error) = refresh_remote_listing(app, tab_id).await {
+            crate::services::logging::warn(
+                app,
+                &format!("transfer:{transfer_id}"),
+                format!("directory upload completed but remote listing refresh failed: {error}"),
+            );
+        }
     }
     Ok(())
 }
@@ -1830,7 +2014,7 @@ async fn fail_if_running(
         format!("failed error={error}"),
     );
     let task = task_for(app, transfer_id).await?;
-    if matches!(task.status.as_str(), "paused" | "canceled") {
+    if task.terminal() || task.status == "paused" {
         return Ok(());
     }
     if let Some(mut manifest) = task.manifest.clone() {
@@ -1842,13 +2026,15 @@ async fn fail_if_running(
         {
             let partial_size = if task.direction == "upload" {
                 match task.tab_id.as_deref() {
-                    Some(tab_id) => stat_remote_upload_progress(
-                        app,
-                        tab_id,
-                        &entry.partial_path,
-                        entry.staging_path.as_deref(),
-                    )
-                    .await,
+                    Some(tab_id) => {
+                        stat_remote_upload_progress(
+                            app,
+                            tab_id,
+                            &entry.partial_path,
+                            entry.staging_path.as_deref(),
+                        )
+                        .await
+                    }
                     None => None,
                 }
             } else {
@@ -1887,21 +2073,16 @@ async fn fail_if_running(
                 };
                 task.resumable = resumable;
             },
-            true,
+            PatchDelivery::Snapshot,
         )
         .await?;
         return Ok(());
     }
     let partial_size = if task.direction == "upload" {
-        if let (Some(tab_id), Some(partial)) = (task.tab_id.as_deref(), task.partial_path.as_deref())
+        if let (Some(tab_id), Some(partial)) =
+            (task.tab_id.as_deref(), task.partial_path.as_deref())
         {
-            stat_remote_upload_progress(
-                app,
-                tab_id,
-                partial,
-                task.staging_path.as_deref(),
-            )
-            .await
+            stat_remote_upload_progress(app, tab_id, partial, task.staging_path.as_deref()).await
         } else {
             None
         }
@@ -1937,26 +2118,22 @@ async fn fail_if_running(
             };
             task.resumable = resumable;
         },
-        true,
+        PatchDelivery::Snapshot,
     )
     .await?;
     Ok(())
 }
 
 pub async fn pause(app: &AppHandle, transfer_id: String) -> Result<(), AppError> {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
     let task = task_for(app, &transfer_id).await?;
     if !task.active() || !task.resumable {
         return Ok(());
     }
-    let state = app.state::<crate::services::workspace::WorkspaceState>();
-    if let Some(token) = state
-        .transfer_controls
-        .read()
-        .await
-        .get(&transfer_id)
-        .cloned()
-    {
-        token.cancel();
+    cancel_and_wait_transfer_run(app, &transfer_id).await?;
+    if task_for(app, &transfer_id).await?.terminal() {
+        return Ok(());
     }
     patch_task(
         app,
@@ -1966,20 +2143,17 @@ pub async fn pause(app: &AppHandle, transfer_id: String) -> Result<(), AppError>
             task.message = Some("传输已暂停，可继续".to_string());
             task.speed = None;
         },
-        true,
+        PatchDelivery::Snapshot,
     )
     .await?;
-    crate::services::logging::warn(
-        app,
-        &format!("transfer:{transfer_id}"),
-        "paused by user",
-    );
+    crate::services::logging::warn(app, &format!("transfer:{transfer_id}"), "paused by user");
     Ok(())
 }
 
 pub async fn pause_for_tab(app: &AppHandle, tab_id: &str, message: &str) -> Result<(), AppError> {
     ensure_loaded(app).await?;
     let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
     let transfer_ids = state
         .transfers
         .read()
@@ -1989,14 +2163,9 @@ pub async fn pause_for_tab(app: &AppHandle, tab_id: &str, message: &str) -> Resu
         .map(|task| task.id.clone())
         .collect::<Vec<_>>();
     for transfer_id in transfer_ids {
-        if let Some(token) = state
-            .transfer_controls
-            .read()
-            .await
-            .get(&transfer_id)
-            .cloned()
-        {
-            token.cancel();
+        cancel_and_wait_transfer_run(app, &transfer_id).await?;
+        if task_for(app, &transfer_id).await?.terminal() {
+            continue;
         }
         patch_task(
             app,
@@ -2006,7 +2175,173 @@ pub async fn pause_for_tab(app: &AppHandle, tab_id: &str, message: &str) -> Resu
                 task.message = Some(message.to_string());
                 task.speed = None;
             },
-            true,
+            PatchDelivery::Snapshot,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn remove_local_partial(path: &str) -> Result<(), AppError> {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(transfer_error(error.to_string())),
+    }
+}
+
+async fn cleanup_transfer_partial(app: &AppHandle, task: &TransferTask) -> Result<(), AppError> {
+    if let Some(manifest) = &task.manifest {
+        let mut failures = Vec::new();
+        for entry in &manifest.files {
+            let result = if task.direction == "upload" {
+                match task.tab_id.as_deref() {
+                    Some(tab_id) => {
+                        remove_remote_upload_artifacts(
+                            app,
+                            tab_id,
+                            &entry.partial_path,
+                            entry.staging_path.as_deref(),
+                        )
+                        .await
+                    }
+                    None => Err(transfer_error("上传任务缺少连接标签，无法清理远端断点")),
+                }
+            } else {
+                remove_local_partial(&entry.partial_path).await
+            };
+            if let Err(error) = result {
+                failures.push(error.to_string());
+            }
+        }
+        return if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(transfer_error(failures.join("；")))
+        };
+    }
+
+    if task.direction == "upload" {
+        return match (task.tab_id.as_deref(), task.partial_path.as_deref()) {
+            (Some(tab_id), Some(path)) => {
+                remove_remote_upload_artifacts(app, tab_id, path, task.staging_path.as_deref())
+                    .await
+            }
+            (None, Some(_)) => Err(transfer_error("上传任务缺少连接标签，无法清理远端断点")),
+            _ => Ok(()),
+        };
+    }
+
+    match task.partial_path.as_deref() {
+        Some(path) => remove_local_partial(path).await,
+        None => Ok(()),
+    }
+}
+
+async fn record_cleanup_attempt(
+    app: &AppHandle,
+    transfer_id: &str,
+    tab_id: Option<String>,
+    result: &Result<(), AppError>,
+    success_message: &str,
+    failure_prefix: &str,
+) -> Result<(), AppError> {
+    patch_task(
+        app,
+        transfer_id,
+        |task| {
+            if let Some(tab_id) = tab_id {
+                task.tab_id = Some(tab_id);
+            }
+            match result {
+                Ok(()) => {
+                    task.message = Some(success_message.to_string());
+                    task.cleanup_pending = false;
+                    task.retry_attempt = None;
+                }
+                Err(error) => {
+                    task.message = Some(format!("{failure_prefix}：{error}"));
+                    task.cleanup_pending = true;
+                    task.retry_attempt = Some(task.retry_attempt.unwrap_or(0).saturating_add(1));
+                }
+            }
+        },
+        PatchDelivery::Snapshot,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn retry_pending_local_cleanup(app: &AppHandle) -> Result<(), AppError> {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
+    let tasks = state
+        .transfers
+        .read()
+        .await
+        .iter()
+        .filter(|task| task.cleanup_pending && task.direction != "upload")
+        .cloned()
+        .collect::<Vec<_>>();
+    for task in tasks {
+        let result = cleanup_transfer_partial(app, &task).await;
+        record_cleanup_attempt(
+            app,
+            &task.id,
+            None,
+            &result,
+            "应用启动时已自动清理本地断点",
+            "应用启动时自动清理本地断点失败",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Retry remote partial cleanup after the matching SSH/FTP worker has fully
+/// established its file channel. This keeps cleanupPending actionable across
+/// app restarts and tab replacement instead of requiring the stale tab ID.
+pub async fn retry_pending_cleanup_for_tab(app: &AppHandle, tab_id: &str) -> Result<(), AppError> {
+    ensure_loaded(app).await?;
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
+    let Some((profile_id, file_access_mode, true)) =
+        state.sessions.read().await.get(tab_id).map(|session| {
+            (
+                session.profile_id.clone(),
+                session.file_access_mode.clone(),
+                session.connected,
+            )
+        })
+    else {
+        return Ok(());
+    };
+    let tasks = state
+        .transfers
+        .read()
+        .await
+        .iter()
+        .filter(|task| {
+            task.cleanup_pending
+                && task.direction == "upload"
+                && task.profile_id.as_deref() == Some(profile_id.as_str())
+                && task
+                    .file_access_mode
+                    .as_deref()
+                    .is_none_or(|expected| expected == file_access_mode)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for mut task in tasks {
+        task.tab_id = Some(tab_id.to_string());
+        let result = cleanup_transfer_partial(app, &task).await;
+        record_cleanup_attempt(
+            app,
+            &task.id,
+            Some(tab_id.to_string()),
+            &result,
+            "连接恢复后已自动清理远端断点",
+            "连接恢复后自动清理远端断点失败",
         )
         .await?;
     }
@@ -2014,16 +2349,13 @@ pub async fn pause_for_tab(app: &AppHandle, tab_id: &str, message: &str) -> Resu
 }
 
 pub async fn discard(app: &AppHandle, transfer_id: String) -> Result<(), AppError> {
-    let task = task_for(app, &transfer_id).await?;
     let state = app.state::<crate::services::workspace::WorkspaceState>();
-    if let Some(token) = state
-        .transfer_controls
-        .read()
-        .await
-        .get(&transfer_id)
-        .cloned()
-    {
-        token.cancel();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
+    task_for(app, &transfer_id).await?;
+    cancel_and_wait_transfer_run(app, &transfer_id).await?;
+    let task = task_for(app, &transfer_id).await?;
+    if task.status == "done" {
+        return Ok(());
     }
     patch_task(
         app,
@@ -2033,8 +2365,9 @@ pub async fn discard(app: &AppHandle, transfer_id: String) -> Result<(), AppErro
             task.message = Some("传输已取消，正在清理断点".to_string());
             task.speed = None;
             task.resumable = false;
+            task.cleanup_pending = true;
         },
-        true,
+        PatchDelivery::Snapshot,
     )
     .await?;
     crate::services::logging::warn(
@@ -2042,82 +2375,32 @@ pub async fn discard(app: &AppHandle, transfer_id: String) -> Result<(), AppErro
         &format!("transfer:{transfer_id}"),
         "canceled by user; cleaning partial data",
     );
-    let app_handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let cleanup = if let Some(manifest) = task.manifest {
-            let mut failures = Vec::new();
-            for entry in manifest.files {
-                let result = if task.direction == "upload" {
-                    match task.tab_id.as_deref() {
-                        Some(tab_id) => remove_remote_upload_artifacts(
-                            &app_handle,
-                            tab_id,
-                            &entry.partial_path,
-                            entry.staging_path.as_deref(),
-                        )
-                        .await,
-                        None => Ok(()),
-                    }
-                } else {
-                    tokio::fs::remove_file(entry.partial_path)
-                        .await
-                        .or_else(|error| {
-                            (error.kind() == std::io::ErrorKind::NotFound)
-                                .then_some(())
-                                .ok_or(error)
-                        })
-                        .map_err(|error| transfer_error(error.to_string()))
-                };
-                if let Err(error) = result {
-                    failures.push(error.to_string());
-                }
-            }
-            if failures.is_empty() {
-                Ok(())
-            } else {
-                Err(transfer_error(failures.join("；")))
-            }
-        } else if task.direction == "upload" {
-            match (task.tab_id, task.partial_path) {
-                (Some(tab_id), Some(path)) => remove_remote_upload_artifacts(
-                    &app_handle,
-                    &tab_id,
-                    &path,
-                    task.staging_path.as_deref(),
-                )
-                .await,
-                _ => Ok(()),
-            }
-        } else if let Some(path) = task.partial_path {
-            tokio::fs::remove_file(path)
-                .await
-                .or_else(|error| {
-                    (error.kind() == std::io::ErrorKind::NotFound)
-                        .then_some(())
-                        .ok_or(error)
-                })
-                .map_err(|error| transfer_error(error.to_string()))
-        } else {
-            Ok(())
-        };
-        let message = cleanup
-            .map(|_| "传输已取消，断点已清理".to_string())
-            .unwrap_or_else(|error| format!("传输已取消，但断点清理失败：{error}"));
-        let _ = patch_task(
-            &app_handle,
-            &transfer_id,
-            |task| task.message = Some(message),
-            true,
-        )
-        .await;
-    });
+    let cleanup = cleanup_transfer_partial(app, &task).await;
+    record_cleanup_attempt(
+        app,
+        &transfer_id,
+        None,
+        &cleanup,
+        "传输已取消，断点已清理",
+        "传输已取消，但断点清理失败",
+    )
+    .await?;
+    clear_transfer_progress_runtime(app, &transfer_id).await;
     Ok(())
 }
 
 pub async fn resume(app: &AppHandle, transfer_id: String) -> Result<(), AppError> {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
     let task = task_for(app, &transfer_id).await?;
     if !task.resumable || !matches!(task.status.as_str(), "paused" | "interrupted" | "failed") {
         return Err(transfer_error("该传输没有可用断点"));
+    }
+    if task.cleanup_pending {
+        return Err(transfer_error("该传输仍有待清理断点，不能继续"));
+    }
+    if state.transfer_runs.read().await.contains_key(&transfer_id) {
+        return Err(transfer_error("该传输仍有活动任务，不能重复继续"));
     }
     let profile_id = task
         .profile_id
@@ -2127,7 +2410,6 @@ pub async fn resume(app: &AppHandle, transfer_id: String) -> Result<(), AppError
         .await
         .ok_or_else(|| transfer_error("请先打开并连接原传输使用的连接，再继续任务"))?;
     if let Some(expected_mode) = task.file_access_mode.as_deref() {
-        let state = app.state::<crate::services::workspace::WorkspaceState>();
         let current_mode = state
             .sessions
             .read()
@@ -2150,48 +2432,60 @@ pub async fn resume(app: &AppHandle, transfer_id: String) -> Result<(), AppError
             task.message = Some("等待继续传输".to_string());
             task.speed = None;
         },
-        true,
+        PatchDelivery::Snapshot,
     )
     .await?;
-    crate::services::logging::info(
-        app,
-        &format!("transfer:{transfer_id}"),
-        "resume queued",
-    );
-    start(app.clone(), transfer_id);
-    Ok(())
+    crate::services::logging::info(app, &format!("transfer:{transfer_id}"), "resume queued");
+    start(app.clone(), transfer_id).await
 }
 
 pub async fn clear(app: &AppHandle, transfer_ids: Vec<String>) -> Result<(), AppError> {
     ensure_loaded(app).await?;
     let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _lifecycle = state.transfer_lifecycle.lock().await;
     let ids = transfer_ids
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
-    state
-        .transfers
-        .write()
-        .await
-        .retain(|task| !(ids.contains(&task.id) && task.terminal() && !task.resumable));
+    let removed_ids = {
+        let mut tasks = state.transfers.write().await;
+        let removed = tasks
+            .iter()
+            .filter(|task| {
+                ids.contains(&task.id)
+                    && task.terminal()
+                    && !task.resumable
+                    && !task.cleanup_pending
+            })
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        tasks.retain(|task| !removed.contains(&task.id));
+        removed
+    };
+    for transfer_id in removed_ids {
+        clear_transfer_progress_runtime(app, &transfer_id).await;
+    }
     persist(app).await
 }
 
 pub async fn shutdown(app: &AppHandle) -> Result<(), AppError> {
     ensure_loaded(app).await?;
     let state = app.state::<crate::services::workspace::WorkspaceState>();
-    let controls = state
-        .transfer_controls
+    let _lifecycle = state.transfer_lifecycle.lock().await;
+    let active_ids = state
+        .transfers
         .read()
         .await
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    for token in controls {
-        token.cancel();
-    }
+        .iter()
+        .filter(|task| task.active())
+        .map(|task| task.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    cancel_and_wait_all_transfer_runs(app).await?;
     let mut tasks = state.transfers.write().await;
-    let active_count = tasks.iter().filter(|task| task.active()).count();
-    for task in tasks.iter_mut().filter(|task| task.active()) {
+    let active_count = active_ids.len();
+    for task in tasks
+        .iter_mut()
+        .filter(|task| active_ids.contains(&task.id) && !task.terminal())
+    {
         task.status = if task.resumable { "paused" } else { "canceled" }.to_string();
         task.message = Some("应用退出时已暂停，可手动继续".to_string());
         task.speed = None;
@@ -2210,7 +2504,8 @@ pub async fn shutdown(app: &AppHandle) -> Result<(), AppError> {
 mod tests {
     use super::{
         join_remote_path, manifest_totals, normalize_root_upload_staging, partial_path,
-        TransferFileIdentity, TransferManifest, TransferManifestEntry, TransferTask,
+        progress_event_due, relative_remote_path, TransferFileIdentity, TransferManifest,
+        TransferManifestEntry, TransferTask, UPDATE_INTERVAL,
     };
 
     #[test]
@@ -2224,6 +2519,49 @@ mod tests {
             partial_path("/var/tmp/file.txt"),
             "/var/tmp/file.txt.fileterm-part"
         );
+    }
+
+    #[test]
+    fn keeps_directory_download_entries_inside_the_selected_remote_root() {
+        assert_eq!(
+            relative_remote_path("/srv/releases", "/srv/releases/app/config.json").unwrap(),
+            "app/config.json"
+        );
+        assert_eq!(
+            relative_remote_path("/", "/var/log/app.log").unwrap(),
+            "var/log/app.log"
+        );
+        assert!(relative_remote_path("/srv/releases", "/srv/private/key").is_err());
+        assert!(relative_remote_path("/srv/releases", "/srv/releases/../../etc/passwd").is_err());
+        assert!(relative_remote_path("/srv/releases", "/srv/releases").is_err());
+    }
+
+    #[test]
+    fn cleanup_tracking_round_trips_with_the_core_contract() {
+        let mut task: TransferTask = serde_json::from_value(serde_json::json!({
+            "id": "transfer-cleanup",
+            "direction": "upload",
+            "name": "payload.bin",
+            "progress": 25,
+            "status": "canceled"
+        }))
+        .unwrap();
+        assert!(!task.cleanup_pending);
+        assert_eq!(task.retry_attempt, None);
+
+        task.cleanup_pending = true;
+        task.retry_attempt = Some(2);
+        let value = serde_json::to_value(task).unwrap();
+        assert_eq!(value["cleanupPending"], true);
+        assert_eq!(value["retryAttempt"], 2);
+    }
+
+    #[test]
+    fn progress_events_are_coalesced_to_the_configured_interval() {
+        let now = std::time::Instant::now();
+        assert!(progress_event_due(None, now));
+        assert!(!progress_event_due(Some(now - UPDATE_INTERVAL / 2), now));
+        assert!(progress_event_due(Some(now - UPDATE_INTERVAL), now));
     }
 
     #[test]
@@ -2288,10 +2626,7 @@ mod tests {
             entry.staging_path.as_deref(),
             Some("/tmp/fileterm-root-upload-entry.part")
         );
-        assert_eq!(
-            entry.partial_path,
-            "/etc/fileterm/app.toml.fileterm-part"
-        );
+        assert_eq!(entry.partial_path, "/etc/fileterm/app.toml.fileterm-part");
     }
 
     #[test]

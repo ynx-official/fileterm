@@ -164,20 +164,24 @@ export function WorkspaceStage({
   onUploadFiles(items: LocalFileItem[]): void
   onCreateConnection(): void
   onEditConnection(profile: ConnectionProfile): void
-  onDeleteConnection(profileId: string): void
-  onCreateConnectionFolder(name: string): void
-  onDeleteConnectionFolder(folderId: string): void
-  onUpdateConnectionFolder(folderId: string, updates: Partial<ConnectionFolder>): void
-  onUpdateConnectionOrder(id: string, newParentId: string | undefined, newOrder: number): void
+  onDeleteConnection(profileId: string): Promise<boolean> | boolean | void
+  onCreateConnectionFolder(name: string): Promise<boolean> | boolean | void
+  onDeleteConnectionFolder(folderId: string): Promise<boolean> | boolean | void
+  onUpdateConnectionFolder(folderId: string, updates: Partial<ConnectionFolder>): Promise<boolean> | boolean | void
+  onUpdateConnectionOrder(
+    id: string,
+    newParentId: string | undefined,
+    newOrder: number
+  ): Promise<boolean> | boolean | void
   onImportConnections(source?: 'files' | 'folder'): void
   onExportConnections(): void
-  onCreateCommand(input: CommandTemplateInput): void
-  onUpdateCommand(commandId: string, input: CommandTemplateInput): void
-  onDeleteCommand(commandId: string): void
-  onCreateCommandFolder(name: string): void
-  onDeleteCommandFolder(folderId: string): void
-  onUpdateCommandFolder(folderId: string, updates: Partial<CommandFolder>): void
-  onUpdateCommandOrder(id: string, newParentId: string | undefined, newOrder: number): void
+  onCreateCommand(input: CommandTemplateInput): Promise<boolean> | boolean | void
+  onUpdateCommand(commandId: string, input: CommandTemplateInput): Promise<boolean> | boolean | void
+  onDeleteCommand(commandId: string): Promise<boolean> | boolean | void
+  onCreateCommandFolder(name: string): Promise<boolean> | boolean | void
+  onDeleteCommandFolder(folderId: string): Promise<boolean> | boolean | void
+  onUpdateCommandFolder(folderId: string, updates: Partial<CommandFolder>): Promise<boolean> | boolean | void
+  onUpdateCommandOrder(id: string, newParentId: string | undefined, newOrder: number): Promise<boolean> | boolean | void
   onSetTheme(value: 'default-dark' | 'default-light'): void
   onSetLocale(value: 'zhCN' | 'enUS'): void
   onOpenLogsDirectory(): void

@@ -288,24 +288,26 @@ export function SettingsModal({
                       onChange={(event) => setSyncPassword(event.target.value)}
                     />
                   </label>
-                  <label className="webdav-checkbox ssh-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={syncConfig.enabled}
-                      onChange={(event) => setSyncConfig({ ...syncConfig, enabled: event.target.checked })}
-                    />
-                    启用 WebDAV 配置同步
-                  </label>
-                  <label className="webdav-checkbox ssh-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={syncConfig.allowInsecureTls === true}
-                      onChange={(event) => setSyncConfig({ ...syncConfig, allowInsecureTls: event.target.checked })}
-                    />
-                    允许不安全的 HTTP（高风险）
-                  </label>
+                  <div className="webdav-sync-options">
+                    <label className="webdav-checkbox ssh-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={syncConfig.enabled}
+                        onChange={(event) => setSyncConfig({ ...syncConfig, enabled: event.target.checked })}
+                      />
+                      启用 WebDAV 配置同步
+                    </label>
+                    <label className="webdav-checkbox ssh-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={syncConfig.allowInsecureTls === true}
+                        onChange={(event) => setSyncConfig({ ...syncConfig, allowInsecureTls: event.target.checked })}
+                      />
+                      允许不安全的 HTTP（高风险）
+                    </label>
+                  </div>
                 </div>
-                <div className="settings-update-actions">
+                <div className="settings-update-actions webdav-sync-actions">
                   <button
                     className="primary-button compact"
                     type="button"

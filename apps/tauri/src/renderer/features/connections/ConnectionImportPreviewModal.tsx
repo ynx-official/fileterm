@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import type { ConnectionImportConflictStrategy, ConnectionImportPlan } from '@fileterm/core'
 import { CloseButton } from '../common/CloseButton'
 
@@ -18,6 +18,19 @@ export function ConnectionImportPreviewModal({
   const [selected, setSelected] = useState(() => new Set(readyIds))
   const [strategy, setStrategy] = useState<ConnectionImportConflictStrategy>('skip')
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const submittingRef = useRef(false)
+
+  const commit = async () => {
+    if (submittingRef.current || !selected.size) return
+    submittingRef.current = true
+    setIsSubmitting(true)
+    try {
+      await onCommit([...selected], strategy)
+    } finally {
+      submittingRef.current = false
+      setIsSubmitting(false)
+    }
+  }
 
   const toggle = (id: string) =>
     setSelected((current) => {
@@ -28,14 +41,14 @@ export function ConnectionImportPreviewModal({
     })
 
   return (
-    <div className="modal-backdrop connection-import-preview-backdrop" onClick={onClose}>
+    <div className="modal-backdrop connection-import-preview-backdrop" onClick={isSubmitting ? undefined : onClose}>
       <section className="modal-card connection-import-preview" onClick={(event) => event.stopPropagation()}>
         <header className="connection-manager-header">
           <span className="connection-manager-title">
             <span className="material-symbols-outlined">preview</span>
             <span>导入预览</span>
           </span>
-          <CloseButton onClick={onClose} />
+          <CloseButton disabled={isSubmitting} onClick={onClose} />
         </header>
         <p className="connection-import-preview-hint">
           密码、私钥和代理密码不会显示在此预览中；它们只在确认后由主进程写入本地 secret storage。
@@ -43,6 +56,7 @@ export function ConnectionImportPreviewModal({
         <label className="connection-import-strategy">
           发现重复连接时
           <select
+            disabled={isSubmitting}
             value={strategy}
             onChange={(event) => setStrategy(event.target.value as ConnectionImportConflictStrategy)}
           >
@@ -58,7 +72,7 @@ export function ConnectionImportPreviewModal({
               className={`connection-import-item is-${item.status}`}
             >
               <input
-                disabled={item.status !== 'ready' || !item.id}
+                disabled={isSubmitting || item.status !== 'ready' || !item.id}
                 type="checkbox"
                 checked={Boolean(item.id && selected.has(item.id))}
                 onChange={() => item.id && toggle(item.id)}
@@ -82,19 +96,17 @@ export function ConnectionImportPreviewModal({
           <span>
             已选择 {selected.size} / {readyIds.length} 项
           </span>
-          <button type="button" onClick={onClose}>
+          <button disabled={isSubmitting} type="button" onClick={onClose}>
             取消
           </button>
           <button
             className="primary-button compact"
             disabled={!selected.size || isSubmitting}
             type="button"
-            onClick={() => {
-              setIsSubmitting(true)
-              void onCommit([...selected], strategy).finally(() => setIsSubmitting(false))
-            }}
+            onClick={() => void commit()}
           >
-            {isSubmitting ? '正在导入…' : '确认导入'}
+            {isSubmitting ? <span aria-hidden="true" className="button-spinner" /> : null}
+            <span>{isSubmitting ? '正在导入…' : '确认导入'}</span>
           </button>
         </footer>
       </section>

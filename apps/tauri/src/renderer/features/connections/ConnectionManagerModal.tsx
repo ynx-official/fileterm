@@ -33,13 +33,13 @@ export function ConnectionManagerModal({
   folders: ConnectionFolder[]
   onClose(): void
   onCreate(): void
-  onDeleteProfile(profileId: string): Promise<unknown> | void
+  onDeleteProfile(profileId: string): Promise<unknown> | boolean | void
   onEditProfile(profile: ConnectionProfile): void
   onOpenProfile(profileId: string): void
-  onCreateFolder(name: string): void
-  onDeleteFolder(folderId: string): Promise<unknown> | void
-  onUpdateFolder(folderId: string, updates: Partial<ConnectionFolder>): void
-  onUpdateOrder(id: string, newParentId: string | undefined, newOrder: number): void
+  onCreateFolder(name: string): Promise<boolean> | boolean | void
+  onDeleteFolder(folderId: string): Promise<unknown> | boolean | void
+  onUpdateFolder(folderId: string, updates: Partial<ConnectionFolder>): Promise<boolean> | boolean | void
+  onUpdateOrder(id: string, newParentId: string | undefined, newOrder: number): Promise<boolean> | boolean | void
   standalone?: boolean
   inline?: boolean
   onActiveFolderChange?(name: string): void
@@ -61,6 +61,9 @@ export function ConnectionManagerModal({
   >(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const deleteInFlightRef = useRef(false)
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null)
+  const folderRenameInFlightRef = useRef(false)
   const suppressRowClickRef = useRef(false)
   const dragStateRef = useRef<{
     draggingId: string | null
@@ -82,14 +85,25 @@ export function ConnectionManagerModal({
     })
   }
 
-  const saveFolderRename = () => {
-    if (!editingFolder) return
-    const name = editingFolder.name.trim()
-    const current = folders.find((folder) => folder.id === editingFolder.id)
-    if (name && name !== current?.name) {
-      onUpdateFolder(editingFolder.id, { name })
+  const saveFolderRename = async () => {
+    if (!editingFolder || folderRenameInFlightRef.current) return
+    const target = editingFolder
+    const name = target.name.trim()
+    const current = folders.find((folder) => folder.id === target.id)
+    if (!name || name === current?.name) {
+      setEditingFolder(null)
+      return
     }
-    setEditingFolder(null)
+
+    folderRenameInFlightRef.current = true
+    setRenamingFolderId(target.id)
+    try {
+      const result = await onUpdateFolder(target.id, { name })
+      if (result !== false) setEditingFolder(null)
+    } finally {
+      folderRenameInFlightRef.current = false
+      setRenamingFolderId(null)
+    }
   }
 
   const tree = useMemo(() => {
@@ -435,14 +449,15 @@ export function ConnectionManagerModal({
               <input
                 autoFocus
                 className="manager-inline-input"
+                disabled={renamingFolderId === node.id}
                 value={editingFolder.name}
-                onBlur={saveFolderRename}
+                onBlur={() => void saveFolderRename()}
                 onChange={(event) => setEditingFolder({ id: node.id, name: event.target.value })}
                 onClick={stopInteractiveEvent}
                 onKeyDown={(event) => {
                   event.stopPropagation()
-                  if (event.key === 'Enter') saveFolderRename()
-                  if (event.key === 'Escape') setEditingFolder(null)
+                  if (event.key === 'Enter') void saveFolderRename()
+                  if (event.key === 'Escape' && !folderRenameInFlightRef.current) setEditingFolder(null)
                 }}
               />
             ) : (
@@ -740,22 +755,31 @@ export function ConnectionManagerModal({
           errorMessage={deleteError}
           isSubmitting={isDeleting}
           onClose={() => {
-            if (!isDeleting) {
+            if (!deleteInFlightRef.current) {
               setPendingDelete(null)
               setDeleteError(null)
             }
           }}
           onConfirm={() => {
+            if (deleteInFlightRef.current) return
             const target = pendingDelete
+            deleteInFlightRef.current = true
             setIsDeleting(true)
             setDeleteError(null)
             void Promise.resolve()
               .then(() => (target.kind === 'folder' ? onDeleteFolder(target.id) : onDeleteProfile(target.id)))
-              .then(() => setPendingDelete(null))
+              .then((result) => {
+                if (result !== false) {
+                  setPendingDelete(null)
+                }
+              })
               .catch((error: unknown) => {
                 setDeleteError(error instanceof Error ? error.message : String(error))
               })
-              .finally(() => setIsDeleting(false))
+              .finally(() => {
+                deleteInFlightRef.current = false
+                setIsDeleting(false)
+              })
           }}
           title={t.delete}
         />

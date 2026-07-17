@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -20,19 +21,24 @@ use russh::client::{Handle, Handler};
 use russh::keys::PrivateKeyWithHashAlg;
 use russh::{Channel, ChannelMsg};
 use russh_sftp::client::error::Error as SftpError;
-use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::Metadata as SftpMetadata;
+use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::{OpenFlags, StatusCode};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{copy_bidirectional, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{
+    copy_bidirectional, AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt,
+};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use tokio::time::timeout;
-use tokio_util::sync::CancellationToken;
 use tokio_socks::tcp::Socks5Stream;
+use tokio_util::sync::CancellationToken;
 
 use super::{TransferFileStat, WorkerCmd};
+use crate::services::WorkspaceTabStatus;
+
+const DEFAULT_SSH_KEY_FILES: [&str; 4] = ["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"];
 
 fn resource_monitoring_enabled(profile: &Value) -> bool {
     profile
@@ -140,16 +146,24 @@ pub fn start_ssh_worker(
             crate::services::logging::session(&app, "INFO", "ssh", &tid, "worker cancelled");
             return;
         }
-        match run_result {
+        let final_status = match run_result {
             Ok(()) => {
                 emit_terminal_data(&app, &tid, "连接已断开\r\n").await;
+                WorkspaceTabStatus::Closed
             }
             Err(e) => {
-                crate::services::logging::session(&app, "ERROR", "ssh", &tid, format!("worker failed: {e}"));
+                crate::services::logging::session(
+                    &app,
+                    "ERROR",
+                    "ssh",
+                    &tid,
+                    format!("worker failed: {e}"),
+                );
                 emit_terminal_data(&app, &tid, &format!("连接失败: {}\r\n", e)).await;
+                WorkspaceTabStatus::Error
             }
-        }
-        update_tab_status_and_emit(&app, &tid, "disconnected").await;
+        };
+        update_tab_status_and_emit(&app, &tid, final_status).await;
 
         // ── Auto-reconnect with 2000ms delay ───────────────────────────────
         // Mirrors Electron's `workspace-service.ts` autoReconnectingTabs:
@@ -161,20 +175,21 @@ pub fn start_ssh_worker(
         // still alive, and the next disconnect must use that new policy.
         let reconnect_mode = {
             let state = app.state::<crate::services::workspace::WorkspaceState>();
-            let sessions = state
-                .sessions
-                .read()
-                .await;
+            let sessions = state.sessions.read().await;
             let mode = sessions
                 .get(&tid)
                 .and_then(|session| session.reconnect_mode.clone())
-                .or_else(|| {
-                    crate::services::workspace::reconnect_mode_for_profile(&profile)
-                });
+                .or_else(|| crate::services::workspace::reconnect_mode_for_profile(&profile));
             mode.unwrap_or_else(|| "none".to_string())
         };
         if reconnect_mode == "auto" {
-            crate::services::logging::session(&app, "INFO", "ssh", &tid, "auto-reconnect scheduled delay_ms=2000");
+            crate::services::logging::session(
+                &app,
+                "INFO",
+                "ssh",
+                &tid,
+                "auto-reconnect scheduled delay_ms=2000",
+            );
             tokio::time::sleep(Duration::from_secs(2)).await;
 
             // Re-check: tab may have been closed or already reconnected by
@@ -184,19 +199,28 @@ pub fn start_ssh_worker(
                 let tabs = state.tabs.read().await;
                 let sessions = state.sessions.read().await;
                 let tab_exists = tabs.iter().any(|t| t.id == tid);
-                let session_connected = sessions
-                    .get(&tid)
-                    .map(|s| s.connected)
-                    .unwrap_or(false);
+                let session_connected = sessions.get(&tid).map(|s| s.connected).unwrap_or(false);
                 tab_exists && !session_connected
             };
 
             if should_reconnect {
-                crate::services::logging::session(&app, "INFO", "ssh", &tid, "auto-reconnect firing");
+                crate::services::logging::session(
+                    &app,
+                    "INFO",
+                    "ssh",
+                    &tid,
+                    "auto-reconnect firing",
+                );
                 // Trigger reconnect via the same path the renderer uses.
                 let _ = crate::commands::app_reconnect_tab(app.clone(), tid.clone()).await;
             } else {
-                crate::services::logging::session(&app, "DEBUG", "ssh", &tid, "auto-reconnect canceled");
+                crate::services::logging::session(
+                    &app,
+                    "DEBUG",
+                    "ssh",
+                    &tid,
+                    "auto-reconnect canceled",
+                );
             }
         }
     });
@@ -230,17 +254,32 @@ impl Handler for ClientHandler {
             "DEBUG",
             "ssh",
             &self.tab_id,
-            format!("host-key verification host={} port={}", self.host, self.port),
+            format!(
+                "host-key verification host={} port={}",
+                self.host, self.port
+            ),
         );
         // Short-circuit: if the profile already trusts this exact
         // fingerprint, accept without prompting. This is the common path
         // after the user previously chose "accept-and-save".
         if let Some(known) = &self.trusted_fingerprint {
             if known == &fp {
-                crate::services::logging::session(&self.app, "INFO", "ssh", &self.tab_id, "host-key matched saved fingerprint");
+                crate::services::logging::session(
+                    &self.app,
+                    "INFO",
+                    "ssh",
+                    &self.tab_id,
+                    "host-key matched saved fingerprint",
+                );
                 return Ok(true);
             }
-            crate::services::logging::session(&self.app, "WARN", "ssh", &self.tab_id, "host-key mismatch; requesting user verification");
+            crate::services::logging::session(
+                &self.app,
+                "WARN",
+                "ssh",
+                &self.tab_id,
+                "host-key mismatch; requesting user verification",
+            );
         }
         let known = self.trusted_fingerprint.clone();
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -283,6 +322,12 @@ impl Handler for ClientHandler {
             "accept-and-save" => {
                 // Persist the trusted fingerprint so future connects
                 // short-circuit the prompt.
+                let library_mutation = self
+                    .app
+                    .state::<crate::services::workspace::WorkspaceState>()
+                    .library_mutation
+                    .clone();
+                let _guard = library_mutation.lock().await;
                 let _ = crate::services::profile_ops::update_trusted_host_fingerprint(
                     &self.app,
                     &self.profile_id,
@@ -307,15 +352,20 @@ impl Handler for ClientHandler {
         reply: russh::client::ChannelOpenHandle,
         _session: &mut russh::client::Session,
     ) -> Result<(), Self::Error> {
-        let state = self.app.state::<crate::services::workspace::WorkspaceState>();
+        let state = self
+            .app
+            .state::<crate::services::workspace::WorkspaceState>();
         let target = {
             let forwards = state.remote_forwards.read().await;
-            forwards.get(&self.tab_id).and_then(|rules| {
-                rules.iter().find(|rule| {
-                    rule.bind_port == connected_port
-                        && remote_bind_host_matches(&rule.bind_host, connected_address)
+            forwards
+                .get(&self.tab_id)
+                .and_then(|rules| {
+                    rules.iter().find(|rule| {
+                        rule.bind_port == connected_port
+                            && remote_bind_host_matches(&rule.bind_host, connected_address)
+                    })
                 })
-            }).cloned()
+                .cloned()
         };
 
         let Some(target) = target else {
@@ -330,14 +380,21 @@ impl Handler for ClientHandler {
         let app = self.app.clone();
         tokio::spawn(async move {
             let result = async {
-                let mut local = TcpStream::connect((&*target.target_host, target.target_port)).await?;
+                let mut local =
+                    TcpStream::connect((&*target.target_host, target.target_port)).await?;
                 let mut remote = channel.into_stream();
                 copy_bidirectional(&mut local, &mut remote).await?;
                 Ok::<(), std::io::Error>(())
             }
             .await;
             if let Err(error) = result {
-                crate::services::logging::session(&app, "WARN", "tunnel", &tab_id, format!("remote forward connection failed: {error}"));
+                crate::services::logging::session(
+                    &app,
+                    "WARN",
+                    "tunnel",
+                    &tab_id,
+                    format!("remote forward connection failed: {error}"),
+                );
             }
         });
         Ok(())
@@ -405,7 +462,12 @@ impl TunnelManager {
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
-        tunnels.sort_by(|left, right| left["name"].as_str().unwrap_or("").cmp(right["name"].as_str().unwrap_or("")));
+        tunnels.sort_by(|left, right| {
+            left["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(right["name"].as_str().unwrap_or(""))
+        });
         Ok(tunnels)
     }
 
@@ -423,7 +485,10 @@ impl TunnelManager {
                 && existing.rule.bind_port == rule.bind_port
         });
         if conflict {
-            return Err(format!("Tunnel {}:{} is already configured", rule.bind_host, rule.bind_port));
+            return Err(format!(
+                "Tunnel {}:{} is already configured",
+                rule.bind_host, rule.bind_port
+            ));
         }
         self.tunnels.insert(
             rule.id.clone(),
@@ -489,7 +554,12 @@ impl TunnelManager {
     async fn start_local_or_dynamic(&mut self, rule: &SshTunnelRule) -> Result<(), String> {
         let listener = TcpListener::bind(tunnel_bind_address(&rule.bind_host, rule.bind_port)?)
             .await
-            .map_err(|error| format!("Tunnel listen failed on {}:{}: {error}", rule.bind_host, rule.bind_port))?;
+            .map_err(|error| {
+                format!(
+                    "Tunnel listen failed on {}:{}: {error}",
+                    rule.bind_host, rule.bind_port
+                )
+            })?;
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let handle = Arc::clone(&self.handle);
         let rule = rule.clone();
@@ -541,7 +611,9 @@ impl TunnelManager {
             target_host: rule.target_host.clone().unwrap_or_default(),
             target_port: rule.target_port.unwrap_or_default(),
         };
-        let state = self.app.state::<crate::services::workspace::WorkspaceState>();
+        let state = self
+            .app
+            .state::<crate::services::workspace::WorkspaceState>();
         state
             .remote_forwards
             .write()
@@ -568,7 +640,9 @@ impl TunnelManager {
                 .await
                 .map_err(|error| format!("Remote tunnel stop failed: {error}"))?;
             self.remote_rules.remove(rule_id);
-            let state = self.app.state::<crate::services::workspace::WorkspaceState>();
+            let state = self
+                .app
+                .state::<crate::services::workspace::WorkspaceState>();
             let mut forwards = state.remote_forwards.write().await;
             if let Some(rules) = forwards.get_mut(&self.tab_id) {
                 rules.retain(|rule| !(rule.bind_host == bind_host && rule.bind_port == bind_port));
@@ -624,7 +698,8 @@ fn validate_tunnel_rule(rule: &SshTunnelRule) -> Result<(), String> {
         return Err("Tunnel requires a valid bind address and port".to_string());
     }
     if rule.kind != "dynamic"
-        && (rule.target_host.as_deref().unwrap_or("").trim().is_empty() || rule.target_port.unwrap_or(0) == 0)
+        && (rule.target_host.as_deref().unwrap_or("").trim().is_empty()
+            || rule.target_port.unwrap_or(0) == 0)
     {
         return Err(format!("{} tunnel requires a valid target", rule.kind));
     }
@@ -634,7 +709,7 @@ fn validate_tunnel_rule(rule: &SshTunnelRule) -> Result<(), String> {
 fn tunnel_bind_address(host: &str, port: u16) -> Result<String, String> {
     let host = match host.trim() {
         "*" => "0.0.0.0",
-        value if value.is_empty() => return Err("Tunnel bind host is empty".to_string()),
+        "" => return Err("Tunnel bind host is empty".to_string()),
         value => value,
     };
     Ok(if host.contains(':') && !host.starts_with('[') {
@@ -650,7 +725,9 @@ async fn forward_local_connection<H: Handler>(
     rule: &SshTunnelRule,
 ) -> Result<(), String> {
     let origin = socket.local_addr().ok();
-    let origin_host = origin.map(|address| address.ip().to_string()).unwrap_or_else(|| "127.0.0.1".to_string());
+    let origin_host = origin
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     let origin_port = origin.map(|address| address.port()).unwrap_or(0);
     let mut channel = handle
         .channel_open_direct_tcpip(
@@ -673,32 +750,57 @@ async fn forward_socks5_connection<H: Handler>(
     handle: Arc<Handle<H>>,
 ) -> Result<(), String> {
     let mut greeting = [0_u8; 2];
-    socket.read_exact(&mut greeting).await.map_err(|error| error.to_string())?;
+    socket
+        .read_exact(&mut greeting)
+        .await
+        .map_err(|error| error.to_string())?;
     if greeting[0] != 5 {
         return Err("Only SOCKS5 is supported".to_string());
     }
     let mut methods = vec![0_u8; greeting[1] as usize];
-    socket.read_exact(&mut methods).await.map_err(|error| error.to_string())?;
+    socket
+        .read_exact(&mut methods)
+        .await
+        .map_err(|error| error.to_string())?;
     if !methods.contains(&0) {
-        socket.write_all(&[5, 0xff]).await.map_err(|error| error.to_string())?;
+        socket
+            .write_all(&[5, 0xff])
+            .await
+            .map_err(|error| error.to_string())?;
         return Err("SOCKS5 client does not support no-authentication".to_string());
     }
-    socket.write_all(&[5, 0]).await.map_err(|error| error.to_string())?;
+    socket
+        .write_all(&[5, 0])
+        .await
+        .map_err(|error| error.to_string())?;
 
     let mut request = [0_u8; 4];
-    socket.read_exact(&mut request).await.map_err(|error| error.to_string())?;
+    socket
+        .read_exact(&mut request)
+        .await
+        .map_err(|error| error.to_string())?;
     if request[0] != 5 || request[1] != 1 {
         return Err("Only SOCKS5 CONNECT is supported".to_string());
     }
     let target_host = read_socks5_host(&mut socket, request[3]).await?;
     let mut port = [0_u8; 2];
-    socket.read_exact(&mut port).await.map_err(|error| error.to_string())?;
+    socket
+        .read_exact(&mut port)
+        .await
+        .map_err(|error| error.to_string())?;
     let target_port = u16::from_be_bytes(port);
     let origin = socket.local_addr().ok();
-    let origin_host = origin.map(|address| address.ip().to_string()).unwrap_or_else(|| "127.0.0.1".to_string());
+    let origin_host = origin
+        .map(|address| address.ip().to_string())
+        .unwrap_or_else(|| "127.0.0.1".to_string());
     let origin_port = origin.map(|address| address.port()).unwrap_or(0);
     let mut channel = handle
-        .channel_open_direct_tcpip(target_host, target_port as u32, origin_host, origin_port as u32)
+        .channel_open_direct_tcpip(
+            target_host,
+            target_port as u32,
+            origin_host,
+            origin_port as u32,
+        )
         .await
         .map_err(|error| format!("SSH SOCKS5 forward failed: {error}"))?
         .into_stream();
@@ -716,19 +818,31 @@ async fn read_socks5_host(socket: &mut TcpStream, address_type: u8) -> Result<St
     match address_type {
         1 => {
             let mut address = [0_u8; 4];
-            socket.read_exact(&mut address).await.map_err(|error| error.to_string())?;
+            socket
+                .read_exact(&mut address)
+                .await
+                .map_err(|error| error.to_string())?;
             Ok(std::net::Ipv4Addr::from(address).to_string())
         }
         3 => {
             let mut length = [0_u8; 1];
-            socket.read_exact(&mut length).await.map_err(|error| error.to_string())?;
+            socket
+                .read_exact(&mut length)
+                .await
+                .map_err(|error| error.to_string())?;
             let mut name = vec![0_u8; length[0] as usize];
-            socket.read_exact(&mut name).await.map_err(|error| error.to_string())?;
+            socket
+                .read_exact(&mut name)
+                .await
+                .map_err(|error| error.to_string())?;
             String::from_utf8(name).map_err(|_| "Invalid SOCKS5 hostname".to_string())
         }
         4 => {
             let mut address = [0_u8; 16];
-            socket.read_exact(&mut address).await.map_err(|error| error.to_string())?;
+            socket
+                .read_exact(&mut address)
+                .await
+                .map_err(|error| error.to_string())?;
             Ok(std::net::Ipv6Addr::from(address).to_string())
         }
         _ => Err("Unsupported SOCKS5 address type".to_string()),
@@ -739,15 +853,15 @@ async fn read_socks5_host(socket: &mut TcpStream, address_type: u8) -> Result<St
 // Worker loop
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn update_tab_status_and_emit(app: &AppHandle, tab_id: &str, status: &str) {
+async fn update_tab_status_and_emit(app: &AppHandle, tab_id: &str, status: WorkspaceTabStatus) {
     let state = app.state::<crate::services::workspace::WorkspaceState>();
-    let connected = status == "connected";
+    let connected = status.is_connected();
     let mut summary = "连接已断开".to_string();
     let mut transcript = String::new();
     {
         let mut tabs = state.tabs.write().await;
         if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
-            tab.status = status.to_string();
+            tab.status = status;
         }
     }
     {
@@ -791,6 +905,7 @@ async fn emit_terminal_data(app: &AppHandle, tab_id: &str, chunk: &str) {
 
 /// Mirrors Electron's `followShellCwd`: only a confirmed shell CWD update may
 /// move the file panel, and only while the user has Follow terminal enabled.
+#[allow(clippy::too_many_arguments)] // Protocol/session context is intentionally explicit at this async boundary.
 async fn follow_shell_cwd(
     app: AppHandle,
     tab_id: String,
@@ -825,8 +940,8 @@ async fn follow_shell_cwd(
         // russh-sftp's client is one request stream. Serialise access to it:
         // concurrent read locks let multiple list/delete/upload requests
         // interleave and eventually time out after app focus is restored.
-        let mut sftp = sftp.write().await;
-        list_dir(&mut sftp, &cwd).await
+        let sftp = sftp.write().await;
+        list_dir(&sftp, &cwd).await
     };
 
     let follow_error = files.as_ref().err().cloned();
@@ -851,11 +966,7 @@ async fn follow_shell_cwd(
             format!("CWD follow failed for {cwd}: {error}"),
         );
     } else {
-        crate::services::logging::ssh_debug(
-            &app,
-            &tab_id,
-            format!("CWD follow applied: {cwd}"),
-        );
+        crate::services::logging::ssh_debug(&app, &tab_id, format!("CWD follow applied: {cwd}"));
     }
 
     if let Ok(snapshot) = crate::commands::get_workspace_snapshot(app.clone()).await {
@@ -896,8 +1007,9 @@ fn percent_decode(s: &str) -> String {
 }
 
 fn track_cwd_and_user(chunk: &str, buffer: &mut String) -> (Option<String>, Option<String>) {
-    static CWD_OSC_PATTERN: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"\x1b\]7;file://([^\x07\x1b]*)(?:\x07|\x1b\\)").unwrap());
+    static CWD_OSC_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\x1b\]7;file://([^\x07\x1b]*)(?:\x07|\x1b\\)").unwrap()
+    });
     static USER_OSC_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r"\x1b\]1337;RemoteUser=([^\x07\x1b]*)(?:\x07|\x1b\\)").unwrap()
     });
@@ -923,13 +1035,28 @@ fn track_cwd_and_user(chunk: &str, buffer: &mut String) -> (Option<String>, Opti
     (cwd, user)
 }
 
+/// Map the identity reported by the interactive shell to the file pane access
+/// model. Cached sudo credentials are deliberately not part of this decision:
+/// they make a future root switch reusable, but they do not mean the current
+/// shell is still privileged after `exit` returns to the login user.
+fn resolve_shell_file_access(login_user: &str, shell_user: &str) -> (&'static str, Option<String>) {
+    let login_user = login_user.trim();
+    let shell_user = shell_user.trim();
+    if login_user.is_empty() || shell_user.is_empty() || login_user == shell_user {
+        ("user", None)
+    } else {
+        ("root", Some(shell_user.to_string()))
+    }
+}
+
 /// Remove CSI/OSC control sequences before inspecting a prompt. This mirrors
 /// Electron's root-prompt heuristic without feeding visual escape codes into
 /// the comparison.
 fn visible_shell_text(value: &str) -> String {
     let csi = regex::Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").expect("constant CSI regex");
     let osc = regex::Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)").expect("constant OSC regex");
-    osc.replace_all(&csi.replace_all(value, ""), "").into_owned()
+    osc.replace_all(&csi.replace_all(value, ""), "")
+        .into_owned()
 }
 
 fn looks_like_root_prompt(value: &str) -> bool {
@@ -1094,7 +1221,9 @@ fn suppress_shell_setup_echo(
         return format!("{}{chunk}", finish_shell_setup_suppression(pending));
     }
 
-    let state = pending.as_mut().expect("pending CWD hook suppression exists");
+    let state = pending
+        .as_mut()
+        .expect("pending CWD hook suppression exists");
 
     state.buffer.push_str(chunk);
     const HOOK_MARKER: &str = "__tdcwd";
@@ -1188,7 +1317,11 @@ fn decode_bytes(buf: &[u8], encoding: &str) -> Result<String, String> {
             Ok(s)
         }
         "utf-8-bom" => {
-            let start = if buf.starts_with(&[0xef, 0xbb, 0xbf]) { 3 } else { 0 };
+            let start = if buf.starts_with(&[0xef, 0xbb, 0xbf]) {
+                3
+            } else {
+                0
+            };
             String::from_utf8(buf[start..].to_vec())
                 .map_err(|e| format!("utf-8 decode failed: {}", e))
         }
@@ -1216,7 +1349,7 @@ fn decode_bytes(buf: &[u8], encoding: &str) -> Result<String, String> {
 
 /// Decode UTF-16 bytes (little-endian or big-endian) into a string.
 fn decode_utf16(bytes: &[u8], little_endian: bool) -> Result<String, String> {
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err("utf-16 data length is odd".to_string());
     }
     let units: Vec<u16> = bytes
@@ -1339,7 +1472,11 @@ async fn connect_target_through_jump(
 /// CONNECT proxy must reach the target through that proxy before SSH begins
 /// its handshake; passing the profile directly to `russh::connect` bypasses
 /// proxy configuration entirely.
-async fn connect_ssh_transport(profile: &Value, host: &str, port: u16) -> Result<BoxedSshTransport, String> {
+async fn connect_ssh_transport(
+    profile: &Value,
+    host: &str,
+    port: u16,
+) -> Result<BoxedSshTransport, String> {
     let proxy = profile.get("proxy").and_then(Value::as_object);
     let proxy_type = proxy
         .and_then(|value| value.get("type"))
@@ -1363,7 +1500,8 @@ async fn connect_ssh_transport(profile: &Value, host: &str, port: u16) -> Result
         .and_then(|value| value.get("port"))
         .and_then(Value::as_u64)
         .filter(|value| (1..=u16::MAX as u64).contains(value))
-        .ok_or_else(|| "Proxy port must be between 1 and 65535".to_string())? as u16;
+        .ok_or_else(|| "Proxy port must be between 1 and 65535".to_string())?
+        as u16;
     let username = proxy
         .and_then(|value| value.get("username"))
         .and_then(Value::as_str)
@@ -1451,7 +1589,12 @@ async fn connect_http_proxy(
     Ok(stream)
 }
 
-fn build_http_connect_request(host: &str, port: u16, username: &str, password: &str) -> Result<Vec<u8>, String> {
+fn build_http_connect_request(
+    host: &str,
+    port: u16,
+    username: &str,
+    password: &str,
+) -> Result<Vec<u8>, String> {
     if [host, username, password]
         .iter()
         .any(|value| value.contains(['\r', '\n']))
@@ -1463,9 +1606,12 @@ fn build_http_connect_request(host: &str, port: u16, username: &str, password: &
     } else {
         format!("{host}:{port}")
     };
-    let mut request = format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n");
+    let mut request = format!(
+        "CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\nProxy-Connection: Keep-Alive\r\n"
+    );
     if !username.is_empty() {
-        let credentials = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+        let credentials =
+            base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
         request.push_str(&format!("Proxy-Authorization: Basic {credentials}\r\n"));
     }
     request.push_str("\r\n");
@@ -1513,8 +1659,10 @@ async fn open_session(
         .and_then(|id| id.as_str())
         .unwrap_or("")
         .to_string();
-    let mut config = russh::client::Config::default();
-    config.inactivity_timeout = Some(Duration::from_secs(300));
+    let config = russh::client::Config {
+        inactivity_timeout: Some(Duration::from_secs(300)),
+        ..Default::default()
+    };
     let config = Arc::new(config);
 
     // ── Jump Host support ─────────────────────────────────────────────────
@@ -1535,7 +1683,10 @@ async fn open_session(
 
         // Validate: jump must be a different SSH profile, and must not
         // itself have a jumpProfileId (no chained jumps).
-        let jump_id = jump_profile.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let jump_id = jump_profile
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         if jump_id == profile.get("id").and_then(|v| v.as_str()).unwrap_or("") {
             return Err("Jump Host must reference a different profile".to_string());
         }
@@ -1543,7 +1694,13 @@ async fn open_session(
             return Err("Jump Host cannot itself reference another Jump Host".to_string());
         }
 
-        crate::services::logging::session(app, "INFO", "ssh", tab_id, "connecting through jump host");
+        crate::services::logging::session(
+            app,
+            "INFO",
+            "ssh",
+            tab_id,
+            "connecting through jump host",
+        );
 
         // Connect + authenticate to the jump host.
         // Box::pin is required because `open_session` is recursive (the jump
@@ -1551,7 +1708,13 @@ async fn open_session(
         // Rust requires indirection for recursive async fns to avoid
         // infinitely-sized futures.
         let jump_handle = Box::pin(open_session(&jump_profile, app, tab_id)).await?;
-        crate::services::logging::session(app, "INFO", "ssh", tab_id, "jump host connected; opening target channel");
+        crate::services::logging::session(
+            app,
+            "INFO",
+            "ssh",
+            tab_id,
+            "jump host connected; opening target channel",
+        );
 
         let mut target_handle = connect_target_through_jump(
             &jump_handle,
@@ -1561,7 +1724,16 @@ async fn open_session(
             port,
         )
         .await?;
-        match try_authenticate(&mut target_handle, &username, &auth_type, profile, app, tab_id).await? {
+        match try_authenticate(
+            &mut target_handle,
+            &username,
+            &auth_type,
+            profile,
+            app,
+            tab_id,
+        )
+        .await?
+        {
             AuthenticationResult::Authenticated => return Ok(target_handle),
             AuthenticationResult::NeedsFreshKeyboardInteractive => {
                 // russh cannot switch from a rejected password/public-key
@@ -1578,7 +1750,10 @@ async fn open_session(
                 if try_keyboard_interactive(
                     &mut retry_handle,
                     &username,
-                    profile.get("password").and_then(Value::as_str).unwrap_or(""),
+                    profile
+                        .get("password")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
                     app,
                     tab_id,
                     &profile_id,
@@ -1601,8 +1776,8 @@ async fn open_session(
         stream,
         new_client_handler(app, tab_id, &profile_id, &host, port, trusted.clone()),
     )
-        .await
-        .map_err(|e| format!("SSH connect failed: {}", e))?;
+    .await
+    .map_err(|e| format!("SSH connect failed: {}", e))?;
     match try_authenticate(&mut handle, &username, &auth_type, profile, app, tab_id).await? {
         AuthenticationResult::Authenticated => Ok(handle),
         AuthenticationResult::NeedsFreshKeyboardInteractive => {
@@ -1620,7 +1795,10 @@ async fn open_session(
             if try_keyboard_interactive(
                 &mut retry_handle,
                 &username,
-                profile.get("password").and_then(Value::as_str).unwrap_or(""),
+                profile
+                    .get("password")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
                 app,
                 tab_id,
                 &profile_id,
@@ -1644,6 +1822,110 @@ enum AuthenticationResult {
     /// the transport must reconnect before starting keyboard-interactive.
     NeedsFreshKeyboardInteractive,
     Rejected,
+}
+
+fn default_ssh_key_paths(home_directory: &Path) -> Vec<PathBuf> {
+    DEFAULT_SSH_KEY_FILES
+        .iter()
+        .map(|file_name| home_directory.join(".ssh").join(file_name))
+        .collect()
+}
+
+async fn authenticate_private_key_content(
+    handle: &mut Handle<ClientHandler>,
+    username: &str,
+    key_content: &str,
+    passphrase: Option<&str>,
+) -> Result<bool, String> {
+    let key_pair = russh::keys::decode_secret_key(key_content, passphrase)
+        .map_err(|error| error.to_string())?;
+    // Best-effort: pick the strongest RSA hash the server advertises. For
+    // non-RSA keys, hash_alg is ignored by PrivateKeyWithHashAlg::new.
+    let hash_alg: Option<russh::keys::HashAlg> = if key_pair.algorithm().is_rsa() {
+        match handle.best_supported_rsa_hash().await {
+            Ok(Some(Some(hash))) => Some(hash),
+            _ => Some(russh::keys::HashAlg::Sha512),
+        }
+    } else {
+        None
+    };
+    let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), hash_alg);
+    handle
+        .authenticate_publickey(username, key_with_hash)
+        .await
+        .map(|result| result.success())
+        .map_err(|error| error.to_string())
+}
+
+async fn try_system_authenticate(
+    handle: &mut Handle<ClientHandler>,
+    username: &str,
+    profile: &Value,
+    app: &AppHandle,
+) -> Result<AuthenticationResult, String> {
+    let mut candidate_found = false;
+    let mut authentication_attempted = false;
+    let mut candidate_errors = Vec::new();
+
+    // Agent support is Unix-only in russh, but a missing/broken agent must not
+    // prevent the default-key fallback (including on Windows).
+    #[cfg(unix)]
+    match russh::keys::agent::client::AgentClient::connect_env().await {
+        Ok(mut agent) => {
+            candidate_found = true;
+            match agent.request_identities().await {
+                Ok(identities) => {
+                    for identity in identities {
+                        authentication_attempted = true;
+                        let public_key = identity.public_key().into_owned();
+                        match handle
+                            .authenticate_publickey_with(username, public_key, None, &mut agent)
+                            .await
+                        {
+                            Ok(result) if result.success() => {
+                                return Ok(AuthenticationResult::Authenticated)
+                            }
+                            Ok(_) => {}
+                            Err(error) => candidate_errors.push(error.to_string()),
+                        }
+                    }
+                }
+                Err(error) => candidate_errors.push(error.to_string()),
+            }
+        }
+        Err(error) => candidate_errors.push(error.to_string()),
+    }
+
+    let home_directory = app.path().home_dir().map_err(|error| error.to_string())?;
+    let passphrase = profile.get("passphrase").and_then(Value::as_str);
+    for path in default_ssh_key_paths(&home_directory) {
+        let key_content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                candidate_found = true;
+                candidate_errors.push(error.to_string());
+                continue;
+            }
+        };
+        candidate_found = true;
+        match authenticate_private_key_content(handle, username, &key_content, passphrase).await {
+            Ok(true) => return Ok(AuthenticationResult::Authenticated),
+            Ok(false) => authentication_attempted = true,
+            Err(error) => candidate_errors.push(error),
+        }
+    }
+
+    if !candidate_found {
+        return Err("No SSH agent or default private key found on this computer".to_string());
+    }
+    if !authentication_attempted && !candidate_errors.is_empty() {
+        return Err(format!(
+            "Unable to load SSH agent/default private key: {}",
+            candidate_errors.remove(0)
+        ));
+    }
+    Ok(AuthenticationResult::Rejected)
 }
 
 #[derive(Clone, Debug)]
@@ -1680,7 +1962,13 @@ async fn try_authenticate(
         .to_string();
     match auth_type {
         "password" => {
-            let password = profile.get("password").and_then(|p| p.as_str()).unwrap_or("");
+            let password = profile
+                .get("password")
+                .and_then(|p| p.as_str())
+                .unwrap_or("");
+            if password.is_empty() {
+                return try_system_authenticate(handle, username, profile, app).await;
+            }
             let res = handle
                 .authenticate_password(username, password)
                 .await
@@ -1692,7 +1980,9 @@ async fn try_authenticate(
             })
         }
         "privateKey" => {
-            let (key_content, passphrase) = if let Some(key_id) = profile.get("privateKeyId").and_then(|value| value.as_str()) {
+            let (key_content, passphrase) = if let Some(key_id) =
+                profile.get("privateKeyId").and_then(|value| value.as_str())
+            {
                 resolve_managed_private_key(app, tab_id, &profile_id, key_id).await?
             } else {
                 let private_key_path = profile
@@ -1708,28 +1998,21 @@ async fn try_authenticate(
                 }
                 (
                     std::fs::read_to_string(&resolved).map_err(|error| error.to_string())?,
-                    profile.get("passphrase").and_then(|value| value.as_str()).map(ToOwned::to_owned),
+                    profile
+                        .get("passphrase")
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned),
                 )
             };
 
-            let key_pair = russh::keys::decode_secret_key(&key_content, passphrase.as_deref())
-                .map_err(|e| e.to_string())?;
-            // Best-effort: pick the strongest RSA hash the server advertises.
-            // For non-RSA keys, hash_alg is ignored by PrivateKeyWithHashAlg::new.
-            let hash_alg: Option<russh::keys::HashAlg> = if key_pair.algorithm().is_rsa() {
-                match handle.best_supported_rsa_hash().await {
-                    Ok(Some(Some(h))) => Some(h),
-                    _ => Some(russh::keys::HashAlg::Sha512),
-                }
-            } else {
-                None
-            };
-            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), hash_alg);
-            let res = handle
-                .authenticate_publickey(username, key_with_hash)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(if res.success() {
+            let authenticated = authenticate_private_key_content(
+                handle,
+                username,
+                &key_content,
+                passphrase.as_deref(),
+            )
+            .await?;
+            Ok(if authenticated {
                 AuthenticationResult::Authenticated
             } else if profile.get("password").and_then(Value::as_str).is_some() {
                 AuthenticationResult::NeedsFreshKeyboardInteractive
@@ -1738,55 +2021,30 @@ async fn try_authenticate(
             })
         }
         "keyboard-interactive" => {
-            let password = profile.get("password").and_then(Value::as_str).unwrap_or("");
-            Ok(if try_keyboard_interactive(
-                handle,
-                username,
-                password,
-                app,
-                tab_id,
-                &profile_id,
-                &host,
-                port,
+            let password = profile
+                .get("password")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            Ok(
+                if try_keyboard_interactive(
+                    handle,
+                    username,
+                    password,
+                    app,
+                    tab_id,
+                    &profile_id,
+                    &host,
+                    port,
+                )
+                .await?
+                {
+                    AuthenticationResult::Authenticated
+                } else {
+                    AuthenticationResult::Rejected
+                },
             )
-            .await?
-            {
-                AuthenticationResult::Authenticated
-            } else {
-                AuthenticationResult::Rejected
-            })
         }
-        _ => {
-            // russh's environment-backed agent client uses a Unix socket and
-            // is not available on Windows. Fail explicitly there rather than
-            // compiling a nonexistent `connect_env` implementation.
-            #[cfg(unix)]
-            {
-                let mut agent = russh::keys::agent::client::AgentClient::connect_env()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let identities = agent
-                    .request_identities()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                for identity in identities {
-                    let pub_key = identity.public_key().into_owned();
-                    let res = handle
-                        .authenticate_publickey_with(username, pub_key, None, &mut agent)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if res.success() {
-                        return Ok(AuthenticationResult::Authenticated);
-                    }
-                }
-                Ok(AuthenticationResult::Rejected)
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (handle, username);
-                Err("SSH Agent authentication is not supported on this platform.".to_string())
-            }
-        }
+        _ => try_system_authenticate(handle, username, profile, app).await,
     }
 }
 
@@ -1796,7 +2054,8 @@ async fn resolve_managed_private_key(
     profile_id: &str,
     key_id: &str,
 ) -> Result<(String, Option<String>), String> {
-    let managed = crate::services::ssh_keys::resolve(app, key_id).map_err(|error| error.to_string())?;
+    let managed =
+        crate::services::ssh_keys::resolve(app, key_id).map_err(|error| error.to_string())?;
     if !managed.key.encrypted {
         return Ok((managed.private_key, None));
     }
@@ -1843,7 +2102,11 @@ async fn request_key_passphrase(
     let (tx, rx) = oneshot::channel::<Value>();
     {
         let state = app.state::<crate::services::workspace::WorkspaceState>();
-        state.pending_interactions.write().await.insert(request_id.clone(), tx);
+        state
+            .pending_interactions
+            .write()
+            .await
+            .insert(request_id.clone(), tx);
     }
     app.emit(
         "ssh:interaction",
@@ -1859,21 +2122,32 @@ async fn request_key_passphrase(
     )
     .map_err(|error| error.to_string())?;
     match rx.await {
-        Ok(response) if !response.get("canceled").and_then(|value| value.as_bool()).unwrap_or(false) => {
+        Ok(response)
+            if !response
+                .get("canceled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false) =>
+        {
             let passphrase = response
                 .get("passphrase")
                 .and_then(|value| value.as_str())
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
-            Ok(passphrase.map(|value| (
-                value,
-                response.get("savePassphrase").and_then(|item| item.as_bool()).unwrap_or(false),
-            )))
+            Ok(passphrase.map(|value| {
+                (
+                    value,
+                    response
+                        .get("savePassphrase")
+                        .and_then(|item| item.as_bool())
+                        .unwrap_or(false),
+                )
+            }))
         }
         _ => Ok(None),
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Authentication prompts need the full connection identity for safe UI routing.
 async fn try_keyboard_interactive(
     handle: &mut Handle<ClientHandler>,
     username: &str,
@@ -1923,14 +2197,17 @@ async fn try_keyboard_interactive(
                     if !response
                         .get("canceled")
                         .and_then(|value| value.as_bool())
-                        .unwrap_or(false) => response.get("answers").and_then(|answers| {
+                        .unwrap_or(false) =>
+                {
+                    response.get("answers").and_then(|answers| {
                         answers.as_array().map(|answers| {
                             answers
                                 .iter()
                                 .map(|answer| answer.as_str().unwrap_or("").to_string())
                                 .collect()
                         })
-                    }),
+                    })
+                }
                 _ => None,
             }
         }
@@ -2123,14 +2400,20 @@ async fn open_sftp_session(handle: &Handle<ClientHandler>) -> Result<SftpSession
         .await
         .map_err(|_| "SFTP init failed: 打开 channel 超时".to_string())?
         .map_err(|error| format!("无法打开 SFTP channel: {error}"))?;
-    timeout(SFTP_INIT_STEP_TIMEOUT, sftp_channel.request_subsystem(true, "sftp"))
-        .await
-        .map_err(|_| "SFTP init failed: 请求 subsystem 超时".to_string())?
-        .map_err(|error| format!("SFTP subsystem request failed: {error}"))?;
-    timeout(SFTP_INIT_STEP_TIMEOUT, SftpSession::new(sftp_channel.into_stream()))
-        .await
-        .map_err(|_| "SFTP init failed: 协议握手超时".to_string())?
-        .map_err(|error| format!("SFTP init failed: {error}"))
+    timeout(
+        SFTP_INIT_STEP_TIMEOUT,
+        sftp_channel.request_subsystem(true, "sftp"),
+    )
+    .await
+    .map_err(|_| "SFTP init failed: 请求 subsystem 超时".to_string())?
+    .map_err(|error| format!("SFTP subsystem request failed: {error}"))?;
+    timeout(
+        SFTP_INIT_STEP_TIMEOUT,
+        SftpSession::new(sftp_channel.into_stream()),
+    )
+    .await
+    .map_err(|_| "SFTP init failed: 协议握手超时".to_string())?
+    .map_err(|error| format!("SFTP init failed: {error}"))
 }
 
 type SharedSftpSession = Arc<RwLock<SftpSession>>;
@@ -2140,7 +2423,10 @@ fn is_sftp_not_found(error: &SftpError) -> bool {
     matches!(
         error,
         SftpError::Status(status) if status.status_code == StatusCode::NoSuchFile
-    ) || error.to_string().to_ascii_lowercase().contains("no such file")
+    ) || error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("no such file")
 }
 
 async fn acquire_transfer_sftp(
@@ -2256,7 +2542,10 @@ async fn run_worker_loop(
             24,
             0,
             0,
-            &[(russh::Pty::TTY_OP_ISPEED, 115200), (russh::Pty::TTY_OP_OSPEED, 115200)],
+            &[
+                (russh::Pty::TTY_OP_ISPEED, 115200),
+                (russh::Pty::TTY_OP_OSPEED, 115200),
+            ],
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -2284,12 +2573,27 @@ async fn run_worker_loop(
     let mut shell_setup_waiting_for_prompt = shell_cwd_setup_for_platform(&platform).is_some();
     let mut shell_prompt_buffer = String::new();
     if let Some(setup) = shell_cwd_setup_for_platform(&platform) {
-        crate::services::logging::session(app, "DEBUG", "ssh", tab_id, format!("shell setup waiting for prompt platform={platform} bytes={}", setup.len()));
+        crate::services::logging::session(
+            app,
+            "DEBUG",
+            "ssh",
+            tab_id,
+            format!(
+                "shell setup waiting for prompt platform={platform} bytes={}",
+                setup.len()
+            ),
+        );
     } else {
-        crate::services::logging::session(app, "DEBUG", "ssh", tab_id, format!("shell setup skipped platform={platform}"));
+        crate::services::logging::session(
+            app,
+            "DEBUG",
+            "ssh",
+            tab_id,
+            format!("shell setup skipped platform={platform}"),
+        );
     }
 
-    update_tab_status_and_emit(app, tab_id, "connected").await;
+    update_tab_status_and_emit(app, tab_id, WorkspaceTabStatus::Connected).await;
 
     // Emit "connected" notice so the user sees confirmation in the terminal.
     // Mirrors Electron's `appendSystemMessage('连接主机成功\r\n')`.
@@ -2306,6 +2610,15 @@ async fn run_worker_loop(
         let existing_reconnect_mode = sessions
             .get(tab_id)
             .and_then(|session| session.reconnect_mode.clone());
+        let existing_remote_path = sessions
+            .get(tab_id)
+            .map(|session| session.remote_path.clone())
+            .unwrap_or_else(|| {
+                crate::services::workspace::initial_remote_path_for_profile(profile)
+            });
+        let existing_shell_cwd = sessions
+            .get(tab_id)
+            .and_then(|session| session.shell_cwd.clone());
         sessions.insert(
             tab_id.to_string(),
             crate::services::SessionSnapshot {
@@ -2317,8 +2630,8 @@ async fn run_worker_loop(
                 access_host: format!("{}:{}", host, port),
                 summary: format!("{}@{}", username, host),
                 terminal_transcript: existing_transcript,
-                remote_path: "/".to_string(),
-                shell_cwd: Some("/".to_string()),
+                remote_path: existing_remote_path,
+                shell_cwd: existing_shell_cwd,
                 follow_shell_cwd: true,
                 remote_files_loading: false,
                 remote_files: Vec::new(),
@@ -2336,9 +2649,8 @@ async fn run_worker_loop(
                 capabilities: crate::services::workspace::ConnectionCapabilities::for_session_type(
                     "ssh",
                 ),
-                reconnect_mode: existing_reconnect_mode.or_else(|| {
-                    crate::services::workspace::reconnect_mode_for_profile(profile)
-                }),
+                reconnect_mode: existing_reconnect_mode
+                    .or_else(|| crate::services::workspace::reconnect_mode_for_profile(profile)),
             },
         );
     }
@@ -2351,9 +2663,18 @@ async fn run_worker_loop(
     let (sftp_arc, sftp_unavailable_reason) = match open_sftp_session(&handle).await {
         Ok(sftp) => {
             let sftp_arc = Arc::new(RwLock::new(sftp));
+            let initial_remote_path = {
+                let sessions = state.sessions.read().await;
+                sessions
+                    .get(tab_id)
+                    .map(|session| session.remote_path.clone())
+                    .unwrap_or_else(|| {
+                        crate::services::workspace::initial_remote_path_for_profile(profile)
+                    })
+            };
             let initial_files = {
                 let sftp = sftp_arc.write().await;
-                list_dir(&sftp, "/").await
+                list_dir(&sftp, &initial_remote_path).await
             };
             match initial_files {
                 Ok(files) => {
@@ -2363,11 +2684,12 @@ async fn run_worker_loop(
                     }
                 }
                 Err(error) => {
-                    // A usable SFTP channel can still lack access to `/`.
+                    // A usable SFTP channel can still lack access to the
+                    // profile's configured starting directory.
                     emit_terminal_data(
                         app,
                         tab_id,
-                        &format!("\r\n[files] 列出根目录失败: {error}\r\n"),
+                        &format!("\r\n[files] 列出目录 {initial_remote_path} 失败: {error}\r\n"),
                     )
                     .await;
                 }
@@ -2376,7 +2698,13 @@ async fn run_worker_loop(
         }
         Err(error) => {
             let reason = format_sftp_unavailable_reason(&error);
-            crate::services::logging::session(app, "WARN", "sftp", tab_id, format!("unavailable: {reason}"));
+            crate::services::logging::session(
+                app,
+                "WARN",
+                "sftp",
+                tab_id,
+                format!("unavailable: {reason}"),
+            );
             {
                 let mut sessions = state.sessions.write().await;
                 if let Some(session) = sessions.get_mut(tab_id) {
@@ -2392,6 +2720,24 @@ async fn run_worker_loop(
     // Push the full snapshot (with files) to the renderer
     if let Ok(snapshot) = crate::commands::get_workspace_snapshot(app.clone()).await {
         let _ = app.emit("workspace:snapshot", snapshot);
+    }
+    if sftp_arc.is_some() {
+        let cleanup_app = app.clone();
+        let cleanup_tab_id = tab_id.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = crate::services::transfers::retry_pending_cleanup_for_tab(
+                &cleanup_app,
+                &cleanup_tab_id,
+            )
+            .await
+            {
+                crate::services::logging::warn(
+                    &cleanup_app,
+                    &format!("transfer:{cleanup_tab_id}"),
+                    format!("pending cleanup retry failed: {error}"),
+                );
+            }
+        });
     }
 
     // ── Spawn metrics collection task (single persistent channel) ─────────
@@ -2422,17 +2768,18 @@ async fn run_worker_loop(
             // unique marker so the stream parser can reliably slice blocks.
             let marker = "__FILETERM_METRICS_BLOCK__";
             let (windows_command, script_body) = if metrics_plat == "windows" {
-                let command = match super::system_metrics::build_windows_streaming_metrics_exec_command() {
-                    Ok(command) => command,
-                    Err(error) => {
-                        crate::services::logging::ssh_debug(
-                            &metrics_app,
-                            &metrics_tid,
-                            format!("Windows streaming metrics command build failed: {error}"),
-                        );
-                        return;
-                    }
-                };
+                let command =
+                    match super::system_metrics::build_windows_streaming_metrics_exec_command() {
+                        Ok(command) => command,
+                        Err(error) => {
+                            crate::services::logging::ssh_debug(
+                                &metrics_app,
+                                &metrics_tid,
+                                format!("Windows streaming metrics command build failed: {error}"),
+                            );
+                            return;
+                        }
+                    };
                 (Some(command), None)
             } else {
                 // POSIX: wrap the metrics script in a while-true loop
@@ -2453,7 +2800,13 @@ async fn run_worker_loop(
             let mut channel = match metrics_handle.channel_open_session().await {
                 Ok(c) => c,
                 Err(e) => {
-                    crate::services::logging::session(&metrics_app, "ERROR", "metrics", &metrics_tid, format!("open channel failed: {e}"));
+                    crate::services::logging::session(
+                        &metrics_app,
+                        "ERROR",
+                        "metrics",
+                        &metrics_tid,
+                        format!("open channel failed: {e}"),
+                    );
                     return;
                 }
             };
@@ -2468,18 +2821,36 @@ async fn run_worker_loop(
                 channel.request_shell(true).await
             };
             if let Err(e) = collector_start {
-                crate::services::logging::session(&metrics_app, "ERROR", "metrics", &metrics_tid, format!("start collector failed: {e}"));
+                crate::services::logging::session(
+                    &metrics_app,
+                    "ERROR",
+                    "metrics",
+                    &metrics_tid,
+                    format!("start collector failed: {e}"),
+                );
                 return;
             }
 
             if let Some(script) = script_body.as_deref() {
                 if let Err(e) = channel.data(script.as_bytes()).await {
-                    crate::services::logging::session(&metrics_app, "ERROR", "metrics", &metrics_tid, format!("write collector script failed: {e}"));
+                    crate::services::logging::session(
+                        &metrics_app,
+                        "ERROR",
+                        "metrics",
+                        &metrics_tid,
+                        format!("write collector script failed: {e}"),
+                    );
                     return;
                 }
             }
 
-            crate::services::logging::session(&metrics_app, "INFO", "metrics", &metrics_tid, "collector started; waiting for first sample");
+            crate::services::logging::session(
+                &metrics_app,
+                "INFO",
+                "metrics",
+                &metrics_tid,
+                "collector started; waiting for first sample",
+            );
 
             // Stream reader: accumulate data, split on the marker, parse
             // each complete block and emit it to the renderer.
@@ -2573,14 +2944,26 @@ async fn run_worker_loop(
             }
 
             let _ = channel.close().await;
-            crate::services::logging::session(&metrics_app, "INFO", "metrics", &metrics_tid, "collector stopped");
+            crate::services::logging::session(
+                &metrics_app,
+                "INFO",
+                "metrics",
+                &metrics_tid,
+                "collector stopped",
+            );
         });
     } else {
         let mut sessions = state.sessions.write().await;
         if let Some(session) = sessions.get_mut(tab_id) {
             session.system_metrics = None;
         }
-        crate::services::logging::session(app, "INFO", "metrics", tab_id, "collection disabled by profile");
+        crate::services::logging::session(
+            app,
+            "INFO",
+            "metrics",
+            tab_id,
+            "collection disabled by profile",
+        );
     }
 
     // ── Main event loop: terminal reads + command dispatch ─────────────────
@@ -2609,14 +2992,27 @@ async fn run_worker_loop(
                 Ok(rule) => {
                     let should_start = rule.auto_start;
                     if let Err(error) = tunnel_manager.register(rule.clone(), false) {
-                        emit_terminal_data(app, tab_id, &format!("[tunnel] 忽略无效规则: {error}\r\n")).await;
+                        emit_terminal_data(
+                            app,
+                            tab_id,
+                            &format!("[tunnel] 忽略无效规则: {error}\r\n"),
+                        )
+                        .await;
                     } else if should_start {
                         if let Err(error) = tunnel_manager.start(&rule.id).await {
-                            emit_terminal_data(app, tab_id, &format!("[tunnel] 自动启动 {} 失败: {error}\r\n", rule.id)).await;
+                            emit_terminal_data(
+                                app,
+                                tab_id,
+                                &format!("[tunnel] 自动启动 {} 失败: {error}\r\n", rule.id),
+                            )
+                            .await;
                         }
                     }
                 }
-                Err(error) => emit_terminal_data(app, tab_id, &format!("[tunnel] 解析规则失败: {error}\r\n")).await,
+                Err(error) => {
+                    emit_terminal_data(app, tab_id, &format!("[tunnel] 解析规则失败: {error}\r\n"))
+                        .await
+                }
             }
         }
     }
@@ -2800,24 +3196,32 @@ async fn run_worker_loop(
                                         // shell user == login user ⇒ 切回 user 视角
                                         let login = s.login_user.clone();
                                         if let Some(login_user) = login {
-                                            if user.as_str() != login_user.as_str() {
-                                                // sudo -i / su 切到其他用户：自动启用 root 视角
-                                                if s.file_access_mode != "root" {
-                                                    s.file_access_mode = "root".to_string();
-                                                    // sudo_user 用观察到的 shell user（如 "root"）
-                                                    s.sudo_user = Some(user.clone());
-                                                    s.has_reusable_sudo_auth = sudo_password.is_some();
-                                                    file_mode_switch = Some(("root".to_string(), Some(user.clone())));
-                                                    // `sudo -i` normally keeps the same CWD. Refresh
-                                                    // anyway so the file pane switches its access model
-                                                    // instead of waiting for a subsequent `cd`.
-                                                    cwd_to_follow = s.shell_cwd.clone();
+                                            let (target_mode, observed_sudo_user) =
+                                                resolve_shell_file_access(&login_user, user);
+                                            if s.file_access_mode != target_mode {
+                                                s.file_access_mode = target_mode.to_string();
+                                                if let Some(observed_sudo_user) = observed_sudo_user {
+                                                    // sudo -i / su 切到其他用户：用实际 shell
+                                                    // 身份作为 root 文件视角的目标用户。
+                                                    s.sudo_user = Some(observed_sudo_user.clone());
+                                                    s.has_reusable_sudo_auth =
+                                                        sudo_password.is_some();
+                                                    file_mode_switch = Some((
+                                                        target_mode.to_string(),
+                                                        Some(observed_sudo_user),
+                                                    ));
+                                                } else {
+                                                    // `exit` 回到登录用户时必须立即恢复 user
+                                                    // 视角。保留 sudo_user / 密码缓存只用于下次
+                                                    // 手动切 root，不得让工具栏继续显示 root。
+                                                    file_mode_switch = Some((
+                                                        target_mode.to_string(),
+                                                        s.sudo_user.clone(),
+                                                    ));
                                                 }
-                                            } else if s.file_access_mode == "root" && !s.has_reusable_sudo_auth {
-                                                // 切回登录用户：若没有用户显式配置的 sudo 凭据，
-                                                // 自动切回 user 视角
-                                                s.file_access_mode = "user".to_string();
-                                                file_mode_switch = Some(("user".to_string(), None));
+                                                // 身份变化即使没有伴随 CWD 变化也要刷新当前
+                                                // 目录，确保列表内容和访问模型同步切换。
+                                                cwd_to_follow = s.shell_cwd.clone();
                                             }
                                         }
                                     }
@@ -2941,6 +3345,7 @@ async fn run_worker_loop(
 /// terminal and tunnel commands operational. Every file operation is replied
 /// to immediately with the cached handshake failure instead of falling back
 /// to shell commands or leaving the caller waiting on a nonexistent channel.
+#[allow(clippy::too_many_arguments)] // Worker state is borrowed separately to avoid a second mutable aggregate.
 async fn handle_worker_cmd_without_sftp(
     cmd: WorkerCmd,
     handle: &Handle<ClientHandler>,
@@ -2980,15 +3385,24 @@ async fn handle_worker_cmd_without_sftp(
             let _ = respond_to.send(result);
             Ok(false)
         }
-        WorkerCmd::StartSshTunnel { rule_id, respond_to } => {
+        WorkerCmd::StartSshTunnel {
+            rule_id,
+            respond_to,
+        } => {
             let _ = respond_to.send(tunnel_manager.start(&rule_id).await);
             Ok(false)
         }
-        WorkerCmd::StopSshTunnel { rule_id, respond_to } => {
+        WorkerCmd::StopSshTunnel {
+            rule_id,
+            respond_to,
+        } => {
             let _ = respond_to.send(tunnel_manager.stop(&rule_id).await);
             Ok(false)
         }
-        WorkerCmd::DeleteSshTunnel { rule_id, respond_to } => {
+        WorkerCmd::DeleteSshTunnel {
+            rule_id,
+            respond_to,
+        } => {
             let _ = respond_to.send(tunnel_manager.delete(&rule_id).await);
             Ok(false)
         }
@@ -3034,17 +3448,18 @@ async fn handle_worker_cmd_without_sftp(
             let prev_sudo_password = sudo_password.clone();
             let prev_mode = file_access_mode.clone();
 
-            *sudo_user = new_sudo_user.clone();
+            if let Some(next_user) = new_sudo_user.filter(|user| !user.trim().is_empty()) {
+                *sudo_user = Some(next_user);
+            }
             if let Some(pwd) = new_sudo_password {
                 if !pwd.is_empty() {
                     *sudo_password = Some(pwd);
                 }
-            } else {
-                *sudo_password = None;
             }
 
             if mode == "root" {
-                let verify = exec_shell_file_command(handle, "true", sudo_user, sudo_password).await;
+                let verify =
+                    exec_shell_file_command(handle, "true", sudo_user, sudo_password).await;
                 if let Err(err) = verify {
                     *file_access_mode = prev_mode;
                     *sudo_user = prev_sudo_user;
@@ -3066,9 +3481,7 @@ async fn handle_worker_cmd_without_sftp(
             let _ = respond_to.send(Ok(()));
             Ok(false)
         }
-        WorkerCmd::Disconnect => {
-            Ok(true)
-        }
+        WorkerCmd::Disconnect => Ok(true),
     }
 }
 
@@ -3122,15 +3535,24 @@ async fn handle_worker_cmd(
             let _ = respond_to.send(result);
             Ok(false)
         }
-        WorkerCmd::StartSshTunnel { rule_id, respond_to } => {
+        WorkerCmd::StartSshTunnel {
+            rule_id,
+            respond_to,
+        } => {
             let _ = respond_to.send(tunnel_manager.start(&rule_id).await);
             Ok(false)
         }
-        WorkerCmd::StopSshTunnel { rule_id, respond_to } => {
+        WorkerCmd::StopSshTunnel {
+            rule_id,
+            respond_to,
+        } => {
             let _ = respond_to.send(tunnel_manager.stop(&rule_id).await);
             Ok(false)
         }
-        WorkerCmd::DeleteSshTunnel { rule_id, respond_to } => {
+        WorkerCmd::DeleteSshTunnel {
+            rule_id,
+            respond_to,
+        } => {
             let _ = respond_to.send(tunnel_manager.delete(&rule_id).await);
             Ok(false)
         }
@@ -3176,14 +3598,8 @@ async fn handle_worker_cmd(
             let app = app.clone();
             let tab_id = tab_id.to_string();
             tokio::spawn(async move {
-                let transfer_sftp = acquire_transfer_sftp(
-                    &handle,
-                    &sftp,
-                    &transfer_sftp_slot,
-                    &app,
-                    &tab_id,
-                )
-                .await;
+                let transfer_sftp =
+                    acquire_transfer_sftp(&handle, &sftp, &transfer_sftp_slot, &app, &tab_id).await;
                 let sftp_guard = transfer_sftp.write().await;
                 let result = upload_local_file(
                     &sftp_guard,
@@ -3193,7 +3609,8 @@ async fn handle_worker_cmd(
                     &transfer_id,
                     cancel,
                     &app,
-                ).await;
+                )
+                .await;
                 drop(sftp_guard);
                 if result.is_err() {
                     invalidate_transfer_sftp(&transfer_sftp, &sftp, &transfer_sftp_slot).await;
@@ -3231,16 +3648,12 @@ async fn handle_worker_cmd(
                         &app,
                         &su,
                         &sp,
-                    ).await
-                } else {
-                    let transfer_sftp = acquire_transfer_sftp(
-                        &handle,
-                        &sftp,
-                        &transfer_sftp_slot,
-                        &app,
-                        &tab_id,
                     )
-                    .await;
+                    .await
+                } else {
+                    let transfer_sftp =
+                        acquire_transfer_sftp(&handle, &sftp, &transfer_sftp_slot, &app, &tab_id)
+                            .await;
                     let sftp_guard = transfer_sftp.write().await;
                     let result = download_remote_file(
                         &sftp_guard,
@@ -3250,7 +3663,8 @@ async fn handle_worker_cmd(
                         &transfer_id,
                         cancel,
                         &app,
-                    ).await;
+                    )
+                    .await;
                     drop(sftp_guard);
                     if result.is_err() {
                         invalidate_transfer_sftp(&transfer_sftp, &sftp, &transfer_sftp_slot).await;
@@ -3278,16 +3692,12 @@ async fn handle_worker_cmd(
             let sp = sudo_password.clone();
             tokio::spawn(async move {
                 let result = if fam == "root" {
-                    replace_root_remote_file(&handle, &partial_path, &destination_path, &su, &sp).await
+                    replace_root_remote_file(&handle, &partial_path, &destination_path, &su, &sp)
+                        .await
                 } else {
-                    let transfer_sftp = acquire_transfer_sftp(
-                        &handle,
-                        &sftp,
-                        &transfer_sftp_slot,
-                        &app,
-                        &tab_id,
-                    )
-                    .await;
+                    let transfer_sftp =
+                        acquire_transfer_sftp(&handle, &sftp, &transfer_sftp_slot, &app, &tab_id)
+                            .await;
                     let sftp_guard = transfer_sftp.write().await;
                     let result =
                         replace_remote_file(&sftp_guard, &partial_path, &destination_path).await;
@@ -3312,14 +3722,7 @@ async fn handle_worker_cmd(
             let sp = sudo_password.clone();
             tokio::spawn(async move {
                 let result = if fam == "root" {
-                    commit_root_staging_file(
-                        &handle,
-                        &staging_path,
-                        &partial_path,
-                        &su,
-                        &sp,
-                    )
-                    .await
+                    commit_root_staging_file(&handle, &staging_path, &partial_path, &su, &sp).await
                 } else {
                     Err("root staging 只能在 SSH root 文件模式下提交".to_string())
                 };
@@ -3337,12 +3740,17 @@ async fn handle_worker_cmd(
             let sp = sudo_password.clone();
             tokio::spawn(async move {
                 let result = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_shell_file_command(
-                        &handle,
-                        &format!("rm -f -- {}", shell_quote(&path)),
-                        &su,
-                        &sp,
-                    )).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_shell_file_command(
+                            &handle,
+                            &format!("rm -f -- {}", shell_quote(&path)),
+                            &su,
+                            &sp,
+                        ),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()),
                         Err(_) => Err(format!("删除{}超时", path)),
                     }
@@ -3354,7 +3762,9 @@ async fn handle_worker_cmd(
                             Err(error) if is_sftp_not_found(&error) => Ok(()),
                             Err(error) => Err(error.to_string()),
                         }
-                    }).await {
+                    })
+                    .await
+                    {
                         Ok(inner) => inner,
                         Err(_) => Err(format!("删除{}超时", path)),
                     }
@@ -3372,7 +3782,12 @@ async fn handle_worker_cmd(
             let sp = sudo_password.clone();
             tokio::spawn(async move {
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_list_dir_via_shell(&handle, &path, &su, &sp)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_list_dir_via_shell(&handle, &path, &su, &sp),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner,
                         Err(_) => Err(format!("打开远程文件夹{}超时", path)),
                     }
@@ -3387,7 +3802,11 @@ async fn handle_worker_cmd(
             });
             Ok(false)
         }
-        WorkerCmd::ReadRemoteFile { path, encoding, respond_to } => {
+        WorkerCmd::ReadRemoteFile {
+            path,
+            encoding,
+            respond_to,
+        } => {
             let handle = Arc::clone(handle);
             let sftp = Arc::clone(sftp);
             let fam = file_access_mode.clone();
@@ -3395,13 +3814,23 @@ async fn handle_worker_cmd(
             let sp = sudo_password.clone();
             tokio::spawn(async move {
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_read_file_via_shell(&handle, &path, &encoding, &su, &sp)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_read_file_via_shell(&handle, &path, &encoding, &su, &sp),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner,
                         Err(_) => Err(format!("读取文件{}超时", path)),
                     }
                 } else {
                     let sftp_guard = sftp.write().await;
-                    match timeout(FILE_OPERATION_TIMEOUT, read_file(&sftp_guard, &path, &encoding)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        read_file(&sftp_guard, &path, &encoding),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner,
                         Err(_) => Err(format!("读取文件{}超时", path)),
                     }
@@ -3410,7 +3839,12 @@ async fn handle_worker_cmd(
             });
             Ok(false)
         }
-        WorkerCmd::WriteRemoteFile { path, content, encoding, respond_to } => {
+        WorkerCmd::WriteRemoteFile {
+            path,
+            content,
+            encoding,
+            respond_to,
+        } => {
             let handle = Arc::clone(handle);
             let sftp = Arc::clone(sftp);
             let fam = file_access_mode.clone();
@@ -3418,13 +3852,23 @@ async fn handle_worker_cmd(
             let sp = sudo_password.clone();
             tokio::spawn(async move {
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_write_file_via_shell(&handle, &path, &content, &encoding, &su, &sp)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_write_file_via_shell(&handle, &path, &content, &encoding, &su, &sp),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner,
                         Err(_) => Err(format!("写入文件{}超时", path)),
                     }
                 } else {
                     let sftp_guard = sftp.write().await;
-                    match timeout(FILE_OPERATION_TIMEOUT, write_file(&sftp_guard, &path, &content, &encoding)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        write_file(&sftp_guard, &path, &content, &encoding),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner,
                         Err(_) => Err(format!("写入文件{}超时", path)),
                     }
@@ -3433,7 +3877,11 @@ async fn handle_worker_cmd(
             });
             Ok(false)
         }
-        WorkerCmd::CreateRemoteDirectory { parent_path, name, respond_to } => {
+        WorkerCmd::CreateRemoteDirectory {
+            parent_path,
+            name,
+            respond_to,
+        } => {
             let handle = Arc::clone(handle);
             let sftp = Arc::clone(sftp);
             let fam = file_access_mode.clone();
@@ -3442,18 +3890,24 @@ async fn handle_worker_cmd(
             tokio::spawn(async move {
                 let full_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_shell_file_command(
-                        &handle,
-                        &format!("mkdir -p {}", shell_quote(&full_path)),
-                        &su,
-                        &sp,
-                    )).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_shell_file_command(
+                            &handle,
+                            &format!("mkdir -p {}", shell_quote(&full_path)),
+                            &su,
+                            &sp,
+                        ),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()).map_err(|e| e.to_string()),
                         Err(_) => Err(format!("创建目录{}超时", full_path)),
                     }
                 } else {
                     let sftp_guard = sftp.write().await;
-                    match timeout(FILE_OPERATION_TIMEOUT, create_dir(&sftp_guard, &full_path)).await {
+                    match timeout(FILE_OPERATION_TIMEOUT, create_dir(&sftp_guard, &full_path)).await
+                    {
                         Ok(inner) => inner,
                         Err(_) => Err(format!("创建目录{}超时", full_path)),
                     }
@@ -3462,7 +3916,11 @@ async fn handle_worker_cmd(
             });
             Ok(false)
         }
-        WorkerCmd::CreateRemoteFile { parent_path, name, respond_to } => {
+        WorkerCmd::CreateRemoteFile {
+            parent_path,
+            name,
+            respond_to,
+        } => {
             let handle = Arc::clone(handle);
             let sftp = Arc::clone(sftp);
             let fam = file_access_mode.clone();
@@ -3471,13 +3929,23 @@ async fn handle_worker_cmd(
             tokio::spawn(async move {
                 let full_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_write_file_via_shell(&handle, &full_path, "", "utf-8", &su, &sp)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_write_file_via_shell(&handle, &full_path, "", "utf-8", &su, &sp),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner,
                         Err(_) => Err(format!("创建文件{}超时", full_path)),
                     }
                 } else {
                     let sftp_guard = sftp.write().await;
-                    match timeout(FILE_OPERATION_TIMEOUT, write_file(&sftp_guard, &full_path, "", "utf-8")).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        write_file(&sftp_guard, &full_path, "", "utf-8"),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner,
                         Err(_) => Err(format!("创建文件{}超时", full_path)),
                     }
@@ -3486,7 +3954,12 @@ async fn handle_worker_cmd(
             });
             Ok(false)
         }
-        WorkerCmd::CopyRemotePath { target_path, destination_path, target_type, respond_to } => {
+        WorkerCmd::CopyRemotePath {
+            target_path,
+            destination_path,
+            target_type,
+            respond_to,
+        } => {
             let handle = Arc::clone(handle);
             let fam = file_access_mode.clone();
             let su = sudo_user.clone();
@@ -3496,7 +3969,11 @@ async fn handle_worker_cmd(
                     .parent()
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "/".to_string());
-                let cp_cmd = if target_type == "folder" { "cp -R" } else { "cp" };
+                let cp_cmd = if target_type == "folder" {
+                    "cp -R"
+                } else {
+                    "cp"
+                };
                 let cmd_str = format!(
                     "mkdir -p {} && {} {} {}",
                     shell_quote(&dest_dir),
@@ -3505,12 +3982,22 @@ async fn handle_worker_cmd(
                     shell_quote(&destination_path)
                 );
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_shell_file_command(&handle, &cmd_str, &su, &sp)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_shell_file_command(&handle, &cmd_str, &su, &sp),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()).map_err(|e| e.to_string()),
                         Err(_) => Err("复制超时".to_string()),
                     }
                 } else {
-                    match timeout(FILE_OPERATION_TIMEOUT, super::system_metrics::exec_command(&handle, &cmd_str)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        super::system_metrics::exec_command(&handle, &cmd_str),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()).map_err(|e| e.to_string()),
                         Err(_) => Err("复制超时".to_string()),
                     }
@@ -3519,7 +4006,11 @@ async fn handle_worker_cmd(
             });
             Ok(false)
         }
-        WorkerCmd::MoveRemotePath { target_path, destination_path, respond_to } => {
+        WorkerCmd::MoveRemotePath {
+            target_path,
+            destination_path,
+            respond_to,
+        } => {
             let handle = Arc::clone(handle);
             let sftp = Arc::clone(sftp);
             let fam = file_access_mode.clone();
@@ -3527,18 +4018,32 @@ async fn handle_worker_cmd(
             let sp = sudo_password.clone();
             tokio::spawn(async move {
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_shell_file_command(
-                        &handle,
-                        &format!("mv {} {}", shell_quote(&target_path), shell_quote(&destination_path)),
-                        &su,
-                        &sp,
-                    )).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_shell_file_command(
+                            &handle,
+                            &format!(
+                                "mv {} {}",
+                                shell_quote(&target_path),
+                                shell_quote(&destination_path)
+                            ),
+                            &su,
+                            &sp,
+                        ),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()).map_err(|e| e.to_string()),
                         Err(_) => Err("移动超时".to_string()),
                     }
                 } else {
                     let sftp_guard = sftp.write().await;
-                    match timeout(FILE_OPERATION_TIMEOUT, sftp_guard.rename(&target_path, &destination_path)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        sftp_guard.rename(&target_path, &destination_path),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map_err(|e| e.to_string()),
                         Err(_) => Err("移动超时".to_string()),
                     }
@@ -3547,7 +4052,11 @@ async fn handle_worker_cmd(
             });
             Ok(false)
         }
-        WorkerCmd::RenameRemotePath { target_path, new_name, respond_to } => {
+        WorkerCmd::RenameRemotePath {
+            target_path,
+            new_name,
+            respond_to,
+        } => {
             let handle = Arc::clone(handle);
             let sftp = Arc::clone(sftp);
             let fam = file_access_mode.clone();
@@ -3560,18 +4069,28 @@ async fn handle_worker_cmd(
                     .unwrap_or_else(|| "/".to_string());
                 let dest = format!("{}/{}", parent.trim_end_matches('/'), new_name);
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_shell_file_command(
-                        &handle,
-                        &format!("mv {} {}", shell_quote(&target_path), shell_quote(&dest)),
-                        &su,
-                        &sp,
-                    )).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_shell_file_command(
+                            &handle,
+                            &format!("mv {} {}", shell_quote(&target_path), shell_quote(&dest)),
+                            &su,
+                            &sp,
+                        ),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()).map_err(|e| e.to_string()),
                         Err(_) => Err("重命名超时".to_string()),
                     }
                 } else {
                     let sftp_guard = sftp.write().await;
-                    match timeout(FILE_OPERATION_TIMEOUT, sftp_guard.rename(&target_path, &dest)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        sftp_guard.rename(&target_path, &dest),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map_err(|e| e.to_string()),
                         Err(_) => Err("重命名超时".to_string()),
                     }
@@ -3580,7 +4099,11 @@ async fn handle_worker_cmd(
             });
             Ok(false)
         }
-        WorkerCmd::DeleteRemotePath { target_path, target_type, respond_to } => {
+        WorkerCmd::DeleteRemotePath {
+            target_path,
+            target_type,
+            respond_to,
+        } => {
             let handle = Arc::clone(handle);
             let fam = file_access_mode.clone();
             let su = sudo_user.clone();
@@ -3592,12 +4115,22 @@ async fn handle_worker_cmd(
                     format!("rm -f {}", shell_quote(&target_path))
                 };
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_shell_file_command(&handle, &cmd_str, &su, &sp)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_shell_file_command(&handle, &cmd_str, &su, &sp),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()).map_err(|e| e.to_string()),
                         Err(_) => Err("删除超时".to_string()),
                     }
                 } else {
-                    match timeout(FILE_OPERATION_TIMEOUT, super::system_metrics::exec_command(&handle, &cmd_str)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        super::system_metrics::exec_command(&handle, &cmd_str),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()).map_err(|e| e.to_string()),
                         Err(_) => Err("删除超时".to_string()),
                     }
@@ -3606,7 +4139,13 @@ async fn handle_worker_cmd(
             });
             Ok(false)
         }
-        WorkerCmd::ChangeRemotePermissions { target_path, permissions, recursive, apply_to, respond_to } => {
+        WorkerCmd::ChangeRemotePermissions {
+            target_path,
+            permissions,
+            recursive,
+            apply_to,
+            respond_to,
+        } => {
             // Mirrors Electron's `changeRemotePermissions`:
             // - `apply_to='all'` → `chmod -R` for recursive, plain `chmod` otherwise
             // - `apply_to='files'` → `chmod <mode> <path>` + `find <path> -type f -exec chmod <mode> {} +`
@@ -3623,25 +4162,41 @@ async fn handle_worker_cmd(
                     match apply_to.as_str() {
                         "files" => format!(
                             "chmod {} {} && find {} -type f -exec chmod {} {} +",
-                            mode_str, shell_quote(&target_path),
-                            shell_quote(&target_path), mode_str, "{}"
+                            mode_str,
+                            shell_quote(&target_path),
+                            shell_quote(&target_path),
+                            mode_str,
+                            "{}"
                         ),
                         "directories" => format!(
                             "chmod {} {} && find {} -type d -exec chmod {} {} +",
-                            mode_str, shell_quote(&target_path),
-                            shell_quote(&target_path), mode_str, "{}"
+                            mode_str,
+                            shell_quote(&target_path),
+                            shell_quote(&target_path),
+                            mode_str,
+                            "{}"
                         ),
                         _ => format!("chmod -R {} {}", mode_str, shell_quote(&target_path)),
                     }
                 };
                 let res = if fam == "root" {
-                    match timeout(FILE_OPERATION_TIMEOUT, exec_shell_file_command(&handle, &cmd_str, &su, &sp)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        exec_shell_file_command(&handle, &cmd_str, &su, &sp),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()).map_err(|e| e.to_string()),
                         Err(_) => Err("修改权限超时".to_string()),
                     }
                 } else {
                     let wrapped = format!("sh -lc {}", shell_quote(&cmd_str));
-                    match timeout(FILE_OPERATION_TIMEOUT, super::system_metrics::exec_command(&handle, &wrapped)).await {
+                    match timeout(
+                        FILE_OPERATION_TIMEOUT,
+                        super::system_metrics::exec_command(&handle, &wrapped),
+                    )
+                    .await
+                    {
                         Ok(inner) => inner.map(|_| ()).map_err(|e| e.to_string()),
                         Err(_) => Err("修改权限超时".to_string()),
                     }
@@ -3663,20 +4218,20 @@ async fn handle_worker_cmd(
             let prev_sudo_password = sudo_password.clone();
             let prev_mode = file_access_mode.clone();
 
-            *sudo_user = new_sudo_user.clone();
+            if let Some(next_user) = new_sudo_user.filter(|user| !user.trim().is_empty()) {
+                *sudo_user = Some(next_user);
+            }
             if let Some(pwd) = new_sudo_password {
                 if !pwd.is_empty() {
                     *sudo_password = Some(pwd);
                 }
                 // empty password ⇒ keep existing (cache reuse)
-            } else {
-                // No password provided — fall back to `sudo -n`.
-                *sudo_password = None;
             }
 
             if mode == "root" {
                 // 先验证 sudo 凭据，失败则回滚
-                let verify = exec_shell_file_command(handle, "true", sudo_user, sudo_password).await;
+                let verify =
+                    exec_shell_file_command(handle, "true", sudo_user, sudo_password).await;
                 if let Err(err) = verify {
                     // 回滚到切换前的状态
                     *file_access_mode = prev_mode;
@@ -3699,9 +4254,7 @@ async fn handle_worker_cmd(
             let _ = respond_to.send(Ok(()));
             Ok(false)
         }
-        WorkerCmd::Disconnect => {
-            Ok(true)
-        }
+        WorkerCmd::Disconnect => Ok(true),
     }
 }
 
@@ -3710,23 +4263,12 @@ async fn handle_worker_cmd(
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub async fn list_dir(sftp: &SftpSession, dir_path: &str) -> Result<Vec<Value>, String> {
-    let entries = sftp
-        .read_dir(dir_path)
-        .await
-        .map_err(|e| e.to_string())?;
+    let entries = sftp.read_dir(dir_path).await.map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     // SFTP servers commonly omit `..` from read_dir. Keep the file pane
     // navigation consistent with Electron by creating the parent row ourselves.
-    if let Some(parent_path) = parent_remote_path(dir_path) {
-        items.push(serde_json::json!({
-            "name": "..",
-            "path": parent_path,
-            "type": "folder",
-            "size": "-",
-            "modified": "",
-            "permission": "",
-            "ownerGroup": "",
-        }));
+    if let Some(parent_item) = parent_remote_item(dir_path) {
+        items.push(parent_item);
     }
     for entry in entries {
         let name = entry.file_name();
@@ -3790,27 +4332,38 @@ fn parent_remote_path(dir_path: &str) -> Option<String> {
     }
 }
 
+fn parent_remote_item(dir_path: &str) -> Option<Value> {
+    parent_remote_path(dir_path).map(|parent_path| {
+        serde_json::json!({
+            "name": "..",
+            "path": parent_path,
+            "type": "folder",
+            "size": "-",
+            "modified": "",
+            "permission": "",
+            "ownerGroup": "",
+        })
+    })
+}
+
 async fn read_file(sftp: &SftpSession, path: &str, encoding: &str) -> Result<String, String> {
     use tokio::io::AsyncReadExt;
-    let mut f = sftp
-        .open(path)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut f = sftp.open(path).await.map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf).await.map_err(|e| e.to_string())?;
     decode_bytes(&buf, encoding)
 }
 
-async fn write_file(sftp: &SftpSession, path: &str, content: &str, encoding: &str) -> Result<(), String> {
+async fn write_file(
+    sftp: &SftpSession,
+    path: &str,
+    content: &str,
+    encoding: &str,
+) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     let bytes = encode_text(content, encoding);
-    let mut f = sftp
-        .create(path)
-        .await
-        .map_err(|e| e.to_string())?;
-    f.write_all(&bytes)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut f = sftp.create(path).await.map_err(|e| e.to_string())?;
+    f.write_all(&bytes).await.map_err(|e| e.to_string())?;
     f.flush().await.map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -3821,9 +4374,7 @@ async fn create_dir(sftp: &SftpSession, path: &str) -> Result<(), String> {
         Ok(_) => return Err(format!("远端路径不是目录: {path}")),
         Err(_) => {}
     }
-    sftp.create_dir(path)
-        .await
-        .map_err(|e| e.to_string())?;
+    sftp.create_dir(path).await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -3904,13 +4455,17 @@ async fn upload_local_file(
     cancel: tokio_util::sync::CancellationToken,
     app: &AppHandle,
 ) -> Result<(), String> {
-    let metadata = tokio::fs::metadata(local_path).await.map_err(|error| error.to_string())?;
+    let metadata = tokio::fs::metadata(local_path)
+        .await
+        .map_err(|error| error.to_string())?;
     let total = metadata.len();
     if resume_offset > total {
         return Err("上传断点大于源文件".to_string());
     }
     ensure_transfer_parent_dir(sftp, remote_path).await?;
-    let mut source = tokio::fs::File::open(local_path).await.map_err(|error| error.to_string())?;
+    let mut source = tokio::fs::File::open(local_path)
+        .await
+        .map_err(|error| error.to_string())?;
     source
         .seek(std::io::SeekFrom::Start(resume_offset))
         .await
@@ -3940,7 +4495,10 @@ async fn upload_local_file(
         transferred += read as u64;
         crate::services::transfers::report_progress(app, transfer_id, transferred, total).await;
     }
-    destination.flush().await.map_err(|error| error.to_string())?;
+    destination
+        .flush()
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -3953,25 +4511,36 @@ async fn download_remote_file(
     cancel: tokio_util::sync::CancellationToken,
     app: &AppHandle,
 ) -> Result<(), String> {
-    let metadata = sftp.metadata(remote_path).await.map_err(|error| error.to_string())?;
+    let metadata = sftp
+        .metadata(remote_path)
+        .await
+        .map_err(|error| error.to_string())?;
     let total = metadata.size.unwrap_or(0);
     if resume_offset > total {
         return Err("下载断点大于源文件".to_string());
     }
-    let mut source = sftp.open(remote_path).await.map_err(|error| error.to_string())?;
+    let mut source = sftp
+        .open(remote_path)
+        .await
+        .map_err(|error| error.to_string())?;
     source
         .seek(std::io::SeekFrom::Start(resume_offset))
         .await
         .map_err(|error| error.to_string())?;
     if let Some(parent) = std::path::Path::new(local_path).parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|error| error.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| error.to_string())?;
     }
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create(true);
     if resume_offset == 0 {
         options.truncate(true);
     }
-    let mut destination = options.open(local_path).await.map_err(|error| error.to_string())?;
+    let mut destination = options
+        .open(local_path)
+        .await
+        .map_err(|error| error.to_string())?;
     destination
         .seek(std::io::SeekFrom::Start(resume_offset))
         .await
@@ -3988,11 +4557,18 @@ async fn download_remote_file(
         transferred += read as u64;
         crate::services::transfers::report_progress(app, transfer_id, transferred, total).await;
     }
-    destination.flush().await.map_err(|error| error.to_string())?;
+    destination
+        .flush()
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(())
 }
 
-async fn replace_remote_file(sftp: &SftpSession, partial_path: &str, destination_path: &str) -> Result<(), String> {
+async fn replace_remote_file(
+    sftp: &SftpSession,
+    partial_path: &str,
+    destination_path: &str,
+) -> Result<(), String> {
     let partial_metadata = sftp
         .symlink_metadata(partial_path)
         .await
@@ -4052,7 +4628,10 @@ async fn replace_remote_file(sftp: &SftpSession, partial_path: &str, destination
         let _ = sftp.set_metadata(partial_path, metadata).await;
     }
 
-    let backup_path = format!("{destination_path}.fileterm-backup-{}", uuid::Uuid::new_v4());
+    let backup_path = format!(
+        "{destination_path}.fileterm-backup-{}",
+        uuid::Uuid::new_v4()
+    );
     let moved_destination = if destination_metadata.is_some() {
         sftp.rename(destination_path, &backup_path)
             .await
@@ -4094,11 +4673,23 @@ async fn stat_root_remote_file(
         sudo_password,
     )
     .await?;
-    let Some((size, modified_at)) = output.trim().lines().next().and_then(|line| line.split_once('|')) else {
+    let Some((size, modified_at)) = output
+        .trim()
+        .lines()
+        .next()
+        .and_then(|line| line.split_once('|'))
+    else {
         return Ok(None);
     };
-    let size = size.trim().parse::<u64>().map_err(|_| "无法解析 root 文件大小".to_string())?;
-    let modified_at = modified_at.trim().parse::<u64>().ok().map(|value| value * 1000);
+    let size = size
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| "无法解析 root 文件大小".to_string())?;
+    let modified_at = modified_at
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|value| value * 1000);
     Ok(Some(TransferFileStat { size, modified_at }))
 }
 
@@ -4156,6 +4747,7 @@ async fn commit_root_staging_file(
         .map(|_| ())
 }
 
+#[allow(clippy::too_many_arguments)] // Root transfer context mirrors the resumable worker contract.
 async fn download_root_remote_file(
     handle: &Handle<ClientHandler>,
     remote_path: &str,
@@ -4174,14 +4766,19 @@ async fn download_root_remote_file(
         return Err("root 下载断点大于源文件".to_string());
     }
     if let Some(parent) = std::path::Path::new(local_path).parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|error| error.to_string())?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|error| error.to_string())?;
     }
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create(true);
     if resume_offset == 0 {
         options.truncate(true);
     }
-    let mut local = options.open(local_path).await.map_err(|error| error.to_string())?;
+    let mut local = options
+        .open(local_path)
+        .await
+        .map_err(|error| error.to_string())?;
     local
         .seek(std::io::SeekFrom::Start(resume_offset))
         .await
@@ -4190,13 +4787,25 @@ async fn download_root_remote_file(
     let shell_command = if resume_offset == 0 {
         format!("cat -- {}", shell_quote(remote_path))
     } else {
-        format!("tail -c +{} -- {}", resume_offset + 1, shell_quote(remote_path))
+        format!(
+            "tail -c +{} -- {}",
+            resume_offset + 1,
+            shell_quote(remote_path)
+        )
     };
     let user = sudo_user.as_deref().unwrap_or("root");
     let command = if sudo_password.is_some() {
-        format!("sudo -S -p '' -u {} sh -lc {}", shell_quote(user), shell_quote(&shell_command))
+        format!(
+            "sudo -S -p '' -u {} sh -lc {}",
+            shell_quote(user),
+            shell_quote(&shell_command)
+        )
     } else {
-        format!("sudo -n -u {} sh -lc {}", shell_quote(user), shell_quote(&shell_command))
+        format!(
+            "sudo -n -u {} sh -lc {}",
+            shell_quote(user),
+            shell_quote(&shell_command)
+        )
     };
     let mut channel = handle
         .channel_open_session()
@@ -4229,7 +4838,13 @@ async fn download_root_remote_file(
                     result = local.write_all(bytes) => result.map_err(|error| error.to_string())?,
                 }
                 transferred += bytes.len() as u64;
-                crate::services::transfers::report_progress(app, transfer_id, transferred, source.size).await;
+                crate::services::transfers::report_progress(
+                    app,
+                    transfer_id,
+                    transferred,
+                    source.size,
+                )
+                .await;
             }
             Some(ChannelMsg::ExtendedData { data, .. }) => {
                 if stderr.len() < 4096 {
@@ -4247,7 +4862,10 @@ async fn download_root_remote_file(
         } else {
             format!("：{}", stderr.trim())
         };
-        return Err(format!("root 下载未完成（{transferred}/{} bytes）{suffix}", source.size));
+        return Err(format!(
+            "root 下载未完成（{transferred}/{} bytes）{suffix}",
+            source.size
+        ));
     }
     Ok(())
 }
@@ -4289,12 +4907,26 @@ async fn exec_shell_file_command(
     // 不会自然退出。超时后返回错误，前端 loading 能在 10 秒内解除。
     let output = if let Some(pwd) = sudo_password {
         let stdin = format!("{}\n", pwd);
-        match timeout(SUDO_VERIFY_TIMEOUT, super::system_metrics::exec_command_with_stdin(handle, &full_cmd, &stdin)).await {
+        match timeout(
+            SUDO_VERIFY_TIMEOUT,
+            super::system_metrics::exec_command_with_stdin(handle, &full_cmd, &stdin),
+        )
+        .await
+        {
             Ok(inner) => inner?,
-            Err(_) => return Err("sudo 验证超时：服务器未在 10 秒内响应，可能密码错误或网络中断".to_string()),
+            Err(_) => {
+                return Err(
+                    "sudo 验证超时：服务器未在 10 秒内响应，可能密码错误或网络中断".to_string(),
+                )
+            }
         }
     } else {
-        match timeout(SUDO_VERIFY_TIMEOUT, super::system_metrics::exec_command(handle, &full_cmd)).await {
+        match timeout(
+            SUDO_VERIFY_TIMEOUT,
+            super::system_metrics::exec_command(handle, &full_cmd),
+        )
+        .await
+        {
             Ok(inner) => inner?,
             Err(_) => return Err("sudo 验证超时：服务器未在 10 秒内响应".to_string()),
         }
@@ -4308,9 +4940,7 @@ async fn exec_shell_file_command(
         || lower.contains("sudo: permission denied")
         || lower.contains("sorry, try again")
     {
-        return Err(
-            "sudo 认证失败：密码错误或未授予 sudo 权限".to_string(),
-        );
+        return Err("sudo 认证失败：密码错误或未授予 sudo 权限".to_string());
     }
     Ok(output)
 }
@@ -4330,6 +4960,9 @@ async fn exec_list_dir_via_shell(
     let path_norm = path.trim_end_matches('/');
 
     let mut items = Vec::new();
+    if let Some(parent_item) = parent_remote_item(path) {
+        items.push(parent_item);
+    }
     for line in output.lines() {
         let line = line.trim_end_matches('\n');
         if line.is_empty() {
@@ -4348,7 +4981,12 @@ async fn exec_list_dir_via_shell(
         } else {
             format_bytes(size_value)
         };
-        let mtime: i64 = parts[2].split('.').next().unwrap_or("0").parse().unwrap_or(0);
+        let mtime: i64 = parts[2]
+            .split('.')
+            .next()
+            .unwrap_or("0")
+            .parse()
+            .unwrap_or(0);
         let owner_group = parts[3].to_string();
         let perm_octal = u32::from_str_radix(parts[4], 8).unwrap_or(0o644);
         let name = parts[5].to_string();
@@ -4513,7 +5151,11 @@ fn format_bytes(size: u64) -> String {
         value /= 1000.0;
         unit_index += 1;
     }
-    let digits = if value >= 10.0 || unit_index == 0 { 0 } else { 1 };
+    let digits = if value >= 10.0 || unit_index == 0 {
+        0
+    } else {
+        1
+    };
     format!("{:.*} {}", digits, value, units[unit_index])
 }
 
@@ -4541,17 +5183,18 @@ fn format_perm(perm: u32, is_dir: bool, is_link: bool) -> String {
 mod tests {
     use super::{
         build_http_connect_request, capture_sudo_password_input, coalesce_terminal_input,
-        format_sftp_unavailable_reason, is_password_prompt, looks_like_mfa_prompt,
-        looks_like_root_prompt, looks_like_shell_prompt, parent_remote_path,
-        remote_bind_host_matches, resource_monitoring_enabled, suppress_shell_setup_echo,
-        track_cwd_and_user, track_sudo_prompt_from_terminal,
-        try_keyboard_interactive_with_responder, tunnel_bind_address, validate_tunnel_rule,
-        KeyboardInteractiveRequest, ShellSetupEchoSuppression, SshTunnelRule,
-        SHELL_SETUP_SETTLE_DELAY,
+        default_ssh_key_paths, format_sftp_unavailable_reason, is_password_prompt,
+        looks_like_mfa_prompt, looks_like_root_prompt, looks_like_shell_prompt, parent_remote_item,
+        parent_remote_path, remote_bind_host_matches, resolve_shell_file_access,
+        resource_monitoring_enabled, suppress_shell_setup_echo, track_cwd_and_user,
+        track_sudo_prompt_from_terminal, try_keyboard_interactive_with_responder,
+        tunnel_bind_address, validate_tunnel_rule, KeyboardInteractiveRequest,
+        ShellSetupEchoSuppression, SshTunnelRule, SHELL_SETUP_SETTLE_DELAY,
     };
     #[cfg(unix)]
     use super::{forward_local_connection, forward_socks5_connection};
     use std::borrow::Cow;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -4619,7 +5262,8 @@ mod tests {
             "real OpenSSH verification requires {SSHD} and {SSH_KEYGEN}"
         );
 
-        let root = std::env::temp_dir().join(format!("fileterm-tauri-sshd-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("fileterm-tauri-sshd-{}", uuid::Uuid::new_v4()));
         let remote_dir = root.join("remote");
         std::fs::create_dir_all(&remote_dir).unwrap();
         let host_key = root.join("host-key");
@@ -4696,7 +5340,10 @@ mod tests {
         let mut byte = [0_u8; 1];
         while !headers.windows(4).any(|window| window == b"\r\n\r\n") {
             let count = socket.read(&mut byte).await.unwrap();
-            assert_eq!(count, 1, "proxy client closed before completing CONNECT headers");
+            assert_eq!(
+                count, 1,
+                "proxy client closed before completing CONNECT headers"
+            );
             headers.push(byte[0]);
         }
         String::from_utf8(headers).unwrap()
@@ -4835,10 +5482,7 @@ mod tests {
         );
 
         pending.as_mut().unwrap().marker_seen_at = Some(Instant::now() - SHELL_SETUP_SETTLE_DELAY);
-        let visible = suppress_shell_setup_echo(
-            &mut pending,
-            "root@host:~# ",
-        );
+        let visible = suppress_shell_setup_echo(&mut pending, "root@host:~# ");
 
         assert_eq!(visible, "Debian GNU/Linux\r\nuser@host:~$ root@host:~# ");
         assert!(pending.is_none());
@@ -4864,7 +5508,10 @@ mod tests {
         assert!(looks_like_shell_prompt(prompt));
 
         let mut buffer = String::new();
-        assert_eq!(track_cwd_and_user("\u{1b}]7;file:///e", &mut buffer), (None, None));
+        assert_eq!(
+            track_cwd_and_user("\u{1b}]7;file:///e", &mut buffer),
+            (None, None)
+        );
         assert_eq!(
             track_cwd_and_user("tc\u{7}\u{1b}]1337;RemoteUser=Stoffel\u{7}", &mut buffer),
             (Some("/etc".to_string()), Some("Stoffel".to_string()))
@@ -4875,6 +5522,22 @@ mod tests {
     fn detects_root_prompt_after_terminal_colours_are_removed() {
         assert!(looks_like_root_prompt("\u{1b}[01;31mroot@host\u{1b}[0m:# "));
         assert!(!looks_like_root_prompt("user@host:$ "));
+    }
+
+    #[test]
+    fn shell_identity_controls_file_access_independently_of_cached_sudo_auth() {
+        assert_eq!(
+            resolve_shell_file_access("stoffel", "root"),
+            ("root", Some("root".to_string()))
+        );
+        assert_eq!(
+            resolve_shell_file_access("stoffel", "postgres"),
+            ("root", Some("postgres".to_string()))
+        );
+        assert_eq!(
+            resolve_shell_file_access("stoffel", "stoffel"),
+            ("user", None)
+        );
     }
 
     #[test]
@@ -4931,7 +5594,27 @@ mod tests {
     fn creates_parent_rows_only_below_remote_root() {
         assert_eq!(parent_remote_path("/"), None);
         assert_eq!(parent_remote_path("/home"), Some("/".to_string()));
-        assert_eq!(parent_remote_path("/home/stoffel/下载/"), Some("/home/stoffel".to_string()));
+        assert_eq!(
+            parent_remote_path("/home/stoffel/下载/"),
+            Some("/home/stoffel".to_string())
+        );
+        assert!(parent_remote_item("/").is_none());
+        assert_eq!(parent_remote_item("/root").unwrap()["path"], "/");
+        assert_eq!(parent_remote_item("/root").unwrap()["name"], "..");
+    }
+
+    #[test]
+    fn default_ssh_key_candidates_match_electron_precedence() {
+        let home = Path::new("/home/fileterm");
+        assert_eq!(
+            default_ssh_key_paths(home),
+            vec![
+                home.join(".ssh/id_ed25519"),
+                home.join(".ssh/id_ecdsa"),
+                home.join(".ssh/id_rsa"),
+                home.join(".ssh/id_dsa"),
+            ]
+        );
     }
 
     #[test]
@@ -4973,15 +5656,13 @@ mod tests {
         let responses = Arc::new(Mutex::new(Vec::new()));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let mut server_config = server::Config::default();
-        server_config.inactivity_timeout = None;
-        server_config.auth_rejection_time = Duration::from_millis(1);
+        let mut server_config = server::Config {
+            inactivity_timeout: None,
+            auth_rejection_time: Duration::from_millis(1),
+            ..Default::default()
+        };
         server_config.keys.push(
-            PrivateKey::random(
-                &mut rand::rng(),
-                russh::keys::ssh_key::Algorithm::Ed25519,
-            )
-            .unwrap(),
+            PrivateKey::random(&mut rand::rng(), russh::keys::ssh_key::Algorithm::Ed25519).unwrap(),
         );
         let server_responses = responses.clone();
         let server_task = tokio::spawn(async move {
@@ -5025,12 +5706,16 @@ mod tests {
         .unwrap();
 
         assert!(authenticated);
-        let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].prompts.len(), 1);
-        assert_eq!(requests[0].prompts[0].prompt, "OTP code: ");
-        drop(requests);
-        assert_eq!(responses.lock().unwrap().as_slice(), ["saved-password", "246810"]);
+        {
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].prompts.len(), 1);
+            assert_eq!(requests[0].prompts[0].prompt, "OTP code: ");
+        }
+        assert_eq!(
+            responses.lock().unwrap().as_slice(),
+            ["saved-password", "246810"]
+        );
 
         drop(handle);
         timeout(Duration::from_secs(2), server_task)
@@ -5048,19 +5733,20 @@ mod tests {
         let profile = serde_json::json!({ "proxy": { "type": "none" } });
         let handle = authenticate_openssh_fixture(&fixture, &profile).await;
 
-        let command = crate::sessions::system_metrics::exec_command(
-            &handle,
-            "printf 'tauri-openssh-exec'",
-        )
-        .await
-        .unwrap();
+        let command =
+            crate::sessions::system_metrics::exec_command(&handle, "printf 'tauri-openssh-exec'")
+                .await
+                .unwrap();
         assert_eq!(command, "tauri-openssh-exec");
 
         let platform = crate::sessions::system_metrics::probe_remote_platform(&handle).await;
         #[cfg(target_os = "linux")]
         assert_eq!(platform, "linux");
         #[cfg(target_os = "macos")]
-        assert_eq!(platform, "unknown", "macOS metrics collection is not implemented yet");
+        assert_eq!(
+            platform, "unknown",
+            "macOS metrics collection is not implemented yet"
+        );
 
         let channel = handle.channel_open_session().await.unwrap();
         channel.request_subsystem(true, "sftp").await.unwrap();
@@ -5070,8 +5756,13 @@ mod tests {
         let remote_file = fixture.remote_dir.join("tauri-sftp.txt");
         let remote_file = remote_file.to_string_lossy().into_owned();
         sftp.create(&remote_file).await.unwrap();
-        sftp.write(&remote_file, b"tauri-openssh-sftp").await.unwrap();
-        assert_eq!(sftp.read(&remote_file).await.unwrap(), b"tauri-openssh-sftp");
+        sftp.write(&remote_file, b"tauri-openssh-sftp")
+            .await
+            .unwrap();
+        assert_eq!(
+            sftp.read(&remote_file).await.unwrap(),
+            b"tauri-openssh-sftp"
+        );
         sftp.close().await.unwrap();
 
         let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5107,7 +5798,10 @@ mod tests {
         local_client.read_exact(&mut response).await.unwrap();
         assert_eq!(&response, b"pong");
         drop(local_client);
-        timeout(Duration::from_secs(2), target).await.unwrap().unwrap();
+        timeout(Duration::from_secs(2), target)
+            .await
+            .unwrap()
+            .unwrap();
         timeout(Duration::from_secs(2), bridge)
             .await
             .unwrap()
@@ -5125,7 +5819,9 @@ mod tests {
         });
         let dynamic_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let dynamic_address = dynamic_listener.local_addr().unwrap();
-        let mut dynamic_client = tokio::net::TcpStream::connect(dynamic_address).await.unwrap();
+        let mut dynamic_client = tokio::net::TcpStream::connect(dynamic_address)
+            .await
+            .unwrap();
         let (dynamic_socket, _) = dynamic_listener.accept().await.unwrap();
         let dynamic_bridge = tokio::spawn({
             let tunnel_handle = tunnel_handle.clone();
@@ -5155,7 +5851,10 @@ mod tests {
         assert_eq!(&connected[..2], &[5, 0]);
         dynamic_client.write_all(b"socks").await.unwrap();
         let mut dynamic_response = [0_u8; 5];
-        dynamic_client.read_exact(&mut dynamic_response).await.unwrap();
+        dynamic_client
+            .read_exact(&mut dynamic_response)
+            .await
+            .unwrap();
         assert_eq!(&dynamic_response, b"proxy");
         drop(dynamic_client);
         timeout(Duration::from_secs(2), dynamic_target)
@@ -5180,9 +5879,7 @@ mod tests {
         let proxy = tokio::spawn(async move {
             let (mut client, _) = proxy_listener.accept().await.unwrap();
             let request = read_http_headers(&mut client).await;
-            assert!(request.starts_with(&format!(
-                "CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n"
-            )));
+            assert!(request.starts_with(&format!("CONNECT 127.0.0.1:{target_port} HTTP/1.1\r\n")));
             assert!(request.contains("Proxy-Authorization: Basic cHJveHktdXNlcjpwcm94eS1wYXNz\r\n"));
             client
                 .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -5281,7 +5978,10 @@ mod tests {
         assert_eq!(tunnel_bind_address("*", 1080).unwrap(), "0.0.0.0:1080");
         assert_eq!(tunnel_bind_address("::1", 1080).unwrap(), "[::1]:1080");
 
-        let invalid = SshTunnelRule { target_port: None, ..valid };
+        let invalid = SshTunnelRule {
+            target_port: None,
+            ..valid
+        };
         assert!(validate_tunnel_rule(&invalid).is_err());
     }
 

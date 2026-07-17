@@ -1,10 +1,11 @@
-import type { MouseEvent, ReactNode } from 'react'
+import { useRef, type MouseEvent, type ReactNode } from 'react'
 import type { WorkspaceTab } from '@fileterm/core'
 import { tabStatusClass } from '../../app/app-utils'
 import { t } from '../../i18n'
 import { handleHorizontalWheelScroll } from '../common/horizontal-scroll'
 import { CloseButton } from '../common/CloseButton'
 import { AppIcon } from '../common/AppIcon'
+import { usePointerSortFallback } from '../../hooks/usePointerSortFallback'
 
 export type OrderedTabEntry =
   | { key: string; kind: 'local'; id: string; title: string; tabKind: 'home' | 'system' }
@@ -52,6 +53,30 @@ export function TabBar({
   orderedTabs
 }: TabBarProps) {
   const focusModeLabel = isWorkspaceFocusMode ? t.exitWorkspaceFocusMode : t.enterWorkspaceFocusMode
+  const suppressTabClickRef = useRef(false)
+  const releaseSuppressedClick = () => {
+    window.setTimeout(() => {
+      suppressTabClickRef.current = false
+    }, 0)
+  }
+  const startPointerSort = usePointerSortFallback<string>({
+    onStart: (tabKey) => {
+      suppressTabClickRef.current = true
+      onDragStart(tabKey)
+    },
+    onTarget: (_source, target) => onDragEnter(target.id),
+    onDrop: (_source, target) => {
+      if (target) {
+        onDragEnter(target.id)
+      }
+      onDragEnd()
+      releaseSuppressedClick()
+    },
+    onCancel: () => {
+      onDragEnd()
+      releaseSuppressedClick()
+    }
+  })
 
   return (
     <header className="fs-tabbar" data-tauri-drag-region="deep">
@@ -79,8 +104,11 @@ export function TabBar({
               <div
                 key={entry.key}
                 className={`fs-tab ${entry.tabKind === 'home' ? 'home-tab' : 'system-tab'} ${activeHomeTabId === entry.id ? 'active' : ''}`}
-                draggable
-                onClick={() => onActivateHome(entry.id)}
+                data-fileterm-sort-id={entry.key}
+                data-fileterm-sort-kind="tab"
+                onClick={() => {
+                  if (!suppressTabClickRef.current) onActivateHome(entry.id)
+                }}
                 onContextMenu={(event) => {
                   event.preventDefault()
                   event.stopPropagation()
@@ -91,12 +119,10 @@ export function TabBar({
                     title: entry.title
                   })
                 }}
-                onDragEnd={onDragEnd}
-                onDragEnter={() => onDragEnter(entry.key)}
-                onDragOver={(event) => event.preventDefault()}
-                onDragStart={() => onDragStart(entry.key)}
+                onPointerDown={(event) => startPointerSort(event, entry.key)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
                     onActivateHome(entry.id)
                   }
                 }}
@@ -115,8 +141,11 @@ export function TabBar({
               <div
                 key={entry.key}
                 className={`fs-tab session-tab ${entry.tab.id === activeSessionTabId && !activeHomeTabId ? 'active' : ''}`}
-                draggable
-                onClick={() => onActivateSession(entry.tab.id)}
+                data-fileterm-sort-id={entry.key}
+                data-fileterm-sort-kind="tab"
+                onClick={() => {
+                  if (!suppressTabClickRef.current) onActivateSession(entry.tab.id)
+                }}
                 onContextMenu={(event) => {
                   event.preventDefault()
                   event.stopPropagation()
@@ -128,12 +157,10 @@ export function TabBar({
                     status: entry.tab.status
                   })
                 }}
-                onDragEnd={onDragEnd}
-                onDragEnter={() => onDragEnter(entry.key)}
-                onDragOver={(event) => event.preventDefault()}
-                onDragStart={() => onDragStart(entry.key)}
+                onPointerDown={(event) => startPointerSort(event, entry.key)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault()
                     onActivateSession(entry.tab.id)
                   }
                 }}

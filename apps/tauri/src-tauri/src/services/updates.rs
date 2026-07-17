@@ -61,26 +61,55 @@ fn is_newer(candidate: &str, current: &str) -> bool {
 }
 
 pub async fn check(app: &AppHandle) -> Result<serde_json::Value, AppError> {
+    let update_check = app
+        .state::<crate::services::workspace::WorkspaceState>()
+        .update_check
+        .clone();
+    let check_guard = match update_check.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            // Another window already started the network request. Wait for it
+            // instead of issuing a duplicate GitHub API call.
+            let guard = update_check.lock().await;
+            drop(guard);
+            return Ok(get_status(app).await);
+        }
+    };
     crate::services::logging::info(app, "update", "check started");
     set_status(
         app,
         serde_json::json!({ "state": "checking", "currentVersion": current_version(app), "updateMode": "release-page" }),
     )
     .await;
-    let response = reqwest::Client::builder()
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("FileTerm-Tauri")
         .build()
-        .map_err(|error| AppError::Command(error.to_string()))?
-        .get(LATEST_RELEASE_API)
-        .send()
-        .await;
+    {
+        Ok(client) => client,
+        Err(error) => {
+            let status = serde_json::json!({
+                "state": "error", "currentVersion": current_version(app), "updateMode": "release-page",
+                "message": format!("更新检查初始化失败: {error}"),
+            });
+            set_status(app, status.clone()).await;
+            return Ok(status);
+        }
+    };
+    let response = client.get(LATEST_RELEASE_API).send().await;
     let status = match response {
         Ok(response) if response.status().is_success() => {
-            let release: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|error| AppError::Command(format!("更新元数据无效: {error}")))?;
+            let release: serde_json::Value = match response.json().await {
+                Ok(release) => release,
+                Err(error) => {
+                    let status = serde_json::json!({
+                        "state": "error", "currentVersion": current_version(app), "updateMode": "release-page",
+                        "message": format!("更新元数据无效: {error}"),
+                    });
+                    set_status(app, status.clone()).await;
+                    return Ok(status);
+                }
+            };
             let version = release
                 .get("tag_name")
                 .and_then(serde_json::Value::as_str)
@@ -117,6 +146,7 @@ pub async fn check(app: &AppHandle) -> Result<serde_json::Value, AppError> {
         crate::services::logging::info(app, "update", format!("check completed state={state}"));
     }
     set_status(app, status.clone()).await;
+    drop(check_guard);
     Ok(status)
 }
 
@@ -129,7 +159,11 @@ pub async fn open_release_page(app: &AppHandle) -> Result<(), AppError> {
     let result = open::that(url).map_err(|error| AppError::Command(error.to_string()));
     match &result {
         Ok(()) => crate::services::logging::info(app, "update", "release page opened"),
-        Err(error) => crate::services::logging::error(app, "update", format!("open release page failed: {error}")),
+        Err(error) => crate::services::logging::error(
+            app,
+            "update",
+            format!("open release page failed: {error}"),
+        ),
     }
     result
 }

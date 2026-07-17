@@ -5,11 +5,13 @@ import { t } from '../../i18n'
 
 export function SshCredentialsModal({
   errorMessage,
+  isSubmitting = false,
   request,
   onCancel,
   onSubmit
 }: {
   errorMessage?: string | null
+  isSubmitting?: boolean
   request: SshCredentialsPromptRequest
   onCancel(): void
   onSubmit(input: { username: string; password: string }): void
@@ -27,7 +29,7 @@ export function SshCredentialsModal({
       <div className="modal-card ssh-interaction-modal">
         <div className="modal-header">
           <span>{t.sshAuthPromptTitle}</span>
-          <CloseButton onClick={onCancel} />
+          <CloseButton disabled={isSubmitting} onClick={onCancel} />
         </div>
 
         <div className="root-access-description">{t.sshAuthPromptDescription}</div>
@@ -41,6 +43,7 @@ export function SshCredentialsModal({
           <span>{t.sshAuthPromptUsername}</span>
           <input
             autoFocus
+            disabled={isSubmitting}
             value={username}
             onChange={(event) => setUsername(event.target.value)}
             onKeyDown={(event) => {
@@ -55,6 +58,7 @@ export function SshCredentialsModal({
           <span>{t.password}</span>
           <input
             type="password"
+            disabled={isSubmitting}
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             onKeyDown={(event) => {
@@ -69,11 +73,17 @@ export function SshCredentialsModal({
         {errorMessage ? <div className="modal-error">{errorMessage}</div> : null}
 
         <div className="form-actions">
-          <button className="flat-button" onClick={onCancel} type="button">
+          <button className="flat-button" disabled={isSubmitting} onClick={onCancel} type="button">
             {t.cancel}
           </button>
-          <button className="primary-button" onClick={() => onSubmit({ username, password })} type="button">
-            {t.sshAuthPromptConfirm}
+          <button
+            className="primary-button"
+            disabled={isSubmitting}
+            onClick={() => onSubmit({ username, password })}
+            type="button"
+          >
+            {isSubmitting ? <span aria-hidden="true" className="button-spinner" /> : null}
+            <span>{t.sshAuthPromptConfirm}</span>
           </button>
         </div>
       </div>
