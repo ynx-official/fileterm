@@ -15,6 +15,7 @@ import { t } from '../i18n'
 import { ContextMenu } from '../features/common/ContextMenu'
 import { CloseButton } from '../features/common/CloseButton'
 import { AppIcon } from '../features/common/AppIcon'
+import { FILETERM_MONO_FONT_FAMILY, observeCanvasTextMetrics } from '../app/font-metrics'
 
 function localizeTerminalText(value: string) {
   return value
@@ -545,7 +546,7 @@ export const TerminalView = memo(function TerminalView({
     }
 
     const terminal = new Terminal({
-      fontFamily: '"SF Mono", Menlo, Consolas, monospace',
+      fontFamily: FILETERM_MONO_FONT_FAMILY,
       fontSize: 12,
       lineHeight: 1.05,
       cursorBlink: true,
@@ -744,6 +745,15 @@ export const TerminalView = memo(function TerminalView({
         resize(shouldForce, shouldFreezeCols, preserveVisibleBuffer)
       })
     }
+
+    // Font loading and a monitor-DPI transition occur outside ResizeObserver's
+    // CSS-box model. Refresh xterm's cached glyph/canvas metrics explicitly so
+    // packaged WebView2/WebKit builds cannot keep a fallback-font grid.
+    const disposeCanvasTextMetrics = observeCanvasTextMetrics((fontFamily) => {
+      terminal.options.fontFamily = fontFamily
+      terminal.refresh(0, Math.max(terminal.rows - 1, 0))
+      scheduleResize(true)
+    })
 
     const scheduleSettledHorizontalResize = () => {
       if (resizeSettleTimerRef.current !== null) {
@@ -1008,6 +1018,7 @@ export const TerminalView = memo(function TerminalView({
       pendingPromptResizeRef.current = false
       searchResultsDisposable.dispose()
       osc52Disposable.dispose()
+      disposeCanvasTextMetrics()
       resizeObserver.disconnect()
       hostRef.current?.removeEventListener('contextmenu', onContextMenu)
       window.removeEventListener('keydown', onKeyDown, true)
