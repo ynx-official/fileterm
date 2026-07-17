@@ -163,10 +163,11 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
     await controller?.disconnect()
     this.terminalOutputBatcher.flush(tabId)
     const current = this.sessions.get(tabId)
-    if (current && isTerminalController(controller)) {
+    if (current) {
       this.sessions.set(tabId, {
         ...current,
-        terminalTranscript: controller.getTerminalTranscript()
+        ...(isTerminalController(controller) ? { terminalTranscript: controller.getTerminalTranscript() } : {}),
+        remoteFilesLoading: false
       })
     }
     this.liveControllers.delete(tabId)
@@ -315,9 +316,15 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
           this.terminalOutputBatcher.queue(tabId, chunk)
         },
         (cwd) => {
+          if (this.liveControllers.get(tabId) !== sshController) {
+            return
+          }
           void this.handleShellCwdChanged(tabId, cwd).catch(() => undefined)
         },
         (user) => {
+          if (this.liveControllers.get(tabId) !== sshController) {
+            return
+          }
           if (!this.shellLoginUsers.has(tabId)) {
             this.shellLoginUsers.set(tabId, user)
           }
@@ -326,6 +333,9 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
           })
         },
         (summary, transcript, connected) => {
+          if (this.liveControllers.get(tabId) !== sshController) {
+            return
+          }
           this.terminalOutputBatcher.flush(tabId)
           const current = this.sessions.get(tabId)
           if (!current) {
@@ -338,6 +348,7 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
             summary,
             terminalTranscript: transcript,
             remoteFiles: connected ? current.remoteFiles : [],
+            remoteFilesLoading: connected ? current.remoteFilesLoading : false,
             shellUser: connected ? current.shellUser : undefined,
             fileAccessMode: connected ? (sshController?.getFileAccessMode() ?? current.fileAccessMode) : 'user',
             hasReusableSudoAuth: connected ? (sshController?.hasReusableSudoAuth() ?? false) : false,
@@ -537,7 +548,8 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
           ...current,
           summary,
           terminalTranscript: transcript,
-          connected: false
+          connected: false,
+          remoteFilesLoading: false
         })
         if (controller.type === 'ssh') {
           this.sendToTab(tabId, 'terminal:state', {

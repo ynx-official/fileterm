@@ -228,7 +228,9 @@ export function FileManager({
   const isRemoteConnected = activeSession.connected === true
   const isSshSession = activeTab?.sessionType === 'ssh'
   const canManageTunnels = activeSession.capabilities?.tunnels === true
-  const showRemoteDirectoryLoading = isRemoteDirectoryLoading || activeSession.remoteFilesLoading === true
+  const showRemoteDirectoryLoading =
+    isRemoteConnected &&
+    (isRemoteDirectoryLoading || (activeSession.remoteFilesLoading === true && activeSession.remoteFiles.length === 0))
   const [activeView, setActiveView] = useState<'file' | 'command' | 'tunnel'>('file')
   const [localPaneWidth, setLocalPaneWidth] = useState(214)
   const [localPathInput, setLocalPathInput] = useState(localPath)
