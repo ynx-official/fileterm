@@ -5,6 +5,7 @@ import { t } from '../../i18n'
 import { AppIcon } from '../common/AppIcon'
 import { CloseButton } from '../common/CloseButton'
 import { ManagerInlineFolderRow } from '../common/ManagerInlineFolderRow'
+import { targetsNestedManagerControl } from '../common/manager-interactions'
 import { managerDropClass, resolveManagerDropPosition } from '../common/manager-drag'
 import { usePointerSortFallback, type PointerSortTarget } from '../../hooks/usePointerSortFallback'
 
@@ -34,7 +35,7 @@ export function ConnectionManagerModal({
   onClose(): void
   onCreate(): void
   onDeleteProfile(profileId: string): Promise<unknown> | boolean | void
-  onEditProfile(profile: ConnectionProfile): void
+  onEditProfile(profile: ConnectionProfile): Promise<unknown> | void
   onOpenProfile(profileId: string): void
   onCreateFolder(name: string): Promise<boolean> | boolean | void
   onDeleteFolder(folderId: string): Promise<unknown> | boolean | void
@@ -62,6 +63,8 @@ export function ConnectionManagerModal({
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const deleteInFlightRef = useRef(false)
+  const [openingProfileId, setOpeningProfileId] = useState<string | null>(null)
+  const profileEditorOpenInFlightRef = useRef(false)
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null)
   const folderRenameInFlightRef = useRef(false)
   const suppressRowClickRef = useRef(false)
@@ -73,6 +76,23 @@ export function ConnectionManagerModal({
 
   const stopInteractiveEvent = (event: React.SyntheticEvent) => {
     event.stopPropagation()
+  }
+
+  const handleEditProfile = async (profile: ConnectionProfile) => {
+    if (profileEditorOpenInFlightRef.current) {
+      return
+    }
+
+    profileEditorOpenInFlightRef.current = true
+    setOpeningProfileId(profile.id)
+    try {
+      await onEditProfile(profile)
+    } catch (error) {
+      console.error('Failed to open connection editor:', error)
+    } finally {
+      profileEditorOpenInFlightRef.current = false
+      setOpeningProfileId(null)
+    }
   }
 
   const toggleFolder = (folderId: string, event?: React.MouseEvent) => {
@@ -393,14 +413,18 @@ export function ConnectionManagerModal({
           data-fileterm-sort-id={node.id}
           data-fileterm-sort-kind={isFolder ? 'folder' : 'profile'}
           draggable={false}
-          onPointerDown={(event) => handlePointerDown(event, node.id)}
+          onPointerDown={(event) => {
+            if (!targetsNestedManagerControl(event)) {
+              handlePointerDown(event, node.id)
+            }
+          }}
           onDragStart={(e) => handleDragStart(e, node.id)}
           onDragOver={(e) => handleDragOver(e, node.id)}
           onDragLeave={handleDragLeave}
           onDrop={(e) => handleDrop(e, node.id)}
           onDragEnd={handleDragEnd}
-          onDoubleClick={() => {
-            if (suppressRowClickRef.current) {
+          onDoubleClick={(event) => {
+            if (targetsNestedManagerControl(event) || suppressRowClickRef.current) {
               return
             }
             if (isFolder) {
@@ -409,8 +433,8 @@ export function ConnectionManagerModal({
             }
             onOpenProfile(node.id)
           }}
-          onClick={() => {
-            if (suppressRowClickRef.current) {
+          onClick={(event) => {
+            if (targetsNestedManagerControl(event) || suppressRowClickRef.current) {
               return
             }
             if (isFolder) {
@@ -418,7 +442,7 @@ export function ConnectionManagerModal({
             }
           }}
           onKeyDown={(event) => {
-            if (event.key !== 'Enter') {
+            if (targetsNestedManagerControl(event) || event.key !== 'Enter') {
               return
             }
             event.preventDefault()
@@ -507,17 +531,23 @@ export function ConnectionManagerModal({
             {!isFolder && (
               <button
                 aria-label={t.edit}
+                aria-busy={openingProfileId === node.id}
                 className="manager-icon-action"
+                disabled={openingProfileId !== null}
                 title={t.edit}
                 type="button"
                 onMouseDown={stopInteractiveEvent}
                 onPointerDown={stopInteractiveEvent}
                 onClick={(e) => {
                   e.stopPropagation()
-                  onEditProfile(node)
+                  void handleEditProfile(node)
                 }}
               >
-                <AppIcon name="edit" size={14} />
+                {openingProfileId === node.id ? (
+                  <span aria-hidden="true" className="button-spinner manager-action-spinner" />
+                ) : (
+                  <AppIcon name="edit" size={14} />
+                )}
               </button>
             )}
             <button

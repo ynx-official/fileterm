@@ -1100,8 +1100,14 @@ textarea:focus-visible,
   width: 100vw;
   min-height: 100vh;
   overflow: hidden;
-  border-radius: 14px;
+  border-radius: var(--window-corner-radius);
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.38);
+}
+
+:root[data-platform='win32'] .standalone-window-frame {
+  /* Windows DWM clips the actual window edge. Avoid a second, mismatched
+     renderer corner inside the native anti-aliased outline. */
+  border-radius: 0;
 }
 
 .standalone-window-frame.has-standalone-titlebar {

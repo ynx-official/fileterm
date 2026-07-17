@@ -29,10 +29,9 @@ export function ConnectionFormHost({
   onClose(): void
   onSubmit(event: FormEvent<HTMLFormElement>): void
 }) {
+  const editingProfile = editingProfileId ? (profiles.find((profile) => profile.id === editingProfileId) ?? null) : null
+
   const clearHostFingerprint = () => {
-    const editingProfile = editingProfileId
-      ? (profiles.find((profile) => profile.id === editingProfileId) ?? null)
-      : null
     if (!editingProfile) {
       return
     }
@@ -47,6 +46,7 @@ export function ConnectionFormHost({
       isSubmitting={isSubmitting}
       mode={mode}
       form={form}
+      hasSavedPassword={editingProfile?.hasSavedPassword === true}
       profiles={profiles}
       setForm={setForm}
       onClearHostFingerprint={clearHostFingerprint}

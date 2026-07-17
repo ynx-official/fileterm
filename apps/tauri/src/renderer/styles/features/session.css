@@ -2324,6 +2324,12 @@
   cursor: not-allowed;
 }
 
+.manager-action-spinner {
+  width: 12px;
+  height: 12px;
+  border-width: 1.5px;
+}
+
 .manager-icon-action.danger {
   color: var(--text-muted);
 }

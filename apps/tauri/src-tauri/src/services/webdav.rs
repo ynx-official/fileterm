@@ -1,6 +1,7 @@
-//! Manual, conflict-aware WebDAV synchronization for the portable profile
-//! bundle. The renderer only ever receives the public config; passwords and
-//! local content hashes stay in the main process' data directory.
+//! Manual, conflict-aware WebDAV synchronization for the complete profile
+//! bundle. Connection credentials stay inside the Rust service boundary but
+//! are intentionally included in the remote bundle so another FileTerm
+//! installation can reconnect after downloading it.
 
 use std::fs;
 use std::path::PathBuf;
@@ -230,15 +231,16 @@ pub fn export_timestamp() -> String {
 
 fn export_bundle(app: &AppHandle) -> Result<(Vec<u8>, String), AppError> {
     let (profiles, _) = profile_ops::read_and_heal_profiles(app)?;
-    let profiles = profiles
-        .iter()
-        .map(profile_ops::strip_secret_fields_public)
-        .collect::<Vec<_>>();
+    build_export_bundle(&profiles)
+}
+
+fn build_export_bundle(profiles: &[Value]) -> Result<(Vec<u8>, String), AppError> {
     let profile_bytes = serde_json::to_vec(&profiles)
         .map_err(|error| AppError::Serialization(error.to_string()))?;
     let content_hash = sha256_hex(&profile_bytes);
     let payload = serde_json::json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "containsSecrets": true,
         "generatedAt": export_timestamp(),
         "contentHash": content_hash,
         "profiles": profiles,
@@ -318,21 +320,26 @@ fn sanitize_import_profile(value: &Value) -> Result<Value, String> {
     object
         .entry("username".to_string())
         .or_insert_with(|| Value::String(String::new()));
-    for key in [
-        "id",
-        "parentId",
-        "order",
-        "lastUsedAt",
-        "password",
-        "passphrase",
-        "privateKeyPath",
-    ] {
+    for key in ["id", "parentId", "order", "lastUsedAt"] {
         object.remove(key);
     }
-    if let Some(proxy) = object.get_mut("proxy").and_then(Value::as_object_mut) {
-        proxy.remove("password");
-    }
     Ok(Value::Object(object))
+}
+
+fn merge_synced_profile(existing: &Value, incoming: &Value) -> Result<Value, String> {
+    let mut merged = existing
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "本地配置项不是对象".to_string())?;
+    let incoming = incoming
+        .as_object()
+        .ok_or_else(|| "远端配置项不是对象".to_string())?;
+    for (key, value) in incoming {
+        if !matches!(key.as_str(), "id" | "parentId" | "order" | "lastUsedAt") {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Object(merged))
 }
 
 fn parse_bundle(bytes: &[u8]) -> Result<Vec<Value>, AppError> {
@@ -510,8 +517,9 @@ pub async fn download(app: &AppHandle) -> Result<Value, AppError> {
             app,
             "webdav",
             format!(
-                "download completed imported={} skipped={}",
+                "download completed imported={} updated={} skipped={}",
                 value.get("imported").and_then(Value::as_u64).unwrap_or(0),
+                value.get("updated").and_then(Value::as_u64).unwrap_or(0),
                 value.get("skipped").and_then(Value::as_u64).unwrap_or(0)
             ),
         ),
@@ -530,9 +538,12 @@ async fn download_inner(app: &AppHandle) -> Result<Value, AppError> {
     let (existing, _) = profile_ops::read_and_heal_profiles(app)?;
     let mut known = existing
         .iter()
-        .filter_map(profile_fingerprint)
-        .collect::<std::collections::HashSet<_>>();
+        .filter_map(|profile| {
+            profile_fingerprint(profile).map(|fingerprint| (fingerprint, profile.clone()))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let mut imported = 0_u64;
+    let mut updated = 0_u64;
     let mut skipped = 0_u64;
     for profile in profiles {
         let sanitized = match sanitize_import_profile(&profile) {
@@ -546,11 +557,29 @@ async fn download_inner(app: &AppHandle) -> Result<Value, AppError> {
             skipped += 1;
             continue;
         };
-        if !known.insert(fingerprint) {
-            skipped += 1;
+        if let Some(existing_profile) = known.get(&fingerprint).cloned() {
+            let Some(profile_id) = existing_profile
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+            else {
+                skipped += 1;
+                continue;
+            };
+            let merged = match merge_synced_profile(&existing_profile, &sanitized) {
+                Ok(profile) => profile,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let saved = profile_ops::update_profile(app, &profile_id, merged)?;
+            known.insert(fingerprint, saved);
+            updated += 1;
             continue;
         }
-        profile_ops::create_profile(app, sanitized)?;
+        let created = profile_ops::create_profile(app, sanitized)?;
+        known.insert(fingerprint, created);
         imported += 1;
     }
     config.last_etag = remote_etag;
@@ -559,8 +588,9 @@ async fn download_inner(app: &AppHandle) -> Result<Value, AppError> {
     write_config(app, &config)?;
     Ok(serde_json::json!({
         "action": "download",
-        "message": format!("已从 WebDAV 导入 {imported} 个连接；跳过 {skipped} 个重复或无效项。"),
+        "message": format!("已从 WebDAV 导入 {imported} 个连接，更新 {updated} 个现有连接；跳过 {skipped} 个无效项。"),
         "imported": imported,
+        "updated": updated,
         "skipped": skipped,
     }))
 }
@@ -599,8 +629,8 @@ async fn download_payload(
 #[cfg(test)]
 mod tests {
     use super::{
-        client, download_payload, normalize_remote_path, parse_bundle, sha256_hex, upload_payload,
-        StoredConfig,
+        build_export_bundle, client, download_payload, merge_synced_profile, normalize_remote_path,
+        parse_bundle, sanitize_import_profile, sha256_hex, upload_payload, StoredConfig,
     };
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -639,6 +669,74 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn keeps_connection_credentials_when_sanitizing_webdav_profiles() {
+        let profile = sanitize_import_profile(&json!({
+            "id": "remote-id",
+            "name": "dev",
+            "type": "ssh",
+            "host": "example.test",
+            "port": 22,
+            "username": "ops",
+            "password": "secret",
+            "passphrase": "key-secret",
+            "proxy": { "type": "http", "password": "proxy-secret" }
+        }))
+        .unwrap();
+        assert_eq!(profile["password"], "secret");
+        assert_eq!(profile["passphrase"], "key-secret");
+        assert_eq!(profile["proxy"]["password"], "proxy-secret");
+        assert!(profile.get("id").is_none());
+    }
+
+    #[test]
+    fn webdav_upload_bundle_contains_saved_credentials() {
+        let profiles = vec![json!({
+            "id": "profile-1",
+            "name": "dev",
+            "type": "ssh",
+            "host": "example.test",
+            "port": 22,
+            "username": "ops",
+            "password": "secret",
+            "passphrase": "key-secret",
+            "proxy": { "type": "http", "password": "proxy-secret" }
+        })];
+        let (bytes, _) = build_export_bundle(&profiles).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(payload["schemaVersion"], 2);
+        assert_eq!(payload["containsSecrets"], true);
+        assert_eq!(payload["profiles"][0]["password"], "secret");
+        assert_eq!(payload["profiles"][0]["passphrase"], "key-secret");
+        assert_eq!(payload["profiles"][0]["proxy"]["password"], "proxy-secret");
+    }
+
+    #[test]
+    fn remote_duplicate_updates_credentials_without_replacing_local_identity() {
+        let existing = json!({
+            "id": "local-id",
+            "name": "dev",
+            "type": "ssh",
+            "host": "example.test",
+            "port": 22,
+            "username": "ops",
+            "password": "old",
+            "order": 42
+        });
+        let incoming = json!({
+            "name": "dev",
+            "type": "ssh",
+            "host": "example.test",
+            "port": 22,
+            "username": "ops",
+            "password": "new"
+        });
+        let merged = merge_synced_profile(&existing, &incoming).unwrap();
+        assert_eq!(merged["id"], "local-id");
+        assert_eq!(merged["order"], 42);
+        assert_eq!(merged["password"], "new");
     }
 
     #[tokio::test]

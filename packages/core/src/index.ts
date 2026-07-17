@@ -38,6 +38,8 @@ export interface BaseProfile extends BaseEntity {
   remotePath: string
   group: string
   lastUsedAt?: number
+  /** Non-secret indicator for redacted desktop snapshots. */
+  hasSavedPassword?: boolean
 }
 
 export type NetworkProfile = BaseProfile
@@ -614,6 +616,7 @@ export interface WebDavSyncResult {
   action: 'upload' | 'download'
   message: string
   imported?: number
+  updated?: number
   skipped?: number
 }
 

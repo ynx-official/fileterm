@@ -138,9 +138,22 @@ fn strip_secret_fields(profile: &Value) -> Value {
 }
 
 /// Public wrapper so callers outside this module can strip secrets before
-/// returning a profile to the renderer (e.g. workspace snapshot).
+/// returning a profile to the renderer (e.g. workspace snapshot). The
+/// non-secret presence bit lets an editor explain why its password input is
+/// intentionally empty without disclosing the credential itself.
 pub fn strip_secret_fields_public(profile: &Value) -> Value {
-    strip_secret_fields(profile)
+    let has_saved_password = profile
+        .get("password")
+        .and_then(Value::as_str)
+        .is_some_and(|password| !password.is_empty());
+    let mut public = strip_secret_fields(profile);
+    if let Some(object) = public.as_object_mut() {
+        object.insert(
+            "hasSavedPassword".to_string(),
+            Value::Bool(has_saved_password),
+        );
+    }
+    public
 }
 
 fn ensure_object(value: &Value) -> Map<String, Value> {
@@ -1294,12 +1307,13 @@ mod tests {
         assert_eq!(edit["proxy"]["password"], "stored-proxy-password");
         assert!(!edit.contains_key("proxyPassword"));
 
-        let public = strip_secret_fields(&Value::Object(edit));
+        let public = strip_secret_fields_public(&Value::Object(edit));
         assert!(public.get("password").is_none());
         assert!(public.get("passphrase").is_none());
         assert!(public.get("privateKeyPath").is_none());
         assert!(public.get("proxyPassword").is_none());
         assert!(public["proxy"].get("password").is_none());
+        assert_eq!(public["hasSavedPassword"], true);
     }
 
     #[test]

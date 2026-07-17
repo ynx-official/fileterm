@@ -242,6 +242,14 @@ pub struct WorkspaceState {
     /// Matches Electron's update check single-flight promise. Concurrent UI
     /// clicks wait for the active check and reuse its final status.
     pub update_check: Arc<Mutex<()>>,
+    /// Serializes updater downloads and installation so a double click cannot
+    /// start competing installers or overwrite a verified package in memory.
+    pub update_operation: Arc<Mutex<()>>,
+    /// Windows keeps the verified updater payload in memory until the user
+    /// confirms the restart. It is intentionally never persisted to user data.
+    #[cfg(target_os = "windows")]
+    pub windows_downloaded_update:
+        Arc<Mutex<Option<crate::services::updates::WindowsDownloadedUpdate>>>,
 }
 
 impl Default for WorkspaceState {
@@ -268,6 +276,9 @@ impl Default for WorkspaceState {
             library_mutation: Arc::new(Mutex::new(())),
             update_status: Arc::new(RwLock::new(None)),
             update_check: Arc::new(Mutex::new(())),
+            update_operation: Arc::new(Mutex::new(())),
+            #[cfg(target_os = "windows")]
+            windows_downloaded_update: Arc::new(Mutex::new(None)),
         }
     }
 }

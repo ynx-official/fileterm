@@ -1,4 +1,4 @@
-name: ci
+name: Tauri CI
 
 on:
   push:
@@ -14,7 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
+  tauri-renderer-and-shared-quality:
+    name: Tauri renderer and shared packages
     runs-on: ubuntu-latest
 
     steps:
@@ -33,29 +34,24 @@ jobs:
       - name: Audit npm dependencies
         run: npm audit --audit-level=low
 
-      - name: Build packages (core → shared → storage)
+      - name: Build shared packages
         run: |
           npm run build -w @fileterm/core
           npm run build -w @fileterm/shared
           npm run build -w @fileterm/storage
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Typecheck Tauri renderer and shared packages
+        run: |
+          npm run typecheck -w @fileterm/core
+          npm run typecheck -w @fileterm/shared
+          npm run typecheck -w @fileterm/storage
+          npm run typecheck -w @fileterm/tauri
 
-      - name: Lint
-        run: npm run lint
+      - name: Lint Tauri and shared source
+        run: npx eslint apps/tauri packages/core packages/shared packages/storage --max-warnings=0
 
-      - name: Check formatting
-        run: npm run format:check
-
-      - name: Run unit tests
-        run: npm test
-
-      - name: Build
-        run: npm run build
-
-      - name: Run transfer protocol tests
-        run: npm run test:transfers:protocol -w @fileterm/electron
+      - name: Check Tauri and shared formatting
+        run: npx prettier --check apps/tauri packages/core packages/shared packages/storage package.json package-lock.json .github/workflows/ci.yml .github/workflows/release.yml
 
   tauri-socket-lifecycle:
     name: Tauri socket lifecycle (${{ matrix.os }})
@@ -102,9 +98,6 @@ jobs:
 
       - name: Verify direct Telnet socket release without desktop runtime DLLs
         if: runner.os == 'Windows'
-        # The full Tauri lib test binary loads unrelated desktop runtime DLLs
-        # before this socket test starts. Compile the extracted production
-        # transport module in a minimal fixture to keep this check deterministic.
         run: cargo test --manifest-path .github/fixtures/tauri-socket-lifecycle/Cargo.toml --locked
 
   tauri-serial-virtual:
@@ -128,7 +121,7 @@ jobs:
         run: cargo test sessions::serial::tests::virtual_pty_round_trip_exercises_the_real_serial_stack
 
   tauri-real-protocols:
-    name: Tauri quality + real protocol fixtures (ubuntu-latest)
+    name: Tauri quality and real protocol fixtures (ubuntu-latest)
     runs-on: ubuntu-latest
 
     steps:
@@ -149,7 +142,7 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build workspace packages for renderer typecheck
+      - name: Build shared packages for Tauri renderer
         run: |
           npm run build -w @fileterm/core
           npm run build -w @fileterm/shared

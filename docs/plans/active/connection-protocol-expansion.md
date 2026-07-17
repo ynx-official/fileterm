@@ -6,12 +6,12 @@
 
 ## 实施完成摘要
 
-- 用户手动导出的 FileTerm 备份包含连接凭据，用于完整迁移；WebDAV 同步包仍会递归剥离 SSH、私钥和嵌套 `proxy.password`。profile repository 也会把代理密码恢复到 main process，而不写回 `profiles.json`。
+- 用户手动导出的 FileTerm 备份和 WebDAV 同步包都包含连接密码、私钥口令和嵌套 `proxy.password`，用于完整迁移；这些明文只在 main/Rust 服务层处理，不进入 renderer snapshot 或预览。profile repository 也会把代理密码恢复到 main process，而不写回 `profiles.json`。
 - SSH 工作区底部面板支持“文件 / 隧道”切换；可在当前 tab 运行时新增、启动、停止和删除 `-L/-R/-D`，断线或关闭 tab 自动回收 listener 和活动 socket。停止远程 `-R` 时会报告服务端取消失败并保留错误状态以供重试；本地 `-L/-D` 会在关闭 listener 前断开活动客户端，避免端口释放卡住。
 - Jump Host 使用自身的认证方式、代理、keyboard-interactive 和 host verification；仅支持单级，循环或自引用会被明确拒绝。
 - 单一导入入口支持 SSH 配置和外部 JSON，采用“选择文件或目录 → main-process 解析/秘密隔离 → renderer 预览 → 确认”流程。预览提供勾选、跳过/覆盖/另存为策略；覆盖会保留源文件未提供的既有凭据。
-- WebDAV 位于设置页，使用手动上传/下载、HTTPS 默认、20 秒超时、ETag 冲突检测和原子本地配置写入。同步的 portable 包不包含连接 secrets。
-- 自动测试包含 17 个代表性外部 JSON、嵌套代理 secret、HTTP CONNECT、Telnet NAWS、SSH tunnel lifecycle、Serial mock 和 WebDAV secret-free upload/download。
+- WebDAV 位于设置页，使用手动上传/下载、HTTPS 默认、20 秒超时、ETag 冲突检测和原子本地配置写入。同步包是含明文连接 secrets 的完整备份，重复端点下载时更新现有连接并保留本地 ID/排序。
+- 自动测试包含 17 个代表性外部 JSON、嵌套代理 secret、HTTP CONNECT、Telnet NAWS、SSH tunnel lifecycle、Serial mock，以及 WebDAV 凭据保留、重复项凭据更新和 upload/download。
 
 ## 1. 背景
 

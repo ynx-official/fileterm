@@ -562,9 +562,15 @@ pub async fn commit_import_plan(
 
 pub fn export_bundle(app: &AppHandle, format: &str) -> Result<Vec<u8>, AppError> {
     let (profiles, _) = profile_ops::read_and_heal_profiles(app)?;
+    let payload = build_export_payload(&profiles, format)?;
+    serde_json::to_vec_pretty(&payload).map_err(|error| AppError::Serialization(error.to_string()))
+}
+
+fn build_export_payload(profiles: &[Value], format: &str) -> Result<Value, AppError> {
     let payload = match format {
         "fileterm" => serde_json::json!({
-            "schemaVersion": 1,
+            "schemaVersion": 2,
+            "containsSecrets": true,
             "generatedAt": crate::services::webdav::export_timestamp(),
             "profiles": profiles,
         }),
@@ -587,7 +593,7 @@ pub fn export_bundle(app: &AppHandle, format: &str) -> Result<Vec<u8>, AppError>
         ),
         _ => return Err(command_error("导出格式无效")),
     };
-    serde_json::to_vec_pretty(&payload).map_err(|error| AppError::Serialization(error.to_string()))
+    Ok(payload)
 }
 
 pub fn export_filename(
@@ -641,7 +647,10 @@ pub fn export_filename(
 
 #[cfg(test)]
 mod tests {
-    use super::{export_filename, fingerprint, normalize_external_profile, parse_ssh_config};
+    use super::{
+        build_export_payload, export_filename, fingerprint, normalize_external_profile,
+        parse_ssh_config,
+    };
     use serde_json::json;
     use std::collections::HashSet;
 
@@ -702,5 +711,27 @@ mod tests {
             export_filename("same", "87654321", &mut used),
             "same-2-87654321"
         );
+    }
+
+    #[test]
+    fn exports_saved_credentials_in_both_supported_formats() {
+        let profiles = vec![json!({
+            "id": "profile-1",
+            "name": "dev",
+            "type": "ssh",
+            "host": "example.test",
+            "port": 22,
+            "username": "ops",
+            "password": "secret",
+            "passphrase": "key-secret"
+        })];
+        let native = build_export_payload(&profiles, "fileterm").unwrap();
+        assert_eq!(native["containsSecrets"], true);
+        assert_eq!(native["profiles"][0]["password"], "secret");
+        assert_eq!(native["profiles"][0]["passphrase"], "key-secret");
+
+        let compatible = build_export_payload(&profiles, "compatible").unwrap();
+        assert_eq!(compatible[0]["password"], "secret");
+        assert_eq!(compatible[0]["passphrase"], "key-secret");
     }
 }
