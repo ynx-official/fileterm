@@ -1,4 +1,4 @@
-import { Channel, invoke } from '@tauri-apps/api/core'
+import { Channel, invoke, transformCallback } from '@tauri-apps/api/core'
 import { getName, getVersion } from '@tauri-apps/api/app'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import type {
@@ -140,55 +140,43 @@ function normalizePlatform(value: string) {
 }
 
 function subscribe<T>(eventName: string, listener: (payload: T) => void) {
-  // Tauri's `listen()` is async — under React strict mode (dev double-mount)
-  // the first listener's `listen()` promise may still be pending when the
-  // second mount registers another listener. If the first promise resolves
-  // after the cleanup, the underlying Tauri callback stays registered until
-  // `unlisten` IPC completes, and in that window the same event can be
-  // delivered to both the stale and the live listener — surfacing as
-  // duplicated terminal echo ("clear" → "clearclear") and double newlines.
-  //
-  // To close that window we register the callback id synchronously via
-  // `transformCallback`, so the cleanup path can revoke it immediately
-  // (without waiting on IPC), then drive `plugin:event|listen` /
-  // `plugin:event|unlisten` in the background.
-  const internals = (
-    window as unknown as {
-      __TAURI_INTERNALS__?: {
-        transformCallback?: (cb: (payload: unknown) => void) => number
-        unregisterCallback?: (id: number) => void
-      }
-    }
-  ).__TAURI_INTERNALS__
-
-  let revoked = false
-  let eventId: number | undefined
-  let pendingUnlisten = false
-
-  const cleanup = () => {
-    revoked = true
-    // Revoke the JS-side callback first so any in-flight event delivery
-    // (between `listen` resolving and `unlisten` completing) becomes a
-    // no-op even if the backend still has the listener registered.
-    if (callbackId !== undefined && internals?.unregisterCallback) {
-      internals.unregisterCallback(callbackId)
-    }
-    if (eventId !== undefined && !pendingUnlisten) {
-      pendingUnlisten = true
-      void invoke('plugin:event|unlisten', { event: eventName, eventId }).catch(() => undefined)
-    }
+  // React strict mode can clean up the first mount before Tauri's asynchronous
+  // listen registration resolves. Keep the callback inert immediately, ask
+  // the backend to remove the event id, and only then release the JS callback.
+  // Tauri's public unlisten helper currently performs those last two steps in
+  // the opposite order, leaving a race where an in-flight event tries to call
+  // an id that no longer exists during Windows hot reloads and child-window
+  // teardown.
+  const internals = window as unknown as {
+    __TAURI_INTERNALS__?: { unregisterCallback?: (id: number) => void }
+    __TAURI_EVENT_PLUGIN_INTERNALS__?: { unregisterListener?: (event: string, eventId: number) => void }
   }
+  let active = true
+  let eventId: number | null = null
+  let unlistenStarted = false
 
-  if (!internals?.transformCallback) {
-    // Fallback: no Tauri internals available yet — no-op subscription.
-    return () => undefined
-  }
-
-  const callbackId = internals.transformCallback((event) => {
-    if (revoked) return
+  const callbackId = transformCallback((event: unknown) => {
+    if (!active) return
     const payload = (event as { payload?: T })?.payload
     if (payload !== undefined) listener(payload)
   })
+
+  const unregisterFrontend = (id: number) => {
+    internals.__TAURI_EVENT_PLUGIN_INTERNALS__?.unregisterListener?.(eventName, id)
+    internals.__TAURI_INTERNALS__?.unregisterCallback?.(callbackId)
+  }
+
+  const stopListening = () => {
+    if (eventId === null || unlistenStarted) return
+    unlistenStarted = true
+    const registeredEventId = eventId
+    void invoke<void>('plugin:event|unlisten', { event: eventName, eventId: registeredEventId })
+      .then(() => unregisterFrontend(registeredEventId))
+      .catch(() => {
+        // Keep the inert callback registered if the backend did not confirm
+        // removal. This is preferable to an event targeting a missing id.
+      })
+  }
 
   void invoke<number>('plugin:event|listen', {
     event: eventName,
@@ -196,23 +184,15 @@ function subscribe<T>(eventName: string, listener: (payload: T) => void) {
     handler: callbackId
   })
     .then((id) => {
-      if (revoked) {
-        // Already cleaned up — tell the backend to drop the listener.
-        eventId = id
-        pendingUnlisten = true
-        void invoke('plugin:event|unlisten', { event: eventName, eventId: id }).catch(() => undefined)
-      } else {
-        eventId = id
-      }
+      eventId = id
+      if (!active) stopListening()
     })
-    .catch(() => {
-      // If listen failed, revoke the callback so it doesn't leak.
-      if (callbackId !== undefined && internals.unregisterCallback) {
-        internals.unregisterCallback(callbackId)
-      }
-    })
+    .catch(() => internals.__TAURI_INTERNALS__?.unregisterCallback?.(callbackId))
 
-  return cleanup
+  return () => {
+    active = false
+    stopListening()
+  }
 }
 
 export async function createTauriApi(): Promise<FileTermDesktopApi> {

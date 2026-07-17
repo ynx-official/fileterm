@@ -39,6 +39,29 @@ use super::{TransferFileStat, WorkerCmd};
 use crate::services::WorkspaceTabStatus;
 
 const DEFAULT_SSH_KEY_FILES: [&str; 4] = ["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"];
+const SSH_INTERACTION_TIMEOUT: Duration = Duration::from_secs(300);
+// A TCP connection, SSH protocol handshake, or password-auth reply can remain
+// pending indefinitely on a broken server or middlebox. Keep each startup
+// stage bounded so the workspace moves out of `connecting` and the user can
+// retry instead of seeing a permanently reconnecting terminal.
+const SSH_TRANSPORT_TIMEOUT: Duration = Duration::from_secs(30);
+const SSH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const SSH_PASSWORD_AUTH_TIMEOUT: Duration = Duration::from_secs(30);
+
+async fn wait_for_ssh_stage<T>(
+    stage: &str,
+    deadline: Duration,
+    operation: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let timeout_label = if deadline.as_secs() > 0 {
+        format!("{} seconds", deadline.as_secs())
+    } else {
+        format!("{} ms", deadline.as_millis())
+    };
+    timeout(deadline, operation)
+        .await
+        .map_err(|_| format!("{stage} timed out after {timeout_label}"))?
+}
 
 fn resource_monitoring_enabled(profile: &Value) -> bool {
     profile
@@ -1459,13 +1482,27 @@ async fn connect_target_through_jump(
     host: &str,
     port: u16,
 ) -> Result<Handle<ClientHandler>, String> {
-    let channel = jump_handle
-        .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
-        .await
-        .map_err(|error| format!("Jump Host direct-tcpip failed: {error}"))?;
-    russh::client::connect_stream(config, channel.into_stream(), handler)
-        .await
-        .map_err(|error| format!("SSH connect via jump host failed: {error}"))
+    let channel = wait_for_ssh_stage(
+        "SSH jump-host channel setup",
+        SSH_HANDSHAKE_TIMEOUT,
+        async {
+            jump_handle
+                .channel_open_direct_tcpip(host, port as u32, "127.0.0.1", 0)
+                .await
+                .map_err(|error| format!("Jump Host direct-tcpip failed: {error}"))
+        },
+    )
+    .await?;
+    wait_for_ssh_stage(
+        "SSH handshake via jump host",
+        SSH_HANDSHAKE_TIMEOUT,
+        async {
+            russh::client::connect_stream(config, channel.into_stream(), handler)
+                .await
+                .map_err(|error| format!("SSH connect via jump host failed: {error}"))
+        },
+    )
+    .await
 }
 
 /// Creates the raw transport used by russh. Profiles with a SOCKS5 or HTTP
@@ -1618,11 +1655,120 @@ fn build_http_connect_request(
     Ok(request.into_bytes())
 }
 
+fn missing_password_credential(profile: &Value) -> Option<&'static str> {
+    if profile
+        .get("authType")
+        .and_then(Value::as_str)
+        .unwrap_or("password")
+        != "password"
+    {
+        return None;
+    }
+    if profile
+        .get("username")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .is_empty()
+    {
+        return Some("missing-username");
+    }
+    if profile
+        .get("password")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Some("missing-password");
+    }
+    None
+}
+
+async fn ensure_password_credentials(
+    profile: &mut Value,
+    app: &AppHandle,
+    tab_id: &str,
+) -> Result<(), String> {
+    let Some(reason) = missing_password_credential(profile) else {
+        return Ok(());
+    };
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (tx, rx) = oneshot::channel::<Value>();
+    {
+        let state = app.state::<crate::services::workspace::WorkspaceState>();
+        state
+            .pending_interactions
+            .write()
+            .await
+            .insert(request_id.clone(), tx);
+    }
+    let payload = serde_json::json!({
+        "requestId": request_id,
+        "kind": "credentials",
+        "tabId": tab_id,
+        "profileId": profile.get("id").and_then(Value::as_str).unwrap_or(""),
+        "host": profile.get("host").and_then(Value::as_str).unwrap_or(""),
+        "port": profile.get("port").and_then(Value::as_u64).unwrap_or(22),
+        "username": profile.get("username").and_then(Value::as_str),
+        "passwordRequired": true,
+        "reason": reason,
+    });
+    if let Err(error) = app.emit("ssh:interaction", payload) {
+        app.state::<crate::services::workspace::WorkspaceState>()
+            .pending_interactions
+            .write()
+            .await
+            .remove(&request_id);
+        return Err(error.to_string());
+    }
+
+    let response = match timeout(SSH_INTERACTION_TIMEOUT, rx).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => return Err("SSH credentials request canceled".to_string()),
+        Err(_) => {
+            app.state::<crate::services::workspace::WorkspaceState>()
+                .pending_interactions
+                .write()
+                .await
+                .remove(&request_id);
+            return Err("SSH credentials request timed out".to_string());
+        }
+    };
+    if response
+        .get("canceled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Err("SSH credentials request canceled".to_string());
+    }
+    let username = response
+        .get("username")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let password = response
+        .get("password")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if username.is_empty() || password.is_empty() {
+        return Err("SSH username and password are required".to_string());
+    }
+    let object = profile
+        .as_object_mut()
+        .ok_or_else(|| "SSH profile is invalid".to_string())?;
+    object.insert("username".to_string(), Value::String(username.to_string()));
+    object.insert("password".to_string(), Value::String(password.to_string()));
+    Ok(())
+}
+
 async fn open_session(
     profile: &Value,
     app: &AppHandle,
     tab_id: &str,
 ) -> Result<Handle<ClientHandler>, String> {
+    let mut effective_profile = profile.clone();
+    ensure_password_credentials(&mut effective_profile, app, tab_id).await?;
+    let profile = &effective_profile;
     let host = profile
         .get("host")
         .and_then(|h| h.as_str())
@@ -1770,28 +1916,47 @@ async fn open_session(
         return Err("SSH Authentication failed (via jump host)".to_string());
     }
 
-    let stream = connect_ssh_transport(profile, &host, port).await?;
-    let mut handle = russh::client::connect_stream(
-        config.clone(),
-        stream,
-        new_client_handler(app, tab_id, &profile_id, &host, port, trusted.clone()),
+    let stream = wait_for_ssh_stage(
+        "SSH transport connection",
+        SSH_TRANSPORT_TIMEOUT,
+        connect_ssh_transport(profile, &host, port),
     )
-    .await
-    .map_err(|e| format!("SSH connect failed: {}", e))?;
+    .await?;
+    let mut handle = wait_for_ssh_stage("SSH protocol handshake", SSH_HANDSHAKE_TIMEOUT, async {
+        russh::client::connect_stream(
+            config.clone(),
+            stream,
+            new_client_handler(app, tab_id, &profile_id, &host, port, trusted.clone()),
+        )
+        .await
+        .map_err(|error| format!("SSH connect failed: {error}"))
+    })
+    .await?;
     match try_authenticate(&mut handle, &username, &auth_type, profile, app, tab_id).await? {
         AuthenticationResult::Authenticated => Ok(handle),
         AuthenticationResult::NeedsFreshKeyboardInteractive => {
             // See the equivalent jump-host path above: reconnect before
             // keyboard-interactive fallback so russh never stalls on a
             // rejected authentication handle.
-            let stream = connect_ssh_transport(profile, &host, port).await?;
-            let mut retry_handle = russh::client::connect_stream(
-                config,
-                stream,
-                new_client_handler(app, tab_id, &profile_id, &host, port, trusted),
+            let stream = wait_for_ssh_stage(
+                "SSH transport reconnection",
+                SSH_TRANSPORT_TIMEOUT,
+                connect_ssh_transport(profile, &host, port),
             )
-            .await
-            .map_err(|error| format!("SSH reconnect for keyboard-interactive failed: {error}"))?;
+            .await?;
+            let mut retry_handle =
+                wait_for_ssh_stage("SSH protocol re-handshake", SSH_HANDSHAKE_TIMEOUT, async {
+                    russh::client::connect_stream(
+                        config,
+                        stream,
+                        new_client_handler(app, tab_id, &profile_id, &host, port, trusted),
+                    )
+                    .await
+                    .map_err(|error| {
+                        format!("SSH reconnect for keyboard-interactive failed: {error}")
+                    })
+                })
+                .await?;
             if try_keyboard_interactive(
                 &mut retry_handle,
                 &username,
@@ -1967,12 +2132,69 @@ async fn try_authenticate(
                 .and_then(|p| p.as_str())
                 .unwrap_or("");
             if password.is_empty() {
-                return try_system_authenticate(handle, username, profile, app).await;
+                return Err("SSH password is missing".to_string());
             }
-            let res = handle
-                .authenticate_password(username, password)
-                .await
-                .map_err(|e| e.to_string())?;
+            // Some embedded SSH servers do not reply to a direct password
+            // request until the client has first sent the RFC-standard
+            // `none` probe. Electron's ssh2 client always performs this
+            // negotiation before trying the saved password. Mirror that
+            // sequence here for compatibility with those servers.
+            crate::services::logging::session(
+                app,
+                "INFO",
+                "ssh",
+                tab_id,
+                "password authentication method negotiation started",
+            );
+            let negotiation = wait_for_ssh_stage(
+                "SSH authentication method negotiation",
+                SSH_PASSWORD_AUTH_TIMEOUT,
+                async {
+                    handle
+                        .authenticate_none(username)
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            )
+            .await?;
+            if negotiation.success() {
+                crate::services::logging::session(
+                    app,
+                    "INFO",
+                    "ssh",
+                    tab_id,
+                    "SSH server accepted none authentication",
+                );
+                return Ok(AuthenticationResult::Authenticated);
+            }
+            crate::services::logging::session(
+                app,
+                "INFO",
+                "ssh",
+                tab_id,
+                "password authentication started",
+            );
+            let res = wait_for_ssh_stage(
+                "SSH password authentication",
+                SSH_PASSWORD_AUTH_TIMEOUT,
+                async {
+                    handle
+                        .authenticate_password(username, password)
+                        .await
+                        .map_err(|error| error.to_string())
+                },
+            )
+            .await?;
+            crate::services::logging::session(
+                app,
+                "INFO",
+                "ssh",
+                tab_id,
+                format!(
+                    "password authentication response received success={}",
+                    res.success()
+                ),
+            );
             Ok(if res.success() {
                 AuthenticationResult::Authenticated
             } else {
@@ -5184,12 +5406,13 @@ mod tests {
     use super::{
         build_http_connect_request, capture_sudo_password_input, coalesce_terminal_input,
         default_ssh_key_paths, format_sftp_unavailable_reason, is_password_prompt,
-        looks_like_mfa_prompt, looks_like_root_prompt, looks_like_shell_prompt, parent_remote_item,
-        parent_remote_path, remote_bind_host_matches, resolve_shell_file_access,
-        resource_monitoring_enabled, suppress_shell_setup_echo, track_cwd_and_user,
-        track_sudo_prompt_from_terminal, try_keyboard_interactive_with_responder,
-        tunnel_bind_address, validate_tunnel_rule, KeyboardInteractiveRequest,
-        ShellSetupEchoSuppression, SshTunnelRule, SHELL_SETUP_SETTLE_DELAY,
+        looks_like_mfa_prompt, looks_like_root_prompt, looks_like_shell_prompt,
+        missing_password_credential, parent_remote_item, parent_remote_path,
+        remote_bind_host_matches, resolve_shell_file_access, resource_monitoring_enabled,
+        suppress_shell_setup_echo, track_cwd_and_user, track_sudo_prompt_from_terminal,
+        try_keyboard_interactive_with_responder, tunnel_bind_address, validate_tunnel_rule,
+        wait_for_ssh_stage, KeyboardInteractiveRequest, ShellSetupEchoSuppression, SshTunnelRule,
+        SHELL_SETUP_SETTLE_DELAY,
     };
     #[cfg(unix)]
     use super::{forward_local_connection, forward_socks5_connection};
@@ -5214,6 +5437,52 @@ mod tests {
         assert!(!resource_monitoring_enabled(&serde_json::json!({
             "enableResourceMonitoring": false
         })));
+    }
+
+    #[tokio::test]
+    async fn ssh_stage_timeout_is_reported_without_waiting_for_the_client_default() {
+        let error = wait_for_ssh_stage(
+            "SSH password authentication",
+            Duration::from_millis(1),
+            std::future::pending::<Result<(), String>>(),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "SSH password authentication timed out after 1 ms");
+    }
+
+    #[test]
+    fn password_auth_requests_missing_credentials_without_falling_back_to_keys() {
+        assert_eq!(
+            missing_password_credential(&serde_json::json!({
+                "authType": "password",
+                "username": "ops"
+            })),
+            Some("missing-password")
+        );
+        assert_eq!(
+            missing_password_credential(&serde_json::json!({
+                "authType": "password",
+                "password": "secret"
+            })),
+            Some("missing-username")
+        );
+        assert_eq!(
+            missing_password_credential(&serde_json::json!({
+                "authType": "password",
+                "username": "ops",
+                "password": "secret"
+            })),
+            None
+        );
+        assert_eq!(
+            missing_password_credential(&serde_json::json!({
+                "authType": "system",
+                "username": "ops"
+            })),
+            None
+        );
     }
 
     #[cfg(unix)]

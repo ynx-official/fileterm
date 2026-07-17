@@ -13,56 +13,35 @@ const initialWindowMode = new URLSearchParams(window.location.search).get('windo
 document.documentElement.dataset.runtime = 'tauri'
 document.documentElement.classList.toggle('tauri-standalone-window', initialWindowMode !== 'main')
 
-// Global window dragging handler for Tauri custom titlebars. Capture the event
-// before Monaco/child controls can stop propagation; the drag-region checks
-// below still keep buttons, tabs, and editable content interactive.
+const interactiveWindowSelector = [
+  'button',
+  'input',
+  'textarea',
+  'select',
+  'a',
+  '[role="button"]',
+  '[role="menuitem"]',
+  '[contenteditable="true"]',
+  '[data-no-drag]',
+  '.no-drag',
+  '.fs-tab',
+  '.add-tab',
+  '.window-tools',
+  '.window-controls-decorator'
+].join(',')
+
+// Start a native drag only from an explicitly marked, non-interactive area.
+// The old ancestor walk treated large standalone containers as deep drag
+// regions on Windows and could consume clicks meant for form controls.
 const handleWindowMouseDown = (e: MouseEvent) => {
-  // Only trigger dragging on left-click
   if (e.button !== 0) return
+  const target = e.target instanceof Element ? e.target : null
+  if (!target || target.closest(interactiveWindowSelector)) return
+  if (!target.closest('[data-tauri-drag-region]')) return
 
-  let target = e.target as HTMLElement | null
-  let isDragRegion = false
-
-  while (target) {
-    const tagName = target.tagName.toLowerCase()
-
-    // Exclude basic interactive elements
-    if (
-      tagName === 'button' ||
-      tagName === 'input' ||
-      tagName === 'textarea' ||
-      tagName === 'select' ||
-      tagName === 'a'
-    ) {
-      return
-    }
-
-    // Exclude tabs, tab-tools, and other interactive containers
-    if (
-      target.getAttribute('role') === 'button' ||
-      target.getAttribute('contenteditable') === 'true' ||
-      target.classList.contains('fs-tab') ||
-      target.classList.contains('add-tab') ||
-      target.classList.contains('window-tools') ||
-      target.classList.contains('window-controls-decorator') ||
-      target.closest('.no-drag')
-    ) {
-      return
-    }
-
-    if (target.hasAttribute('data-tauri-drag-region')) {
-      isDragRegion = true
-      break
-    }
-
-    target = target.parentElement
-  }
-
-  if (isDragRegion) {
-    void getCurrentWindow()
-      .startDragging()
-      .catch((err) => console.error('Failed to start window dragging:', err))
-  }
+  void getCurrentWindow()
+    .startDragging()
+    .catch((err) => console.error('Failed to start window dragging:', err))
 }
 
 window.addEventListener('mousedown', handleWindowMouseDown, true)
@@ -75,6 +54,7 @@ void createTauriApi()
     // only after native metadata resolves so first-read consumers never see
     // placeholder version, architecture, or platform fields.
     window.fileterm = api
+    document.documentElement.dataset.platform = api.platform
     root.render(
       <React.StrictMode>
         <ErrorBoundary>

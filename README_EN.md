@@ -26,7 +26,9 @@
 Download the latest release from [GitHub Releases](https://github.com/St0ff3l/fileterm/releases/latest):
 
 - **macOS**: packages for Apple Silicon (arm64) and Intel (x64).
-- **Windows**: x64 installer and portable packages.
+- **Windows**: x64 NSIS installer; installed production builds download, verify, and install updates after restart.
+
+macOS update checks open the matching GitHub Release page for a user-selected download. Signed in-app updates are used by installed Windows releases.
 
 Want to run from source or contribute? Continue to [Getting Started from Source](#getting-started-from-source).
 
@@ -66,15 +68,15 @@ The official release focuses on the most frequent `SSH / SFTP / FTP / FTPS` work
 
 ## Technology Stack
 
-| Desktop  | Renderer     | Language   | Terminal | Editor        | Protocols        | Tooling        |
-| -------- | ------------ | ---------- | -------- | ------------- | ---------------- | -------------- |
-| Electron | React + Vite | TypeScript | xterm.js | Monaco Editor | ssh2 + basic-ftp | npm workspaces |
+| Desktop  | Renderer     | Language          | Terminal | Editor        | Protocols                             | Tooling                |
+| -------- | ------------ | ----------------- | -------- | ------------- | ------------------------------------- | ---------------------- |
+| Tauri v2 | React + Vite | Rust + TypeScript | xterm.js | Monaco Editor | russh/russh-sftp + suppaftp + tokio-* | Cargo + npm workspaces |
 
 ```txt
-main process   -> Electron services, IPC, protocol lifecycle
-preload bridge -> Secure API boundary for renderer
 renderer UI    -> React workspace, tabs, files, terminal
-protocols      -> SSH shell, SFTP, FTP/FTPS adapters
+Tauri bridge   -> typed Rust command/event boundary
+Rust services  -> session lifecycle, storage, update and protocol services
+protocols      -> russh SSH/SFTP, FTP/FTPS, Telnet and Serial adapters
 theme system   -> tokens -> vars -> skins -> terminal colors
 ```
 
@@ -83,16 +85,16 @@ theme system   -> tokens -> vars -> skins -> terminal colors
 ```txt
 Renderer UI
   -> Application State
-    -> Preload API
-      -> IPC
-        -> Desktop Services
-          -> Session Controllers
-            -> Protocol Clients
+    -> Tauri API bridge
+      -> Rust commands/events
+        -> Desktop services
+          -> Session workers
+            -> Protocol clients
 ```
 
 - `packages/core` is the single source of truth for domain models.
 - The renderer never accesses SSH, SFTP, or FTP/FTPS protocol clients directly.
-- All system capabilities are exposed through `main -> preload -> renderer`.
+- All system capabilities are exposed through `Rust commands/events -> tauri-api.ts -> renderer`.
 - SSH/SFTP and FTP/FTPS remain separate at controller and protocol layers.
 - Transfer progress enters one transfer system instead of being maintained separately by components.
 
@@ -116,22 +118,30 @@ npm run dev
 
 ```bash
 npm run dev
+npm run test
 npm run typecheck
 npm run build
 npm run release:mac
 npm run release:win
 ```
 
+### Releases and Updates
+
+- A `vX.Y.Z` tag on a `release/*` commit runs the Tauri-only Release Action and publishes macOS arm64/x64 DMGs plus the Windows x64 NSIS installer.
+- The Windows job also publishes the signed NSIS installer, its `.sig` signature, and `latest.json`; installed Windows clients verify that manifest before updating.
+- Configure the repository Actions Secret `TAURI_SIGNING_PRIVATE_KEY` with the Tauri updater private-key contents. Never commit that private key.
+- macOS release bundles use ad-hoc signing (without an Apple Developer certificate or notarization) and deliberately keep the GitHub Release download flow rather than using the in-app updater. First-run users may still need to whitelist the app in Privacy & Security.
+
 ## Repository Layout
 
 ```txt
 fileterm/
   apps/
-    desktop/                 # Electron + React desktop app
+    tauri/                   # Tauri + Rust desktop app
       src/
-        main/                # main process, IPC, services
-        preload/             # secure renderer API
+        bridge/              # typed Tauri command/event API
         renderer/            # React workspace UI
+      src-tauri/             # Rust commands, services, sessions, and bundling
   packages/
     core/                    # domain types
     storage/                 # repository abstractions
@@ -150,7 +160,7 @@ fileterm/
 Post-release priorities:
 
 1. Keep improving the stability and usability of the `SSH / SFTP / FTP / FTPS` core workflows.
-2. Split `workspace-service.ts`, `session-controllers.ts`, and `App.tsx` to clarify layer boundaries.
+2. Keep refining the Tauri workspace, session service, and renderer boundaries.
 3. Continue consolidating domain types in `packages/core`.
 4. Improve transfer tasks, errors, themes, terminal input, file drawers, and the desktop shell.
 5. Maintain release quality and distribution for macOS and Windows.
@@ -187,7 +197,7 @@ Thank you to everyone who makes FileTerm better.
         <sub><b>St0ff3l</b></sub>
       </a>
     </td>
-    <td>Built the backend core, including Electron main-process services, IPC, session control, file capabilities, and workspace state.</td>
+    <td>Built the Rust/Tauri backend core, including the command/event boundary, session control, file capabilities, and workspace state.</td>
   </tr>
   <tr>
     <td align="center" width="180">

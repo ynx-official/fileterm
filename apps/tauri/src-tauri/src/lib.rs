@@ -8,7 +8,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{atomic::AtomicBool, atomic::Ordering, Mutex},
 };
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::image::Image;
 use tauri::{
     menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
@@ -719,6 +719,107 @@ fn child_window_should_be_transparent(platform: &str, decorations: bool) -> bool
     platform == "macos" && !decorations
 }
 
+#[cfg(target_os = "windows")]
+fn prepare_windows_icon(size: u32, content_size: u32) -> Result<Image<'static>, AppError> {
+    use image::{imageops, imageops::FilterType, RgbaImage};
+
+    let source = image::load_from_memory(include_bytes!("../../build/icon.png"))
+        .map_err(|error| AppError::Window(error.to_string()))?
+        .into_rgba8();
+    let (mut min_x, mut min_y) = (source.width(), source.height());
+    let (mut max_x, mut max_y) = (0, 0);
+    let mut has_visible_pixel = false;
+
+    for (x, y, pixel) in source.enumerate_pixels() {
+        if pixel[3] > 8 {
+            has_visible_pixel = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+
+    if !has_visible_pixel {
+        return Err(AppError::Window(
+            "Windows icon has no visible pixels".to_string(),
+        ));
+    }
+
+    let cropped =
+        imageops::crop_imm(&source, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1).to_image();
+    let scale = content_size as f64 / cropped.width().max(cropped.height()) as f64;
+    let resized_width = (cropped.width() as f64 * scale).round().max(1.0) as u32;
+    let resized_height = (cropped.height() as f64 * scale).round().max(1.0) as u32;
+    let resized = imageops::resize(
+        &cropped,
+        resized_width,
+        resized_height,
+        FilterType::Lanczos3,
+    );
+    let mut canvas = RgbaImage::new(size, size);
+    imageops::overlay(
+        &mut canvas,
+        &resized,
+        ((size - resized_width) / 2) as i64,
+        ((size - resized_height) / 2) as i64,
+    );
+
+    Ok(Image::new_owned(canvas.into_raw(), size, size))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_app_icon(scale_factor: f64) -> Result<Image<'static>, AppError> {
+    // Windows uses a 32px large icon at 100% scaling. Supplying the matching
+    // physical size avoids a second taskbar resample at 125%/150%/200% DPI.
+    let size = (32.0 * scale_factor).round().clamp(32.0, 128.0) as u32;
+    let content_size = (size as f64 * 0.96).round() as u32;
+    prepare_windows_icon(size, content_size)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_tray_icon(scale_factor: f64) -> Result<Image<'static>, AppError> {
+    // Electron feeds Tray a 16x16 logical icon on Windows. Tauri accepts raw
+    // physical pixels, so account for Windows DPI here to avoid the shell
+    // upscaling a fixed 16px bitmap on 125%/150%/200% displays.
+    let size = (16.0 * scale_factor).round().clamp(16.0, 64.0) as u32;
+    let content_size = (size as f64 * 0.94).round() as u32;
+    prepare_windows_icon(size, content_size)
+}
+
+#[cfg(target_os = "windows")]
+fn prefer_windows_native_rounded_corners(window: &WebviewWindow<Wry>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::{
+        Foundation::HWND,
+        Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+            DWM_WINDOW_CORNER_PREFERENCE,
+        },
+    };
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let hwnd = match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
+        _ => return,
+    };
+
+    // SetWindowRgn uses a 1-bit GDI mask, which makes a large custom radius
+    // visibly jagged. Let DWM own the outline instead: it is anti-aliased,
+    // adapts to DPI, and automatically becomes square while maximized.
+    let preference: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &preference as *const _ as *const std::ffi::c_void,
+            std::mem::size_of_val(&preference) as u32,
+        );
+    }
+}
+
 pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), AppError> {
     if input.kind == "file-editor"
         && input.source.as_deref() == Some("remote")
@@ -766,10 +867,10 @@ pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), 
         _ => return Ok(()),
     };
 
-    // Frameless macOS windows need a transparent native surface so the
+    // Frameless macOS windows use a transparent native surface so the
     // renderer's rounded standalone frame can clip the four corners. Keep
-    // Windows/Linux opaque: transparent Wry windows there can flash during
-    // startup and have different shadow/compositor behaviour.
+    // Windows opaque: WebView2 otherwise exposes the desktop through those
+    // corners when the renderer applies its rounded frame.
     let transparent = child_window_should_be_transparent(std::env::consts::OS, decorations);
     let background_color = if transparent {
         Color(0, 0, 0, 0)
@@ -802,6 +903,12 @@ pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), 
             );
             AppError::Window(error.to_string())
         })?;
+    #[cfg(target_os = "windows")]
+    window
+        .set_icon(windows_app_icon(window.scale_factor().unwrap_or(1.0))?)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    #[cfg(target_os = "windows")]
+    prefer_windows_native_rounded_corners(&window);
     crate::services::logging::info(
         app,
         "window",
@@ -819,6 +926,23 @@ pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), 
         });
     }
     Ok(())
+}
+
+fn open_child_window_from_native_event(app: &AppHandle, input: OpenWindowInput) {
+    // Tauri/WebView2 documents the same Windows deadlock for synchronous
+    // event handlers as for synchronous commands. Tray and native menu
+    // callbacks therefore hand the blocking builder work to a worker thread.
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let kind = input.kind.clone();
+        if let Err(error) = open_child_window(&app, input) {
+            crate::services::logging::error(
+                &app,
+                "window",
+                format!("native request failed kind={kind} error={error}"),
+            );
+        }
+    });
 }
 
 fn show_main_window(app: &AppHandle<Wry>) {
@@ -883,7 +1007,13 @@ pub(crate) fn request_main_window_close(app: &AppHandle<Wry>, is_quit: bool) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Windows packages use Tauri's signed updater. macOS deliberately keeps
+    // the Release-page flow so users choose the GitHub download themselves.
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    builder
         .setup(|app| {
             crate::storage::migrate_legacy_data_once(app.handle())?;
             crate::services::logging::init(app.handle());
@@ -917,6 +1047,13 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             {
                 let _ = main_window.set_decorations(false);
+                prefer_windows_native_rounded_corners(&main_window);
+                main_window
+                    .set_icon(
+                        windows_app_icon(main_window.scale_factor().unwrap_or(1.0))
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
             }
 
             let app_handle = app.handle().clone();
@@ -957,7 +1094,10 @@ pub fn run() {
             // one physical source pixel per output pixel on @2x displays.
             let tray_icon = Image::from_bytes(include_bytes!("../../build/trayTemplate@2x.png"))
                 .map_err(|error| error.to_string())?;
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            let tray_icon = windows_tray_icon(main_window.scale_factor().unwrap_or(1.0))
+                .map_err(|error| error.to_string())?;
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let tray_icon = app
                 .default_window_icon()
                 .cloned()
@@ -971,7 +1111,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "tray-connection-manager" => {
-                        let _ = open_child_window(
+                        open_child_window_from_native_event(
                             app,
                             OpenWindowInput {
                                 kind: "connection-manager".to_string(),
@@ -988,7 +1128,7 @@ pub fn run() {
                         );
                     }
                     "tray-command-manager" => {
-                        let _ = open_child_window(
+                        open_child_window_from_native_event(
                             app,
                             OpenWindowInput {
                                 kind: "command-manager".to_string(),
@@ -1027,7 +1167,7 @@ pub fn run() {
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "new-connection" => {
-                let _ = open_child_window(
+                open_child_window_from_native_event(
                     app,
                     OpenWindowInput {
                         kind: "connection-form".to_string(),
@@ -1044,7 +1184,7 @@ pub fn run() {
                 );
             }
             "connection-manager" => {
-                let _ = open_child_window(
+                open_child_window_from_native_event(
                     app,
                     OpenWindowInput {
                         kind: "connection-manager".to_string(),
@@ -1061,7 +1201,7 @@ pub fn run() {
                 );
             }
             "command-manager" => {
-                let _ = open_child_window(
+                open_child_window_from_native_event(
                     app,
                     OpenWindowInput {
                         kind: "command-manager".to_string(),
@@ -1249,6 +1389,9 @@ mod tests {
         QuitPreparationRegistry, WindowMenuKind,
     };
 
+    #[cfg(target_os = "windows")]
+    use super::{windows_app_icon, windows_tray_icon};
+
     #[test]
     fn keeps_mac_and_non_mac_window_shortcuts_distinct() {
         assert_eq!(application_menu_accelerators("macos"), ("Cmd+Q", "Cmd+W"));
@@ -1264,6 +1407,16 @@ mod tests {
         assert!(tray_icon_should_be_template("macos"));
         assert!(!tray_icon_should_be_template("windows"));
         assert!(!tray_icon_should_be_template("linux"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn prepares_windows_icons_like_the_electron_runtime() {
+        let app_icon = windows_app_icon(1.5).unwrap();
+        let tray_icon = windows_tray_icon(1.5).unwrap();
+
+        assert_eq!((app_icon.width(), app_icon.height()), (48, 48));
+        assert_eq!((tray_icon.width(), tray_icon.height()), (24, 24));
     }
 
     #[test]
@@ -1288,6 +1441,7 @@ mod tests {
         assert!(child_window_should_be_transparent("macos", false));
         assert!(!child_window_should_be_transparent("macos", true));
         assert!(!child_window_should_be_transparent("windows", false));
+        assert!(!child_window_should_be_transparent("windows", true));
         assert!(!child_window_should_be_transparent("linux", false));
     }
 

@@ -169,7 +169,9 @@ const zhCN = {
   invalidHost: '请输入有效主机地址，支持域名、IPv4 或 IPv6；不要包含协议、端口或路径。',
   missingSshPassword: '请填写 SSH 密码。',
   missingPrivateKeyPath: '请选择或填写私钥路径。',
-  passwordAuthHint: '密码可以留空。若本机已配置 SSH 密钥或 agent，会先自动尝试这些登录方式。',
+  passwordAuthHint:
+    '为保护凭据，已保存密码不会在编辑页回显。留空保存会保留原密码；输入新密码才会覆盖。若没有已保存密码，连接时会提示补充。',
+  passwordSavedHint: '本机已保存密码。为保护凭据不会回显；留空保存会保留原密码，输入新密码才会覆盖。',
   sshAuthPromptTitle: 'SSH 登录',
   sshAuthPromptDescription: '当前连接缺少可直接使用的登录信息，请先补充用户名和密码。',
   sshAuthPromptPasswordRequired: '请输入远程主机的 SSH 登录密码。',
@@ -661,7 +663,9 @@ const enUS: typeof zhCN = {
   missingSshPassword: 'Please enter the SSH password.',
   missingPrivateKeyPath: 'Please choose or enter the private key path.',
   passwordAuthHint:
-    'Password can be left blank. If this computer already has SSH keys or an SSH agent configured, FileTerm will try those first.',
+    'Saved passwords are never shown again in this form. Saving with this field empty keeps the existing password; enter a new value only to replace it. If no password is saved, FileTerm will ask for one when connecting.',
+  passwordSavedHint:
+    'A password is saved on this computer. It is never shown again in this form; saving with this field empty keeps it, while entering a new value replaces it.',
   sshAuthPromptTitle: 'SSH Sign In',
   sshAuthPromptDescription:
     'This connection does not yet have usable login credentials. Enter a username and password to continue.',

@@ -17,6 +17,7 @@ export function ConnectionModal({
   isSubmitting = false,
   mode,
   form,
+  hasSavedPassword = false,
   setForm,
   onClearHostFingerprint,
   onSubmit,
@@ -29,6 +30,7 @@ export function ConnectionModal({
   isSubmitting?: boolean
   mode: ConnectionFormMode
   form: CreateProfileInput
+  hasSavedPassword?: boolean
   setForm(value: CreateProfileInput | ((prev: CreateProfileInput) => CreateProfileInput)): void
   onClearHostFingerprint?(): void
   onSubmit(event: FormEvent<HTMLFormElement>): void
@@ -321,7 +323,9 @@ export function ConnectionModal({
                       <SshPrivateKeyField form={form} setForm={setForm} />
                     ) : null}
                     {form.type === 'ssh' && form.authType === 'password' ? (
-                      <div className="span-2 ssh-auth-hint">{t.passwordAuthHint}</div>
+                      <div className="span-2 ssh-auth-hint">
+                        {mode === 'edit' && hasSavedPassword ? t.passwordSavedHint : t.passwordAuthHint}
+                      </div>
                     ) : form.type === 'ssh' && form.authType === 'keyboard-interactive' ? (
                       <div className="span-2 ssh-auth-hint">
                         可选：先尝试此密码；服务器需要 OTP/MFA 时，会弹出单独的验证码输入框。

@@ -909,14 +909,9 @@ export function App() {
             onEditProfile={openEditConnection}
             onOpenProfile={(profileId) => {
               if (desktopApi) {
-                void desktopApi
-                  .openProfileFromManager(profileId)
-                  .then(() => {
-                    closeCurrentWindow()
-                  })
-                  .catch((err: Error) => {
-                    reportError(setError, '从管理器打开连接', err)
-                  })
+                void desktopApi.openProfileFromManager(profileId).catch((err: Error) => {
+                  reportError(setError, '从管理器打开连接', err)
+                })
                 return
               }
               void openProfile(profileId)
@@ -937,6 +932,11 @@ export function App() {
               groupOptions={connectionGroupOptions}
               mode={editingProfileId ? 'edit' : 'create'}
               form={form}
+              hasSavedPassword={
+                editingProfileId
+                  ? workspace.profiles.find((profile) => profile.id === editingProfileId)?.hasSavedPassword === true
+                  : false
+              }
               isSubmitting={isBusy}
               setForm={updateForm}
               onClearHostFingerprint={() => {
@@ -1158,7 +1158,7 @@ export function App() {
   return (
     <>
       <div
-        className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''} ${isHomeWorkspaceVisible ? 'is-home-active' : ''} ${isSystemSidebarCollapsed ? 'is-sidebar-collapsed' : ''} ${isResizingSidebar ? 'is-resizing-sidebar' : ''}`}
+        className={`fs-shell ${isWindowsDesktop ? 'has-window-menubar' : ''} ${isMaximized ? 'is-window-maximized' : ''} ${isHomeWorkspaceVisible ? 'is-home-active' : ''} ${isSystemSidebarCollapsed ? 'is-sidebar-collapsed' : ''} ${isResizingSidebar ? 'is-resizing-sidebar' : ''}`}
         style={
           {
             '--sidebar-width': `${resolvedSidebarWidth}px`,

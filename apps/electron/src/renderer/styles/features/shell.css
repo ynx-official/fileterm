@@ -30,6 +30,10 @@
   -webkit-app-region: no-drag;
 }
 
+.window-menu-items {
+  padding-left: 8px;
+}
+
 .window-control-buttons {
   margin-left: auto;
 }

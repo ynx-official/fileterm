@@ -32,6 +32,11 @@ const WORKER_FILE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(20);
 /// `cmd_rx.recv()` 会返回 None，自然走清理路径。
 const WORKER_DISCONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Let a child-window close command resolve its IPC callback before destroying
+/// the calling WebView. Destroying synchronously makes WebView2 report a
+/// missing callback id and can leave renderer cleanup half-finished.
+const CHILD_WINDOW_DESTROY_DELAY: Duration = Duration::from_millis(25);
+
 async fn send_terminal_input(
     state: &crate::services::workspace::WorkspaceState,
     tab_id: &str,
@@ -213,12 +218,12 @@ pub async fn app_check_for_updates(app: AppHandle) -> Result<serde_json::Value, 
 
 #[tauri::command]
 pub async fn app_download_update(app: AppHandle) -> Result<(), AppError> {
-    crate::services::updates::open_release_page(&app).await
+    crate::services::updates::download(&app).await
 }
 
 #[tauri::command]
 pub async fn app_install_update(app: AppHandle) -> Result<(), AppError> {
-    crate::services::updates::open_release_page(&app).await
+    crate::services::updates::install(&app).await
 }
 
 #[tauri::command]
@@ -654,7 +659,9 @@ pub async fn app_upload_webdav_sync(app: AppHandle) -> Result<serde_json::Value,
 pub async fn app_download_webdav_sync(app: AppHandle) -> Result<serde_json::Value, AppError> {
     let _guard = lock_library_after_transfer_hydration(&app).await?;
     let result = crate::services::webdav::download(&app).await?;
-    if result.get("imported").and_then(Value::as_u64).unwrap_or(0) > 0 {
+    let changed = result.get("imported").and_then(Value::as_u64).unwrap_or(0)
+        + result.get("updated").and_then(Value::as_u64).unwrap_or(0);
+    if changed > 0 {
         if let Ok(snapshot) = get_workspace_snapshot_unlocked(app.clone()).await {
             let _ = app.emit("workspace:snapshot", snapshot);
         }
@@ -721,12 +728,26 @@ pub struct OpenWindowInput {
 }
 
 #[tauri::command]
-pub fn app_open_window(app: AppHandle, input: OpenWindowInput) -> Result<(), AppError> {
-    crate::open_child_window(&app, input)
+pub async fn app_open_window(app: AppHandle, input: OpenWindowInput) -> Result<(), AppError> {
+    // WebView2 can deadlock when WebviewWindowBuilder is used from a
+    // synchronous Tauri command on Windows. Keep the command asynchronous and
+    // perform the blocking builder call on a worker thread so the native event
+    // loop remains able to finish WebView2 initialization and service every
+    // other invoke request.
+    tauri::async_runtime::spawn_blocking(move || crate::open_child_window(&app, input))
+        .await
+        .map_err(|error| AppError::Window(format!("子窗口创建任务失败: {error}")))?
 }
 
 fn renderer_approved_close_should_destroy(window_label: &str) -> bool {
     window_label != "main"
+}
+
+fn destroy_child_window_after_invoke_reply(window: WebviewWindow) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(CHILD_WINDOW_DESTROY_DELAY).await;
+        let _ = window.destroy();
+    });
 }
 
 #[tauri::command]
@@ -766,9 +787,10 @@ pub async fn app_window_action(
                 let _ = window.close();
             } else {
                 // A child renderer has already approved this close. Destroy it
-                // directly so file-editor CloseRequested does not ask twice.
+                // after this command's invoke reply so WebView2 does not try to
+                // resolve the callback in an already-destroyed renderer.
                 crate::resolve_file_editor_close(&app, &window);
-                let _ = window.destroy();
+                destroy_child_window_after_invoke_reply(window);
             }
         }
         "hide" => {

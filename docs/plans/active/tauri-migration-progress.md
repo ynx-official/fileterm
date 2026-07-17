@@ -1,4 +1,4 @@
-# Tauri 迁移进度与 Electron 并行运行时差距
+# Tauri 迁移进度与 Electron 历史参考差距
 
 | 项目     | 值                                                                                                                         |
 | -------- | -------------------------------------------------------------------------------------------------------------------------- |
@@ -13,13 +13,13 @@
 
 ### 运行时与版本核对（2026-07-15）
 
-| 项目            | 当前事实                                                                                              |
-| --------------- | ----------------------------------------------------------------------------------------------------- |
-| Electron 运行时 | Electron `42.4.0` 位于 `apps/electron`，拥有独立 main、preload、renderer、测试和打包配置。            |
-| Tauri 运行时    | Tauri v2 位于 `apps/tauri`；Rust crate 锁定 `tauri 2.11.5`、`russh 0.62.2`、`russh-sftp 2.3.0`。      |
-| npm manifest    | `apps/tauri/package.json` 与 `apps/electron/package.json` 分别声明运行时依赖；lockfile 同时锁定两者。 |
-| 数据边界        | 两个 app 使用不同 userData；Tauri 仅首次 current-wins 导入 Electron 数据，之后禁止 live merge。       |
-| 前端边界        | React renderer、CSS、hooks、bridge/preload 均物理分叉；共享只允许进入 `packages/*`。                  |
+| 项目          | 当前事实                                                                                                         |
+| ------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Electron 参考 | Electron `42.4.0` 位于 `apps/electron`，仅保留 main、preload、renderer 作为历史实现对照；不参与 CI、测试或打包。 |
+| Tauri 运行时  | Tauri v2 位于 `apps/tauri`；Rust crate 锁定 `tauri 2.11.5`、`russh 0.62.2`、`russh-sftp 2.3.0`。                 |
+| npm manifest  | `apps/tauri/package.json` 与 `apps/electron/package.json` 分别声明运行时依赖；lockfile 同时锁定两者。            |
+| 数据边界      | 两个 app 使用不同 userData；Tauri 仅首次 current-wins 导入 Electron 数据，之后禁止 live merge。                  |
+| 前端边界      | React renderer、CSS、hooks、bridge/preload 均物理分叉；共享只允许进入 `packages/*`。                             |
 
 因此，当前不是“二选一”的切换阶段：两个 runtime 并行演进。剩余 Tauri 工作集中在跨平台构建、真实服务/设备验收和签名发布；跨端功能必须单独计划与验证。
 
@@ -101,7 +101,7 @@
 - ✅ root SFTP 两阶段提交：`/tmp` 任务 staging → 目标同目录 `.fileterm-part` → 正式目标，逐阶段大小校验并兼容迁移旧 journal；正式目标不会直接参与 `/tmp` 跨文件系统移动。
 - ✅ WebDAV：HTTPS 默认、Basic Auth、ETag 前置条件冲突检测、SHA-256 bundle 校验、秘密字段剥离与 5 MB 输入上限；本地 HTTP fixture 已覆盖 HEAD、成功 PUT、GET、`If-Match` 412 和下载 hash 校验。
 - ✅ Electron parity：SSH Config/外部 JSON profile 导入导出、命令历史/发送偏好、文件编辑器关闭确认、跨窗口 UI/最大化事件、CSP、应用/SSH/协议错误本地日志。
-- ✅ 更新检查：GitHub Release 的版本检查与安全发布页交接。签名的应用内静默安装依赖未提供的 Tauri updater 公钥、更新清单与公证资产，保留在 Phase 5 发布前置，不能伪造为已启用。
+- ✅ 更新检查：Windows 使用 Tauri updater 的固定公钥、GitHub Release `latest.json`、签名 NSIS 安装器及 `.sig`，按“下载验签 → 重启安装”执行；macOS 保持 GitHub Release 检查与下载页交接。首次实际 Windows 发版仍依赖仓库配置 `TAURI_SIGNING_PRIVATE_KEY` Secret。
 
 质量记录见 [`../../quality/tauri-phase4-validation.md`](../../quality/tauri-phase4-validation.md)。
 发行候选的真实服务、设备和三平台步骤见 [`../../quality/tauri-rc-protocol-checklist.md`](../../quality/tauri-rc-protocol-checklist.md)。
@@ -109,7 +109,7 @@
 ### Phase 5：发行与切换 ⚠️ 进行中
 
 - ✅ macOS Tauri production DMG 可打包，并已有本机性能/RSS 基线
-- 🔲 Tauri updater + 签名公证
+- ✅ Windows updater + GitHub Release 签名发布链路（待首次携带仓库 Secret 的实际发版验证）
 - 🔲 Windows/Linux 安装包与三平台签名/公证
 - 🔲 同版本、同配置的三平台性能对比
 - ✅ 自动 legacy 数据迁移 + 文件级失败回滚
@@ -134,7 +134,7 @@
 | **FTP/FTPS**               | `services/sessions/ftp-session-controller.ts`                  | ✅ `sessions/ftp.rs`，plain/显式/隐式 FTPS 和传输操作均已接入。                                                                                                          |
 | **Telnet**                 | `services/sessions/telnet-session-controller.ts`               | ✅ `sessions/telnet.rs`，RFC 854 IAC/NAWS/TERMINAL-TYPE 实现完成。                                                                                                       |
 | **Serial**                 | `services/sessions/serial-session-controller.ts`               | ✅ `sessions/serial.rs`；`mark/space` parity 显式拒绝（上游跨平台限制）。                                                                                                |
-| **Auto-update**            | `services/app-update-service.ts`                               | ✅ GitHub Release check + 发布页模式；签名 in-app updater 是 Phase 5 发布资产前置。                                                                                      |
+| **Auto-update**            | `services/app-update-service.ts`                               | ✅ Windows Tauri in-app updater（签名清单/NSIS 安装器 + `.sig`/重启安装）与 macOS 发布页模式；Electron 只作历史行为对照。                                                |
 | **Profile import/export**  | `services/connection-config-codec.ts`                          | ✅ SSH config/JSON preview + commit、fileterm/compatible 导出。                                                                                                          |
 | **Command history**        | `services/file-profile-repository.ts`                          | ✅ 每 profile 历史与命令发送偏好已持久化。                                                                                                                               |
 | **openLogsDirectory**      | `apps/electron/src/main/main.ts`                               | ✅ Rust command 打开应用日志目录。                                                                                                                                       |
@@ -203,7 +203,7 @@
 12. ~~**FTP/FTPS**（suppaftp）~~ ✅ 已完成
 13. ~~**Telnet**（tokio::net + RFC 854）~~ ✅ 已完成
 14. ~~**Serial**（tokio-serial）~~ ✅ 已完成
-15. **签名应用内更新**（需要 release endpoint、公钥和公证资产；Release-page check 已完成）
+15. ~~**Windows 签名应用内更新**（固定公钥、Release endpoint、`latest.json` 与 NSIS 安装器 + `.sig`）~~ ✅；首次发版仍需配置 GitHub Secret
 
 ### P3（质量加固）
 
@@ -234,10 +234,10 @@ Tauri 迁移整体完成的验收标准（与 Electron 原版功能对齐）：
 - [x] 远程文件多编码：gbk/big5/euc-jp/shift_jis/euc-kr 等
 - [x] Shell setup injection：POSIX 双重门控
 - [x] Auto-reconnect：2000ms 延迟
-- [x] WebDAV 同步：upload + download + ETag + content hash
+- [x] WebDAV 同步：完整凭据 upload + download + 重复连接更新 + ETag + content hash
 - [x] Profile import/export：SSH config + 外部 JSON + fileterm/compatible
-- [x] Auto-update：GitHub Release check + 安全发布页更新路径
-- [ ] 签名的 Tauri in-app updater：待 release endpoint、公钥和公证资产
+- [x] Auto-update：macOS GitHub Release 下载路径；Windows 签名 in-app updater、Release endpoint 与发布 Action 已接入
+- [ ] Windows updater 首次正式发版演练（需仓库 `TAURI_SIGNING_PRIVATE_KEY` Secret）
 - [ ] 三平台签名/公证 + 安装包
 - [ ] Tauri 真实协议验收：OpenSSH sshd（PAM MFA、跳板、远程转发、root、CWD、指标）、受信任显式/隐式 FTPS、WebDAV 服务、Telnet 设备/第三方代理；本机 HTTP/SOCKS5、`-L/-D`、ETag/hash fixture 已通过
 - [ ] Serial 验收：macOS/Linux/Windows 实体或可信虚拟串口；`mark/space` 保持明确不支持

@@ -6,6 +6,7 @@ import { CommandEditorModal, emptyCommandForm, toCommandTemplateInput } from './
 import { AppIcon } from '../common/AppIcon'
 import { CloseButton } from '../common/CloseButton'
 import { ManagerInlineFolderRow } from '../common/ManagerInlineFolderRow'
+import { targetsNestedManagerControl } from '../common/manager-interactions'
 import { managerDropClass, resolveManagerDropPosition } from '../common/manager-drag'
 import { usePointerSortFallback, type PointerSortTarget } from '../../hooks/usePointerSortFallback'
 
@@ -400,14 +401,18 @@ export function CommandManagerModal({
           data-fileterm-sort-id={node.id}
           data-fileterm-sort-kind={isFolder ? 'folder' : 'command'}
           draggable={false}
-          onPointerDown={(event) => handlePointerDown(event, node.id)}
+          onPointerDown={(event) => {
+            if (!targetsNestedManagerControl(event)) {
+              handlePointerDown(event, node.id)
+            }
+          }}
           onDragStart={(e) => handleDragStart(e, node.id)}
           onDragOver={(e) => handleDragOver(e, node.id)}
           onDragLeave={handleDragLeave}
           onDrop={(e) => handleDrop(e, node.id)}
           onDragEnd={handleDragEnd}
-          onDoubleClick={() => {
-            if (suppressRowClickRef.current) {
+          onDoubleClick={(event) => {
+            if (targetsNestedManagerControl(event) || suppressRowClickRef.current) {
               return
             }
             if (isFolder) {
@@ -416,8 +421,8 @@ export function CommandManagerModal({
             }
             openEditorWindow('edit', node.id)
           }}
-          onClick={() => {
-            if (suppressRowClickRef.current) {
+          onClick={(event) => {
+            if (targetsNestedManagerControl(event) || suppressRowClickRef.current) {
               return
             }
             if (isFolder) {
@@ -425,7 +430,7 @@ export function CommandManagerModal({
             }
           }}
           onKeyDown={(event) => {
-            if (event.key !== 'Enter') {
+            if (targetsNestedManagerControl(event) || event.key !== 'Enter') {
               return
             }
             event.preventDefault()

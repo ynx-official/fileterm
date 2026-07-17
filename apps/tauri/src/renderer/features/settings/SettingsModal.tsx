@@ -280,7 +280,8 @@ export function SettingsModal({
               <section className="settings-section">
                 <h3>WebDAV 配置同步</h3>
                 <p className="settings-tools-hint">
-                  手动上传和下载连接配置。密码只保存在主进程的本地受限文件中，导出包不会携带连接凭据。
+                  手动上传和下载完整连接配置，包括密码、私钥口令和代理密码。同步文件是含明文凭据的 JSON，请仅使用可信的
+                  HTTPS WebDAV 和受控存储。
                 </p>
                 <fieldset disabled={syncOperation !== null} style={{ border: 0, margin: 0, padding: 0 }}>
                   <div className="webdav-sync-form">
