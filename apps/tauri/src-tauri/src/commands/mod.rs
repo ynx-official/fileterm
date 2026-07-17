@@ -1,5 +1,5 @@
 use crate::sessions::WorkerCmd;
-use crate::storage::{new_id, read_json_array, write_json_array};
+use crate::storage::read_json_array;
 use crate::AppError;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -247,7 +247,10 @@ pub fn app_get_ui_preferences(app: AppHandle) -> Result<UiPreferences, AppError>
 }
 
 #[tauri::command]
-pub fn app_set_ui_preferences(app: AppHandle, input: UiPreferencesInput) -> Result<(), AppError> {
+pub fn app_set_ui_preferences(
+    app: AppHandle,
+    input: UiPreferencesInput,
+) -> Result<UiPreferences, AppError> {
     let path = crate::storage::state_path(&app)?;
     let mut preferences = app_get_ui_preferences(app.clone())?;
     if let Some(theme) = input.theme {
@@ -259,8 +262,27 @@ pub fn app_set_ui_preferences(app: AppHandle, input: UiPreferencesInput) -> Resu
     let content = serde_json::to_string_pretty(&preferences)
         .map_err(|error| AppError::Serialization(error.to_string()))?;
     std::fs::write(path, content).map_err(|error| AppError::Storage(error.to_string()))?;
+    if let Err(error) =
+        crate::install_localized_application_menu(&app, preferences.locale == "enUS")
+    {
+        // Preferences are already durable at this point. Do not report the
+        // whole save as failed (and invite a duplicate retry) merely because
+        // native menu refresh failed on the current platform.
+        crate::services::logging::warn(
+            &app,
+            "ui-preferences",
+            format!("failed to refresh native menu: {error}"),
+        );
+    }
+    if let Err(error) = crate::install_localized_tray_menu(&app, preferences.locale == "enUS") {
+        crate::services::logging::warn(
+            &app,
+            "ui-preferences",
+            format!("failed to refresh tray menu: {error}"),
+        );
+    }
     let _ = app.emit("app:ui-preferences-changed", &preferences);
-    Ok(())
+    Ok(preferences)
 }
 
 fn normalize_ui_state(value: Value) -> Result<serde_json::Map<String, Value>, AppError> {
@@ -399,16 +421,41 @@ pub fn app_set_command_send_preferences(
     )
 }
 
+async fn lock_library_after_transfer_hydration(
+    app: &AppHandle,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, AppError> {
+    // Transfer hydration can emit a cleanup snapshot. Finish it before taking
+    // the library lock so that nested snapshot cannot wait on this same lock.
+    crate::services::transfers::ensure_loaded(app).await?;
+    Ok(app
+        .state::<crate::services::workspace::WorkspaceState>()
+        .library_mutation
+        .clone()
+        .lock_owned()
+        .await)
+}
+
 #[tauri::command]
 pub async fn app_get_snapshot(app: AppHandle) -> Result<serde_json::Value, AppError> {
     get_workspace_snapshot(app).await
 }
 
 #[tauri::command]
-pub fn app_get_connection_library(app: AppHandle) -> Result<serde_json::Value, AppError> {
+pub async fn app_get_connection_library(app: AppHandle) -> Result<serde_json::Value, AppError> {
+    let library_mutation = app
+        .state::<crate::services::workspace::WorkspaceState>()
+        .library_mutation
+        .clone();
+    let _guard = library_mutation.lock().await;
+    let (profiles_with_secrets, folders) =
+        crate::services::profile_ops::read_and_heal_profiles(&app)?;
+    let profiles = profiles_with_secrets
+        .iter()
+        .map(crate::services::profile_ops::strip_secret_fields_public)
+        .collect::<Vec<_>>();
     Ok(serde_json::json!({
-        "profiles": read_json_array(&app, "profiles.json")?,
-        "folders": read_json_array(&app, "folders.json")?,
+        "profiles": profiles,
+        "folders": folders,
     }))
 }
 
@@ -497,6 +544,7 @@ pub async fn app_commit_connection_json_import(
     plan_id: String,
     options: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     let selected_ids = options
         .get("selectedItemIds")
         .and_then(Value::as_array)
@@ -604,9 +652,10 @@ pub async fn app_upload_webdav_sync(app: AppHandle) -> Result<serde_json::Value,
 
 #[tauri::command]
 pub async fn app_download_webdav_sync(app: AppHandle) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     let result = crate::services::webdav::download(&app).await?;
     if result.get("imported").and_then(Value::as_u64).unwrap_or(0) > 0 {
-        if let Ok(snapshot) = get_workspace_snapshot(app.clone()).await {
+        if let Ok(snapshot) = get_workspace_snapshot_unlocked(app.clone()).await {
             let _ = app.emit("workspace:snapshot", snapshot);
         }
     }
@@ -619,6 +668,7 @@ pub async fn app_workspace_mutation(
     operation: String,
     payload: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     match operation.as_str() {
         "create-profile" => {
             if let Some(input) = payload.get("input").cloned() {
@@ -652,7 +702,7 @@ pub async fn app_workspace_mutation(
             )))
         }
     }
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -728,11 +778,29 @@ pub async fn app_window_action(
             crate::request_main_window_close(&app, true);
         }
         "quit" => {
+            let quit_registry = app.state::<crate::QuitPreparationRegistry>();
+            if !quit_registry.try_begin() {
+                return Ok(());
+            }
+            let editors_approved = match crate::request_file_editors_for_quit(&app).await {
+                Ok(approved) => approved,
+                Err(error) => {
+                    quit_registry.cancel();
+                    return Err(error);
+                }
+            };
+            if !editors_approved {
+                quit_registry.cancel();
+                return Ok(());
+            }
             // Quit the entire app. Used by the renderer when the user
             // confirms a Cmd+Q / tray-quit request. Persist paused transfer
             // checkpoints before exiting so a restart never silently loses a
             // resumable file.
-            crate::services::transfers::shutdown(&app).await?;
+            if let Err(error) = crate::services::transfers::shutdown(&app).await {
+                quit_registry.cancel();
+                return Err(error);
+            }
             shutdown_session_workers(&app).await;
             app.exit(0);
         }
@@ -748,7 +816,7 @@ pub fn app_is_window_maximized(window: WebviewWindow) -> bool {
 
 #[tauri::command]
 pub fn app_cancel_file_editor_close(app: AppHandle, window: WebviewWindow) {
-    crate::resolve_file_editor_close(&app, &window);
+    crate::cancel_file_editor_close(&app, &window);
 }
 
 #[tauri::command]
@@ -767,8 +835,9 @@ pub fn app_show_window_menu(
 // Phase 3 commands implementation
 // ==========================================
 
-pub async fn get_workspace_snapshot(app: AppHandle) -> Result<serde_json::Value, AppError> {
-    crate::services::transfers::ensure_loaded(&app).await?;
+pub(crate) async fn get_workspace_snapshot_unlocked(
+    app: AppHandle,
+) -> Result<serde_json::Value, AppError> {
     let state = app.state::<crate::services::workspace::WorkspaceState>();
 
     let tabs = state.tabs.read().await.clone();
@@ -796,6 +865,26 @@ pub async fn get_workspace_snapshot(app: AppHandle) -> Result<serde_json::Value,
         "transfers": transfers,
         "sessions": sessions,
     }))
+}
+
+pub async fn get_workspace_snapshot(app: AppHandle) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
+    get_workspace_snapshot_unlocked(app).await
+}
+
+async fn get_workspace_snapshot_and_emit(app: &AppHandle) -> Result<serde_json::Value, AppError> {
+    let snapshot = get_workspace_snapshot_unlocked(app.clone()).await?;
+    if let Err(error) = app.emit("workspace:snapshot", snapshot.clone()) {
+        // Persistence has already succeeded. A failed best-effort broadcast
+        // must not turn a successful mutation into a retryable renderer error
+        // that can create duplicate folders/commands/profiles.
+        crate::services::logging::warn(
+            app,
+            "workspace",
+            format!("failed to broadcast workspace snapshot: {error}"),
+        );
+    }
+    Ok(snapshot)
 }
 
 async fn send_worker_cmd<T>(
@@ -931,6 +1020,8 @@ pub async fn app_open_profile(
     app: AppHandle,
     profile_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let _library_guard = lock_library_after_transfer_hydration(&app).await?;
     let profiles = read_json_array(&app, "profiles.json")?;
     let profile = profiles
         .iter()
@@ -957,7 +1048,7 @@ pub async fn app_open_profile(
         session_type: profile_type.to_string(),
         title: name.to_string(),
         layout: create_tab_layout(profile_type),
-        status: "connecting".to_string(),
+        status: crate::services::WorkspaceTabStatus::Connecting,
     };
 
     let host = profile
@@ -971,8 +1062,8 @@ pub async fn app_open_profile(
         .get("username")
         .and_then(|u| u.as_str())
         .unwrap_or("root");
+    let initial_remote_path = crate::services::workspace::initial_remote_path_for_profile(profile);
 
-    let state = app.state::<crate::services::workspace::WorkspaceState>();
     {
         let mut tabs = state.tabs.write().await;
         tabs.push(new_tab);
@@ -987,8 +1078,8 @@ pub async fn app_open_profile(
                 access_host: format!("{}:{}", host, port),
                 summary: format!("{}@{}", username, host),
                 terminal_transcript: "连接主机...\r\n".to_string(),
-                remote_path: "/".to_string(),
-                shell_cwd: Some("/".to_string()),
+                remote_path: initial_remote_path,
+                shell_cwd: None,
                 follow_shell_cwd: true,
                 remote_files_loading: false,
                 remote_files: Vec::new(),
@@ -1042,7 +1133,7 @@ pub async fn app_open_profile(
         worker_control,
     );
 
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1088,7 +1179,7 @@ pub async fn app_reconnect_tab(
             {
                 let mut tabs = state.tabs.write().await;
                 if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
-                    tab.status = "connecting".to_string();
+                    tab.status = crate::services::WorkspaceTabStatus::Connecting;
                 }
                 let mut sessions = state.sessions.write().await;
                 if let Some(session) = sessions.get_mut(&tab_id) {
@@ -1189,7 +1280,7 @@ pub async fn app_disconnect_tab(
     {
         let mut tabs = state.tabs.write().await;
         if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
-            tab.status = "disconnected".to_string();
+            tab.status = crate::services::WorkspaceTabStatus::Closed;
         }
         let mut sessions = state.sessions.write().await;
         if let Some(session) = sessions.get_mut(&tab_id) {
@@ -1210,8 +1301,13 @@ pub async fn app_disconnect_tab(
     if was_connected {
         crate::sessions::terminal::emit_terminal_data(&app, &tab_id, "\r\n连接已断开\r\n").await;
     }
-    crate::sessions::terminal::set_terminal_state(&app, &tab_id, "连接已断开".to_string(), false)
-        .await;
+    crate::sessions::terminal::set_terminal_state(
+        &app,
+        &tab_id,
+        "连接已断开".to_string(),
+        crate::services::WorkspaceTabStatus::Closed,
+    )
+    .await;
     get_workspace_snapshot(app).await
 }
 
@@ -1858,8 +1954,9 @@ pub async fn app_create_profile(
     app: AppHandle,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::create_profile(&app, input)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1868,6 +1965,7 @@ pub async fn app_update_profile(
     profile_id: String,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     let profile = crate::services::profile_ops::update_profile(&app, &profile_id, input)?;
     let reconnect_mode = crate::services::workspace::reconnect_mode_for_profile(&profile);
     let state = app.state::<crate::services::workspace::WorkspaceState>();
@@ -1878,12 +1976,7 @@ pub async fn app_update_profile(
         }
     }
     drop(sessions);
-    let snapshot = get_workspace_snapshot(app.clone()).await?;
-    // The connection editor may be a separate Tauri window. Keep the main
-    // workspace's active session policy in sync immediately instead of only
-    // returning the snapshot to the window that submitted the form.
-    let _ = app.emit("workspace:snapshot", snapshot.clone());
-    Ok(snapshot)
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1891,8 +1984,9 @@ pub async fn app_delete_profile(
     app: AppHandle,
     profile_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::delete_profile(&app, &profile_id)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1901,8 +1995,9 @@ pub async fn app_update_folder(
     folder_id: String,
     updates: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::update_folder(&app, &folder_id, updates)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1910,8 +2005,9 @@ pub async fn app_delete_folder(
     app: AppHandle,
     folder_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::delete_folder(&app, &folder_id)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1921,8 +2017,9 @@ pub async fn app_update_entity_order(
     new_parent_id: Option<String>,
     new_order: f64,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::update_entity_order(&app, &id, new_parent_id, new_order)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1931,8 +2028,9 @@ pub async fn app_update_command_folder(
     folder_id: String,
     updates: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::update_command_folder(&app, &folder_id, updates)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1940,8 +2038,9 @@ pub async fn app_delete_command_folder(
     app: AppHandle,
     folder_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::delete_command_folder(&app, &folder_id)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1951,8 +2050,9 @@ pub async fn app_update_command_order(
     new_parent_id: Option<String>,
     new_order: f64,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::update_command_order(&app, &id, new_parent_id, new_order)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1961,8 +2061,9 @@ pub async fn app_update_command_template(
     command_id: String,
     input: serde_json::Value,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::update_command_template(&app, &command_id, input)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 #[tauri::command]
@@ -1970,8 +2071,9 @@ pub async fn app_delete_command_template(
     app: AppHandle,
     command_id: String,
 ) -> Result<serde_json::Value, AppError> {
+    let _guard = lock_library_after_transfer_hydration(&app).await?;
     crate::services::profile_ops::delete_command_template(&app, &command_id)?;
-    get_workspace_snapshot(app).await
+    get_workspace_snapshot_and_emit(&app).await
 }
 
 /// Render and send a command template to an active SSH session.

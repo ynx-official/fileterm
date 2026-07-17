@@ -4,11 +4,13 @@ import { CloseButton } from '../common/CloseButton'
 
 export function SshKeyPassphraseModal({
   errorMessage,
+  isSubmitting = false,
   request,
   onCancel,
   onSubmit
 }: {
   errorMessage?: string | null
+  isSubmitting?: boolean
   request: SshKeyPassphrasePromptRequest
   onCancel(): void
   onSubmit(input: { passphrase: string; savePassphrase: boolean }): void
@@ -28,7 +30,7 @@ export function SshKeyPassphraseModal({
       <div className="modal-card ssh-interaction-modal">
         <div className="modal-header">
           <span>SSH 私钥口令</span>
-          <CloseButton onClick={onCancel} />
+          <CloseButton disabled={isSubmitting} onClick={onCancel} />
         </div>
         <div className="root-access-description">
           {request.reason === 'invalid-saved'
@@ -43,6 +45,7 @@ export function SshKeyPassphraseModal({
           <span>口令</span>
           <input
             autoFocus
+            disabled={isSubmitting}
             type="password"
             value={passphrase}
             onChange={(event) => setPassphrase(event.target.value)}
@@ -54,6 +57,7 @@ export function SshKeyPassphraseModal({
         <label className="ssh-checkbox">
           <input
             checked={savePassphrase}
+            disabled={isSubmitting}
             type="checkbox"
             onChange={(event) => setSavePassphrase(event.target.checked)}
           />
@@ -61,11 +65,12 @@ export function SshKeyPassphraseModal({
         </label>
         {errorMessage ? <div className="modal-error">{errorMessage}</div> : null}
         <div className="form-actions">
-          <button className="flat-button" onClick={onCancel} type="button">
+          <button className="flat-button" disabled={isSubmitting} onClick={onCancel} type="button">
             取消
           </button>
-          <button className="primary-button" disabled={!passphrase} onClick={submit} type="button">
-            继续连接
+          <button className="primary-button" disabled={!passphrase || isSubmitting} onClick={submit} type="button">
+            {isSubmitting ? <span aria-hidden="true" className="button-spinner" /> : null}
+            <span>继续连接</span>
           </button>
         </div>
       </div>

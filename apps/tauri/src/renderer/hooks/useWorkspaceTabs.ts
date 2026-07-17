@@ -6,7 +6,14 @@ import type {
   WorkspaceSnapshot,
   WorkspaceTab
 } from '@fileterm/core'
-import { copyText, homeTabKey, insertTabKeyAfter, reorderTabKeys, sessionTabKey } from '../app/app-utils'
+import {
+  copyText,
+  homeTabKey,
+  insertTabKeyAfter,
+  reorderTabKeys,
+  sessionTabKey,
+  settledResultsError
+} from '../app/app-utils'
 import { resolveSelectedTabIds, type SendScope, type SessionSendTarget } from '../features/common/session-send-targets'
 import type { OrderedTabEntry, TabContextTarget } from '../features/layout/TabBar'
 import { setLocale, t, type AppLocale } from '../i18n'
@@ -657,7 +664,11 @@ export function useWorkspaceTabs({
       // invoke 加了 send 超时，但并行化能进一步保证单个慢 tab 不影响
       // 其他 tab 的投递时序。allSettled 确保一个失败不影响其余。
       const payload = `${terminalCommand}\r`
-      await Promise.allSettled(targetIds.map((tabId) => desktopApi.writeTerminal(tabId, payload)))
+      const results = await Promise.allSettled(targetIds.map((tabId) => desktopApi.writeTerminal(tabId, payload)))
+      const failure = settledResultsError('发送终端命令', results)
+      if (failure) {
+        throw failure
+      }
     } catch (error) {
       onError('发送终端命令', error)
       throw error

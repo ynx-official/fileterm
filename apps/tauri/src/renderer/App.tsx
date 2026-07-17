@@ -21,6 +21,7 @@ import {
 } from '@fileterm/core'
 import { normalizeConnectionHost, validateConnectionHost } from '@fileterm/shared'
 import { profileToForm } from './app/app-data'
+import { settledResultsError } from './app/app-utils'
 import { CommandEditorModal, emptyCommandForm, toCommandTemplateInput } from './features/commands/CommandEditorModal'
 import { CommandManagerModal } from './features/commands/CommandManagerModal'
 import { ConnectionManagerModal } from './features/connections/ConnectionManagerModal'
@@ -114,6 +115,7 @@ export function App() {
 
   const [error, setError] = useState<string | null>(null)
   const [isBusy, setIsBusy] = useState(false)
+  const profileSaveInFlightRef = useRef(false)
   const [isWorkspaceTransitionActive, setIsWorkspaceTransitionActive] = useState(true)
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => readInitialTheme(searchParams))
   const [locale, setLocaleState] = useState<AppLocale>(() => readInitialLocale(searchParams))
@@ -396,6 +398,9 @@ export function App() {
   })
   const fileEditorDirtyRef = useRef(isFileEditorDirty)
   fileEditorDirtyRef.current = isFileEditorDirty
+  const fileEditorSavingRef = useRef(isFileEditorSaving)
+  fileEditorSavingRef.current = isFileEditorSaving
+  const pendingFileEditorCloseAfterSaveRef = useRef(false)
 
   const requestFileEditorClose = () => {
     if (isFileEditorDirty) {
@@ -423,6 +428,7 @@ export function App() {
   }
 
   const cancelFileEditorDiscard = () => {
+    pendingFileEditorCloseAfterSaveRef.current = false
     setIsFileEditorDiscardConfirmOpen(false)
     if (!desktopApi || !isFileEditorWindow) {
       return
@@ -439,7 +445,17 @@ export function App() {
     }
 
     return desktopApi.onFileEditorCloseRequest(() => {
+      if (fileEditorSavingRef.current) {
+        pendingFileEditorCloseAfterSaveRef.current = true
+        void desktopApi.showCurrentWindow().catch((err: unknown) => {
+          reportError(setError, '显示文件编辑器', err)
+        })
+        return
+      }
       if (fileEditorDirtyRef.current) {
+        void desktopApi.showCurrentWindow().catch((err: unknown) => {
+          reportError(setError, '显示文件编辑器', err)
+        })
         setIsFileEditorDiscardConfirmOpen(true)
         return
       }
@@ -448,6 +464,21 @@ export function App() {
       })
     })
   }, [desktopApi, isFileEditorWindow])
+
+  useEffect(() => {
+    if (!desktopApi || !isFileEditorWindow || isFileEditorSaving || !pendingFileEditorCloseAfterSaveRef.current) {
+      return
+    }
+
+    pendingFileEditorCloseAfterSaveRef.current = false
+    if (isFileEditorDirty) {
+      setIsFileEditorDiscardConfirmOpen(true)
+      return
+    }
+    void desktopApi.confirmCloseCurrentFileEditor().catch((err: unknown) => {
+      reportError(setError, '关闭文件编辑器', err)
+    })
+  }, [desktopApi, isFileEditorDirty, isFileEditorSaving, isFileEditorWindow])
 
   // 5. File Operations Hook
   const {
@@ -462,6 +493,7 @@ export function App() {
     isFileActionSubmitting,
     permissionDialog,
     permissionDialogError,
+    isPermissionSubmitting,
     rootAccessDialog,
     rootAccessDialogError,
     isRootAccessSubmitting,
@@ -520,6 +552,7 @@ export function App() {
     hostVerificationRequest,
     keyPassphraseRequest,
     errorMessage: sshInteractionError,
+    isResolving: isSshInteractionResolving,
     cancelCredentials,
     submitCredentials,
     cancelKeyboardInteractive,
@@ -659,6 +692,9 @@ export function App() {
 
   const handleSaveProfile = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (isBusy || profileSaveInFlightRef.current) {
+      return
+    }
 
     const normalizedHost = normalizeConnectionHost(form.host)
     const requiresHost = form.type !== 'serial'
@@ -691,6 +727,7 @@ export function App() {
     }
 
     try {
+      profileSaveInFlightRef.current = true
       setIsBusy(true)
       const defaultPort = form.type === 'ftp' ? 21 : form.type === 'telnet' ? 23 : form.type === 'serial' ? 0 : 22
       const finalPort = Number(form.port) || defaultPort
@@ -707,6 +744,7 @@ export function App() {
     } catch (err) {
       reportError(setFormError, '保存连接', err)
     } finally {
+      profileSaveInFlightRef.current = false
       setIsBusy(false)
     }
   }
@@ -714,15 +752,17 @@ export function App() {
   const handleDeleteProfile = async (profileId: string) => {
     if (!desktopApi) {
       setError(t.desktopOnlyDelete)
-      return
+      return false
     }
 
     try {
       setIsBusy(true)
       const snapshot = await desktopApi.deleteProfile(profileId)
       applySnapshot(snapshot)
+      return true
     } catch (err) {
       reportError(setError, '删除连接', err)
+      return false
     } finally {
       setIsBusy(false)
     }
@@ -768,9 +808,13 @@ export function App() {
       // 并行发送，对照 Electron 原版的 fire-and-forget 行为。
       // 顺序 await 会让一个卡住的 tab 阻塞后续所有 tab；allSettled 确保
       // 单个失败不影响其余，后端 send 超时保证 invoke 不会永久 hang。
-      await Promise.allSettled(
+      const results = await Promise.allSettled(
         targetTabs.map((tab) => desktopApi.executeCommandTemplate(tab.id, commandId, args, options))
       )
+      const failure = settledResultsError('执行命令模板', results)
+      if (failure) {
+        throw failure
+      }
     } catch (err) {
       reportError(setError, '执行命令模板', err)
     } finally {
@@ -892,10 +936,10 @@ export function App() {
               }
               void openProfile(profileId)
             }}
-            onCreateFolder={(name) => desktopApi?.createFolder(name)}
-            onDeleteFolder={(id) => desktopApi?.deleteFolder(id)}
-            onUpdateFolder={(id, updates) => desktopApi?.updateFolder(id, updates)}
-            onUpdateOrder={(id, parentId, order) => desktopApi?.updateEntityOrder(id, parentId, order)}
+            onCreateFolder={createConnectionFolder}
+            onDeleteFolder={deleteConnectionFolder}
+            onUpdateFolder={updateConnectionFolder}
+            onUpdateOrder={updateConnectionOrder}
             onImportConnections={openConnectionImportPreview}
             onExportConnections={() => {
               const request = desktopApi?.exportConnections('fileterm')
@@ -908,6 +952,7 @@ export function App() {
               groupOptions={connectionGroupOptions}
               mode={editingProfileId ? 'edit' : 'create'}
               form={form}
+              isSubmitting={isBusy}
               setForm={updateForm}
               onClearHostFingerprint={() => {
                 const editingProfile = editingProfileId
@@ -942,23 +987,13 @@ export function App() {
           commandTemplates={workspace.commandTemplates || []}
           standalone
           onClose={closeCurrentWindow}
-          onCreateFolder={(name) => {
-            void createCommandFolder(name)
-          }}
-          onDeleteFolder={(folderId) => deleteCommandFolder(folderId)}
-          onUpdateFolder={(folderId, updates) => {
-            void updateCommandFolder(folderId, updates)
-          }}
-          onUpdateOrder={(id, parentId, order) => {
-            void updateCommandOrder(id, parentId, order)
-          }}
-          onCreateCommand={(input) => {
-            void saveCommandTemplate(null, input)
-          }}
-          onUpdateCommand={(commandId, input) => {
-            void saveCommandTemplate(commandId, input)
-          }}
-          onDeleteCommand={(commandId) => deleteCommandTemplate(commandId)}
+          onCreateFolder={createCommandFolder}
+          onDeleteFolder={deleteCommandFolder}
+          onUpdateFolder={updateCommandFolder}
+          onUpdateOrder={updateCommandOrder}
+          onCreateCommand={(input) => saveCommandTemplate(null, input)}
+          onUpdateCommand={(commandId, input) => saveCommandTemplate(commandId, input)}
+          onDeleteCommand={deleteCommandTemplate}
         />
       </StandaloneWindowFrame>
     )
@@ -987,11 +1022,10 @@ export function App() {
                 }
           }
           mode={editingCommand ? 'edit' : formWindowMode}
+          isSubmitting={isBusy}
           standalone
           onClose={closeCurrentWindow}
-          onSubmit={(input) => {
-            void saveCommandTemplate(editingCommand?.id ?? null, input)
-          }}
+          onSubmit={(input) => saveCommandTemplate(editingCommand?.id ?? null, input)}
         />
       </StandaloneWindowFrame>
     )
@@ -1010,6 +1044,7 @@ export function App() {
           groupOptions={connectionGroupOptions}
           mode={editingProfileId ? 'edit' : formWindowMode}
           form={form}
+          isSubmitting={isBusy}
           profiles={workspace.profiles}
           setForm={updateForm}
           onClearHostFingerprint={(profile) => {
@@ -1252,9 +1287,7 @@ export function App() {
                   const request = desktopApi?.exportConnections('fileterm')
                   void request?.then(() => undefined)
                 }}
-                onCreateCommand={(input) => {
-                  void saveCommandTemplate(null, input)
-                }}
+                onCreateCommand={(input) => saveCommandTemplate(null, input)}
                 onUpdateCommand={saveCommandTemplate}
                 onDeleteCommand={deleteCommandTemplate}
                 onCreateCommandFolder={createCommandFolder}
@@ -1306,27 +1339,13 @@ export function App() {
                 commandFolders: workspace.commandFolders || [],
                 commandTemplates: workspace.commandTemplates || [],
                 onClose: () => setShowCommandManager(false),
-                onCreateFolder: (name) => {
-                  void createCommandFolder(name)
-                },
-                onDeleteFolder: (folderId) => {
-                  void deleteCommandFolder(folderId)
-                },
-                onUpdateFolder: (folderId, updates) => {
-                  void updateCommandFolder(folderId, updates)
-                },
-                onUpdateOrder: (id, parentId, order) => {
-                  void updateCommandOrder(id, parentId, order)
-                },
-                onCreateCommand: (input) => {
-                  void saveCommandTemplate(null, input)
-                },
-                onUpdateCommand: (commandId, input) => {
-                  void saveCommandTemplate(commandId, input)
-                },
-                onDeleteCommand: (commandId) => {
-                  void deleteCommandTemplate(commandId)
-                }
+                onCreateFolder: createCommandFolder,
+                onDeleteFolder: deleteCommandFolder,
+                onUpdateFolder: updateCommandFolder,
+                onUpdateOrder: updateCommandOrder,
+                onCreateCommand: (input) => saveCommandTemplate(null, input),
+                onUpdateCommand: (commandId, input) => saveCommandTemplate(commandId, input),
+                onDeleteCommand: deleteCommandTemplate
               }
             : null
         }
@@ -1338,6 +1357,7 @@ export function App() {
                 groupOptions: connectionGroupOptions,
                 mode: editingProfileId ? 'edit' : 'create',
                 form,
+                isSubmitting: isBusy,
                 profiles: workspace.profiles,
                 setForm: updateForm,
                 onClearHostFingerprint: (profile) => {
@@ -1367,10 +1387,10 @@ export function App() {
                   setShowConnectionManager(false)
                   void openProfile(profileId)
                 },
-                onCreateFolder: (name) => desktopApi?.createFolder(name),
-                onDeleteFolder: (id) => desktopApi?.deleteFolder(id),
-                onUpdateFolder: (id, updates) => desktopApi?.updateFolder(id, updates),
-                onUpdateOrder: (id, parentId, order) => desktopApi?.updateEntityOrder(id, parentId, order),
+                onCreateFolder: createConnectionFolder,
+                onDeleteFolder: deleteConnectionFolder,
+                onUpdateFolder: updateConnectionFolder,
+                onUpdateOrder: updateConnectionOrder,
                 onImportConnections: openConnectionImportPreview,
                 onExportConnections: () => {
                   const request = desktopApi?.exportConnections('fileterm')
@@ -1405,6 +1425,7 @@ export function App() {
                 fileName: permissionDialog.target.name,
                 fileType: permissionDialog.target.type,
                 initialPermission: permissionDialog.target.permission,
+                isSubmitting: isPermissionSubmitting,
                 onClose: dismissPermissionDialog,
                 onSubmit: (options) => {
                   void handleSubmitPermissions(options)
@@ -1474,6 +1495,7 @@ export function App() {
           credentialsRequest
             ? {
                 errorMessage: sshInteractionError,
+                isSubmitting: isSshInteractionResolving,
                 request: credentialsRequest,
                 onCancel: cancelCredentials,
                 onSubmit: submitCredentials
@@ -1484,6 +1506,7 @@ export function App() {
           hostVerificationRequest
             ? {
                 request: hostVerificationRequest,
+                isSubmitting: isSshInteractionResolving,
                 onReject: rejectHost,
                 onAcceptOnce: acceptHostOnce,
                 onAcceptAndSave: acceptHostAndSave
@@ -1494,6 +1517,7 @@ export function App() {
           keyPassphraseRequest
             ? {
                 errorMessage: sshInteractionError,
+                isSubmitting: isSshInteractionResolving,
                 request: keyPassphraseRequest,
                 onCancel: cancelKeyPassphrase,
                 onSubmit: submitKeyPassphrase
@@ -1505,6 +1529,7 @@ export function App() {
             ? {
                 request: keyboardInteractiveRequest,
                 errorMessage: sshInteractionError,
+                isSubmitting: isSshInteractionResolving,
                 onCancel: () => {
                   void cancelKeyboardInteractive()
                 },

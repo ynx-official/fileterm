@@ -550,7 +550,7 @@ pub async fn commit_import_plan(
         results.push(entry.preview);
     }
     if imported > 0 || overwritten > 0 {
-        if let Ok(snapshot) = crate::commands::get_workspace_snapshot(app.clone()).await {
+        if let Ok(snapshot) = crate::commands::get_workspace_snapshot_unlocked(app.clone()).await {
             let _ = app.emit("workspace:snapshot", snapshot);
         }
     }

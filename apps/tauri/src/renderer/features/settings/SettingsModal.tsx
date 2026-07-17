@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { AppUpdateStatus, WebDavSyncConfig } from '@fileterm/core'
 import { t } from '../../i18n'
 import { CloseButton } from '../common/CloseButton'
@@ -31,6 +31,8 @@ export function SettingsModal({
   const [syncConfig, setSyncConfig] = useState<WebDavSyncConfig | null>(null)
   const [syncPassword, setSyncPassword] = useState('')
   const [syncMessage, setSyncMessage] = useState<string | null>(null)
+  const [syncOperation, setSyncOperation] = useState<'load' | 'save' | 'upload' | 'download' | null>(null)
+  const syncOperationRef = useRef<typeof syncOperation>(null)
   const desktopApi = window.fileterm
   const updatePreviewState = import.meta.env.DEV ? import.meta.env.VITE_UPDATE_PREVIEW : undefined
 
@@ -57,11 +59,37 @@ export function SettingsModal({
 
   useEffect(() => {
     if (activeTab !== 'sync' || !desktopApi) return
+    if (syncOperationRef.current) return
+    syncOperationRef.current = 'load'
+    setSyncOperation('load')
     void desktopApi
       .getWebDavSyncConfig()
       .then(setSyncConfig)
       .catch((error: unknown) => setSyncMessage(error instanceof Error ? error.message : String(error)))
+      .finally(() => {
+        if (syncOperationRef.current === 'load') {
+          syncOperationRef.current = null
+          setSyncOperation(null)
+        }
+      })
   }, [activeTab, desktopApi])
+
+  const runSyncOperation = async (operation: 'save' | 'upload' | 'download', action: () => Promise<void>) => {
+    if (syncOperationRef.current) return
+    syncOperationRef.current = operation
+    setSyncOperation(operation)
+    setSyncMessage(null)
+    try {
+      await action()
+    } catch (error) {
+      setSyncMessage(error instanceof Error ? error.message : String(error))
+    } finally {
+      if (syncOperationRef.current === operation) {
+        syncOperationRef.current = null
+        setSyncOperation(null)
+      }
+    }
+  }
 
   const platformLabel = (() => {
     const platform = desktopApi?.platform ?? 'unknown'
@@ -95,7 +123,7 @@ export function SettingsModal({
         </span>
         {!inline && (
           <div className="connection-manager-header-actions">
-            <CloseButton onClick={onClose} />
+            <CloseButton disabled={syncOperation !== null} onClick={onClose} />
           </div>
         )}
       </div>
@@ -254,111 +282,127 @@ export function SettingsModal({
                 <p className="settings-tools-hint">
                   手动上传和下载连接配置。密码只保存在主进程的本地受限文件中，导出包不会携带连接凭据。
                 </p>
-                <div className="webdav-sync-form">
-                  <label>
-                    <span>WebDAV 地址</span>
-                    <input
-                      value={syncConfig.url}
-                      placeholder="https://dav.example.com/remote.php/dav/files/me"
-                      onChange={(event) => setSyncConfig({ ...syncConfig, url: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>远端文件</span>
-                    <input
-                      value={syncConfig.remotePath}
-                      placeholder="fileterm-connections.json"
-                      onChange={(event) => setSyncConfig({ ...syncConfig, remotePath: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>用户名</span>
-                    <input
-                      value={syncConfig.username ?? ''}
-                      onChange={(event) => setSyncConfig({ ...syncConfig, username: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    <span>密码</span>
-                    <input
-                      type="password"
-                      autoComplete="new-password"
-                      value={syncPassword}
-                      placeholder="留空以保留已保存密码"
-                      onChange={(event) => setSyncPassword(event.target.value)}
-                    />
-                  </label>
-                  <label className="webdav-checkbox ssh-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={syncConfig.enabled}
-                      onChange={(event) => setSyncConfig({ ...syncConfig, enabled: event.target.checked })}
-                    />
-                    启用 WebDAV 配置同步
-                  </label>
-                  <label className="webdav-checkbox ssh-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={syncConfig.allowInsecureTls === true}
-                      onChange={(event) => setSyncConfig({ ...syncConfig, allowInsecureTls: event.target.checked })}
-                    />
-                    允许不安全的 HTTP（高风险）
-                  </label>
-                </div>
-                <div className="settings-update-actions">
-                  <button
-                    className="primary-button compact"
-                    type="button"
-                    onClick={() =>
-                      void desktopApi
-                        ?.saveWebDavSyncConfig({ ...syncConfig, ...(syncPassword ? { password: syncPassword } : {}) })
-                        .then((config) => {
+                <fieldset disabled={syncOperation !== null} style={{ border: 0, margin: 0, padding: 0 }}>
+                  <div className="webdav-sync-form">
+                    <label>
+                      <span>WebDAV 地址</span>
+                      <input
+                        value={syncConfig.url}
+                        placeholder="https://dav.example.com/remote.php/dav/files/me"
+                        onChange={(event) => setSyncConfig({ ...syncConfig, url: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>远端文件</span>
+                      <input
+                        value={syncConfig.remotePath}
+                        placeholder="fileterm-connections.json"
+                        onChange={(event) => setSyncConfig({ ...syncConfig, remotePath: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>用户名</span>
+                      <input
+                        value={syncConfig.username ?? ''}
+                        onChange={(event) => setSyncConfig({ ...syncConfig, username: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>密码</span>
+                      <input
+                        type="password"
+                        autoComplete="new-password"
+                        value={syncPassword}
+                        placeholder="留空以保留已保存密码"
+                        onChange={(event) => setSyncPassword(event.target.value)}
+                      />
+                    </label>
+                    <label className="webdav-checkbox ssh-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={syncConfig.enabled}
+                        onChange={(event) => setSyncConfig({ ...syncConfig, enabled: event.target.checked })}
+                      />
+                      启用 WebDAV 配置同步
+                    </label>
+                    <label className="webdav-checkbox ssh-checkbox">
+                      <input
+                        type="checkbox"
+                        checked={syncConfig.allowInsecureTls === true}
+                        onChange={(event) => setSyncConfig({ ...syncConfig, allowInsecureTls: event.target.checked })}
+                      />
+                      允许不安全的 HTTP（高风险）
+                    </label>
+                  </div>
+                  <div className="settings-update-actions">
+                    <button
+                      className="primary-button compact"
+                      disabled={syncOperation !== null}
+                      type="button"
+                      onClick={() => {
+                        if (!desktopApi) return
+                        void runSyncOperation('save', async () => {
+                          const config = await desktopApi.saveWebDavSyncConfig({
+                            ...syncConfig,
+                            ...(syncPassword ? { password: syncPassword } : {})
+                          })
                           setSyncConfig(config)
                           setSyncPassword('')
                           setSyncMessage('同步配置已保存。')
                         })
-                        .catch((error: unknown) =>
-                          setSyncMessage(error instanceof Error ? error.message : String(error))
-                        )
-                    }
-                  >
-                    保存
-                  </button>
-                  <button
-                    className="flat-button compact"
-                    disabled={!syncConfig.enabled}
-                    type="button"
-                    onClick={() =>
-                      void desktopApi
-                        ?.uploadWebDavSync()
-                        .then((result) => setSyncMessage(result.message))
-                        .catch((error: unknown) =>
-                          setSyncMessage(error instanceof Error ? error.message : String(error))
-                        )
-                    }
-                  >
-                    上传
-                  </button>
-                  <button
-                    className="flat-button compact"
-                    disabled={!syncConfig.enabled}
-                    type="button"
-                    onClick={() =>
-                      void desktopApi
-                        ?.downloadWebDavSync()
-                        .then((result) => setSyncMessage(result.message))
-                        .catch((error: unknown) =>
-                          setSyncMessage(error instanceof Error ? error.message : String(error))
-                        )
-                    }
-                  >
-                    下载
-                  </button>
-                </div>
+                      }}
+                    >
+                      {syncOperation === 'save' ? <span aria-hidden="true" className="button-spinner" /> : null}
+                      <span>保存</span>
+                    </button>
+                    <button
+                      className="flat-button compact"
+                      disabled={!syncConfig.enabled || syncOperation !== null}
+                      type="button"
+                      onClick={() => {
+                        if (!desktopApi) return
+                        void runSyncOperation('upload', async () => {
+                          const result = await desktopApi.uploadWebDavSync()
+                          setSyncMessage(result.message)
+                        })
+                      }}
+                    >
+                      {syncOperation === 'upload' ? <span aria-hidden="true" className="button-spinner" /> : null}
+                      <span>上传</span>
+                    </button>
+                    <button
+                      className="flat-button compact"
+                      disabled={!syncConfig.enabled || syncOperation !== null}
+                      type="button"
+                      onClick={() => {
+                        if (!desktopApi) return
+                        void runSyncOperation('download', async () => {
+                          const result = await desktopApi.downloadWebDavSync()
+                          setSyncMessage(result.message)
+                        })
+                      }}
+                    >
+                      {syncOperation === 'download' ? <span aria-hidden="true" className="button-spinner" /> : null}
+                      <span>下载</span>
+                    </button>
+                  </div>
+                </fieldset>
                 {syncConfig.lastSyncedAt ? (
                   <p className="settings-tools-hint">上次同步：{new Date(syncConfig.lastSyncedAt).toLocaleString()}</p>
                 ) : null}
                 {syncMessage ? <p className="settings-tools-hint">{syncMessage}</p> : null}
+              </section>
+            </div>
+          ) : null}
+
+          {activeTab === 'sync' && !syncConfig ? (
+            <div className="settings-panel">
+              <section aria-busy="true" className="settings-section">
+                <h3>WebDAV 配置同步</h3>
+                <p className="settings-tools-hint">
+                  <span aria-hidden="true" className="button-spinner" /> 正在读取同步配置…
+                </p>
+                {syncMessage ? <p className="modal-error">{syncMessage}</p> : null}
               </section>
             </div>
           ) : null}
@@ -472,7 +516,7 @@ export function SettingsModal({
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" onClick={syncOperation ? undefined : onClose}>
       {content}
     </div>
   )

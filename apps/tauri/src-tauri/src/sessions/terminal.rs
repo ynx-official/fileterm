@@ -51,12 +51,13 @@ pub async fn emit_terminal_data(app: &AppHandle, tab_id: &str, chunk: &str) {
     }
 }
 
-pub async fn set_terminal_state(app: &AppHandle, tab_id: &str, summary: String, connected: bool) {
-    let status = if connected {
-        "connected"
-    } else {
-        "disconnected"
-    };
+pub async fn set_terminal_state(
+    app: &AppHandle,
+    tab_id: &str,
+    summary: String,
+    status: crate::services::WorkspaceTabStatus,
+) {
+    let connected = status.is_connected();
     let transcript = {
         let state = app.state::<crate::services::workspace::WorkspaceState>();
         if let Some(tab) = state
@@ -66,7 +67,7 @@ pub async fn set_terminal_state(app: &AppHandle, tab_id: &str, summary: String, 
             .iter_mut()
             .find(|tab| tab.id == tab_id)
         {
-            tab.status = status.to_string();
+            tab.status = status;
         }
         let mut sessions = state.sessions.write().await;
         let Some(session) = sessions.get_mut(tab_id) else {

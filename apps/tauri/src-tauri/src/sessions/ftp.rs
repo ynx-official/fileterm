@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use super::terminal::{decode_terminal, encode_terminal};
 use super::{TransferFileStat, WorkerCmd};
+use crate::services::WorkspaceTabStatus;
 
 const TRANSFER_CANCELED: &str = "transfer canceled";
 
@@ -51,7 +52,7 @@ pub fn start_ftp_worker(
                 &app,
                 &tab_id,
                 format!("FTP error: {error}"),
-                false,
+                WorkspaceTabStatus::Error,
                 None,
                 None,
             )
@@ -95,7 +96,7 @@ async fn run_ftp_worker(
         app,
         tab_id,
         format!("FTP {}:{}", host, port),
-        true,
+        WorkspaceTabStatus::Connected,
         Some(remote_path.clone()),
         Some(initial_files),
     )
@@ -324,7 +325,7 @@ async fn run_ftp_worker(
                     app,
                     tab_id,
                     "FTP disconnected".to_string(),
-                    false,
+                    WorkspaceTabStatus::Closed,
                     None,
                     None,
                 )
@@ -426,10 +427,11 @@ async fn set_ftp_state(
     app: &AppHandle,
     tab_id: &str,
     summary: String,
-    connected: bool,
+    status: WorkspaceTabStatus,
     remote_path: Option<String>,
     remote_files: Option<Vec<Value>>,
 ) {
+    let connected = status.is_connected();
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     if let Some(tab) = state
         .tabs
@@ -438,12 +440,7 @@ async fn set_ftp_state(
         .iter_mut()
         .find(|tab| tab.id == tab_id)
     {
-        tab.status = if connected {
-            "connected"
-        } else {
-            "disconnected"
-        }
-        .to_string();
+        tab.status = status;
     }
     if let Some(session) = state.sessions.write().await.get_mut(tab_id) {
         session.summary = summary;

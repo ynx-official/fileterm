@@ -156,6 +156,7 @@ export function useFileEditor({
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [isSaving, setIsSaving] = useState(false)
+  const savingRef = useRef(false)
   const [isDirty, setIsDirty] = useState(false)
   const formatErrorRef = useLatestRef(formatError)
   const onApplySnapshotRef = useLatestRef(onApplySnapshot)
@@ -264,8 +265,12 @@ export function useFileEditor({
       if (!desktopApi || !file) {
         return
       }
+      if (savingRef.current) {
+        return
+      }
 
       try {
+        savingRef.current = true
         setIsSaving(true)
         if (file.source === 'local') {
           await desktopApi.writeLocalFile(file.path, content, encoding)
@@ -287,6 +292,7 @@ export function useFileEditor({
         console.error('[FileTerm] 保存文件', error)
         setErrorMessage(formatErrorRef.current('保存文件', error, { targetPath: file.path }))
       } finally {
+        savingRef.current = false
         setIsSaving(false)
       }
     },

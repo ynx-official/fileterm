@@ -45,6 +45,19 @@ fn profile(id: &str, group: &str, parent_id: Option<&str>) -> Value {
     Value::Object(obj)
 }
 
+fn command_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let marker = format!("pub async fn {name}");
+    let start = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("command `{name}` must exist"));
+    let remainder = &source[start..];
+    let end = remainder[1..]
+        .find("#[tauri::command]")
+        .map(|index| index + 1)
+        .unwrap_or(remainder.len());
+    &remainder[..end]
+}
+
 // ── Secret stripping contract ────────────────────────────────────────────
 
 #[test]
@@ -56,6 +69,7 @@ fn strip_removes_top_level_secret_fields() {
         "password": "hunter2",
         "passphrase": "secret-pass",
         "privateKeyPath": "/home/user/.ssh/id_rsa",
+        "proxyPassword": "legacy-form-proxy-secret",
         "host": "example.com",
         "port": 22,
     });
@@ -71,6 +85,10 @@ fn strip_removes_top_level_secret_fields() {
     assert!(
         stripped.get("privateKeyPath").is_none(),
         "privateKeyPath must be stripped"
+    );
+    assert!(
+        stripped.get("proxyPassword").is_none(),
+        "legacy top-level proxyPassword must be stripped"
     );
     // Non-secret fields stay intact.
     assert_eq!(
@@ -267,6 +285,100 @@ fn contract_events_use_namespace_colon_name() {
             !name.starts_with(':') && !name.ends_with(':'),
             "event `{name}` must not have an empty namespace or name"
         );
+    }
+}
+
+#[test]
+fn ui_preference_setter_returns_the_shared_contract_shape() {
+    let source = include_str!("../src/commands/mod.rs");
+    assert!(
+        source.contains("Result<UiPreferences, AppError>"),
+        "app_set_ui_preferences must return the updated preferences like Electron and FileTermDesktopApi"
+    );
+    assert!(
+        source.contains("Ok(preferences)"),
+        "app_set_ui_preferences must not resolve with an empty IPC payload"
+    );
+    assert!(
+        source.contains("install_localized_application_menu")
+            && source.contains("install_localized_tray_menu"),
+        "locale changes must refresh both the application and tray menus"
+    );
+}
+
+#[test]
+fn connection_library_never_returns_profile_secrets() {
+    let source = include_str!("../src/commands/mod.rs");
+    let start = source
+        .find("pub async fn app_get_connection_library")
+        .expect("connection library command must exist");
+    let remainder = &source[start..];
+    let end = remainder[1..]
+        .find("#[tauri::command]")
+        .map(|index| index + 1)
+        .expect("another command should follow the connection library");
+    let command = &remainder[..end];
+    assert!(
+        command.contains("strip_secret_fields_public"),
+        "standalone connection windows must receive the same scrubbed profiles as workspace snapshots"
+    );
+}
+
+#[test]
+fn profile_and_command_mutations_are_serialized_and_broadcast() {
+    let source = include_str!("../src/commands/mod.rs");
+    let mutations = [
+        "app_workspace_mutation",
+        "app_create_profile",
+        "app_update_profile",
+        "app_delete_profile",
+        "app_update_folder",
+        "app_delete_folder",
+        "app_update_entity_order",
+        "app_update_command_folder",
+        "app_delete_command_folder",
+        "app_update_command_order",
+        "app_update_command_template",
+        "app_delete_command_template",
+    ];
+    for name in mutations {
+        let body = command_body(source, name);
+        assert!(
+            body.contains("lock_library_after_transfer_hydration"),
+            "`{name}` must share the multi-window library mutation lock"
+        );
+        assert!(
+            body.contains("get_workspace_snapshot_and_emit"),
+            "`{name}` must broadcast the persisted snapshot to every window"
+        );
+    }
+
+    let open_profile = command_body(source, "app_open_profile");
+    assert!(
+        open_profile.contains("lock_library_after_transfer_hydration"),
+        "opening a profile mutates recency and must use the library lock"
+    );
+    assert!(
+        open_profile.contains("get_workspace_snapshot_and_emit"),
+        "opening a profile must immediately publish its connecting tab"
+    );
+}
+
+#[test]
+fn protocol_workers_publish_connected_closed_and_error_states() {
+    let protocols = [
+        ("SSH", include_str!("../src/sessions/ssh.rs")),
+        ("FTP", include_str!("../src/sessions/ftp.rs")),
+        ("Telnet", include_str!("../src/sessions/telnet.rs")),
+        ("Serial", include_str!("../src/sessions/serial.rs")),
+    ];
+    for (name, source) in protocols {
+        for status in ["Connected", "Closed", "Error"] {
+            assert!(
+                source.contains(&format!("WorkspaceTabStatus::{status}")),
+                "{name} worker must map its lifecycle to WorkspaceTabStatus::{status}"
+            );
+        }
     }
 }
 

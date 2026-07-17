@@ -1,4 +1,4 @@
-import { useRef, type ReactNode } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { AppIcon } from './AppIcon'
 
 export function ManagerInlineFolderRow({
@@ -19,6 +19,7 @@ export function ManagerInlineFolderRow({
   onDismiss(): void
 }) {
   const isCommittingRef = useRef(false)
+  const [isCommitting, setIsCommitting] = useState(false)
 
   const commit = async () => {
     if (isCommittingRef.current) return
@@ -29,16 +30,18 @@ export function ManagerInlineFolderRow({
     }
 
     isCommittingRef.current = true
+    setIsCommitting(true)
     try {
       const result = await onCommit(name)
       if (result !== false) onDismiss()
     } finally {
       isCommittingRef.current = false
+      setIsCommitting(false)
     }
   }
 
   return (
-    <div className={`manager-row folder-row ${className}`.trim()}>
+    <div aria-busy={isCommitting} className={`manager-row folder-row ${className}`.trim()}>
       <span className="manager-name-cell">
         <span className="folder-icon manager-folder-toggle">
           <AppIcon name="chevron-right" size={12} />
@@ -47,6 +50,7 @@ export function ManagerInlineFolderRow({
           autoFocus
           aria-label={placeholder}
           className="manager-inline-input"
+          disabled={isCommitting}
           placeholder={placeholder}
           type="text"
           value={value}
@@ -62,6 +66,7 @@ export function ManagerInlineFolderRow({
             }
           }}
         />
+        {isCommitting ? <span aria-hidden="true" className="button-spinner" /> : null}
       </span>
       {afterNameCells.map((cell, index) => (
         <span key={index}>{cell}</span>

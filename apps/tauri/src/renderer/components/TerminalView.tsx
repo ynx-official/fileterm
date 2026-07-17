@@ -278,14 +278,20 @@ export const TerminalView = memo(function TerminalView({
     if (!terminal) {
       return
     }
-    const value = window.fileterm?.readClipboardText
-      ? await window.fileterm.readClipboardText()
-      : await navigator.clipboard?.readText?.()
-    if (value) {
-      clearEphemeralHighlight()
-      terminal.paste(value)
+    try {
+      const value = window.fileterm?.readClipboardText
+        ? await window.fileterm.readClipboardText()
+        : await navigator.clipboard?.readText?.()
+      if (value) {
+        clearEphemeralHighlight()
+        terminal.paste(value)
+      }
+    } catch {
+      // Image-only/locked clipboards are a normal empty-paste case on native
+      // desktops. Keep the terminal usable and avoid an unhandled rejection.
+    } finally {
+      terminal.focus()
     }
-    terminal.focus()
   }
 
   const searchTerminal = (query: string, direction: 1 | -1 = 1) => {
@@ -679,9 +685,14 @@ export const TerminalView = memo(function TerminalView({
       }
 
       if (parsed.data === '?') {
-        const clipboardText = window.fileterm?.readClipboardText
-          ? await window.fileterm.readClipboardText()
-          : ((await navigator.clipboard?.readText?.()) ?? '')
+        let clipboardText = ''
+        try {
+          clipboardText = window.fileterm?.readClipboardText
+            ? await window.fileterm.readClipboardText()
+            : ((await navigator.clipboard?.readText?.()) ?? '')
+        } catch {
+          clipboardText = ''
+        }
         const encoded = encodeBase64Utf8(clipboardText)
         await window.fileterm?.writeTerminal(tabIdRef.current, `\u001b]52;${parsed.target || 'c'};${encoded}\u0007`)
         return true

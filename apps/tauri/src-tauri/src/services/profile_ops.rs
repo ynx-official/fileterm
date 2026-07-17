@@ -103,8 +103,17 @@ pub fn read_and_heal_profiles(app: &AppHandle) -> Result<(Vec<Value>, Vec<Value>
     }
 
     let mut profiles = read_json_array(app, "profiles.json")?;
+    let mut secret_shape_dirty = false;
+    for profile in &mut profiles {
+        if profile
+            .as_object_mut()
+            .is_some_and(|profile| normalize_profile_secret_input(profile, None))
+        {
+            secret_shape_dirty = true;
+        }
+    }
     let folders = read_and_heal_connection_folders(app)?;
-    let dirty = heal_profiles(&mut profiles, &folders);
+    let dirty = secret_shape_dirty || heal_profiles(&mut profiles, &folders);
     if dirty {
         // Strip secrets before writing back. Secrets live in
         // profile-secrets.json; profiles.json should never contain them.
@@ -118,7 +127,7 @@ pub fn read_and_heal_profiles(app: &AppHandle) -> Result<(Vec<Value>, Vec<Value>
 fn strip_secret_fields(profile: &Value) -> Value {
     let mut clone = profile.clone();
     if let Some(obj) = clone.as_object_mut() {
-        for key in ["password", "passphrase", "privateKeyPath"] {
+        for key in ["password", "passphrase", "privateKeyPath", "proxyPassword"] {
             obj.remove(key);
         }
         if let Some(proxy) = obj.get_mut("proxy").and_then(|v| v.as_object_mut()) {
@@ -138,6 +147,96 @@ fn ensure_object(value: &Value) -> Map<String, Value> {
     value.as_object().cloned().unwrap_or_else(Map::new)
 }
 
+/// Convert renderer form secret fields into the persisted profile shape and,
+/// for edits, retain stored credentials when the renderer only has the
+/// redacted empty placeholders. `null` remains an explicit clear operation
+/// for bridge/import callers that need one.
+fn normalize_profile_secret_input(
+    profile: &mut Map<String, Value>,
+    previous: Option<&Value>,
+) -> bool {
+    let mut changed = false;
+    for key in ["password", "passphrase", "privateKeyPath"] {
+        let should_preserve = match profile.get(key) {
+            None => true,
+            Some(Value::String(value)) => value.is_empty(),
+            Some(Value::Null) => false,
+            Some(_) => true,
+        };
+        if should_preserve {
+            if let Some(previous_value) = previous
+                .and_then(|value| value.get(key))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+            {
+                if profile.get(key).and_then(Value::as_str) != Some(previous_value) {
+                    profile.insert(key.to_string(), Value::String(previous_value.to_string()));
+                    changed = true;
+                }
+            } else if profile.remove(key).is_some() {
+                changed = true;
+            }
+        } else if profile.get(key).is_some_and(Value::is_null) {
+            profile.remove(key);
+            changed = true;
+        }
+    }
+
+    let form_proxy_password = profile.remove("proxyPassword");
+    if form_proxy_password.is_some() {
+        changed = true;
+    }
+    let explicit_proxy_clear = form_proxy_password.as_ref().is_some_and(Value::is_null);
+    let form_proxy_password = form_proxy_password
+        .as_ref()
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let nested_proxy_password = profile
+        .get("proxy")
+        .and_then(Value::as_object)
+        .and_then(|proxy| proxy.get("password"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let previous_proxy_password = previous
+        .and_then(|value| value.get("proxy"))
+        .and_then(Value::as_object)
+        .and_then(|proxy| proxy.get("password"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    let proxy_enabled = profile
+        .get("proxy")
+        .and_then(Value::as_object)
+        .and_then(|proxy| proxy.get("type"))
+        .and_then(Value::as_str)
+        .is_some_and(|proxy_type| proxy_type != "none");
+    let next_proxy_password = if explicit_proxy_clear || !proxy_enabled {
+        None
+    } else {
+        form_proxy_password
+            .or(nested_proxy_password)
+            .or(previous_proxy_password)
+            .map(ToOwned::to_owned)
+    };
+
+    if let Some(proxy) = profile.get_mut("proxy").and_then(Value::as_object_mut) {
+        match next_proxy_password {
+            Some(password) => {
+                if proxy.get("password").and_then(Value::as_str) != Some(password.as_str()) {
+                    proxy.insert("password".to_string(), Value::String(password));
+                    changed = true;
+                }
+            }
+            None => {
+                if proxy.remove("password").is_some() {
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    changed
+}
+
 fn heal_typed_entities(entities: &mut [Value], expected_type: &str) -> bool {
     let mut dirty = false;
     let mut next_order = chrono_now_ms();
@@ -146,10 +245,7 @@ fn heal_typed_entities(entities: &mut [Value], expected_type: &str) -> bool {
             continue;
         };
         if object.get("type").and_then(Value::as_str) != Some(expected_type) {
-            object.insert(
-                "type".to_string(),
-                Value::String(expected_type.to_string()),
-            );
+            object.insert("type".to_string(), Value::String(expected_type.to_string()));
             dirty = true;
         }
         if object.get("order").and_then(Value::as_f64).is_none() {
@@ -265,10 +361,7 @@ pub fn create_command_template(app: &AppHandle, input: Value) -> Result<Value, A
         Value::String("command-template".to_string()),
     );
     if command.get("order").and_then(Value::as_f64).is_none() {
-        command.insert(
-            "order".to_string(),
-            Value::Number(chrono_now_ms().into()),
-        );
+        command.insert("order".to_string(), Value::Number(chrono_now_ms().into()));
     }
     if command.get("command").and_then(Value::as_str).is_none() {
         command.insert("command".to_string(), Value::String(String::new()));
@@ -303,6 +396,7 @@ pub fn create_profile(app: &AppHandle, input: Value) -> Result<Value, AppError> 
 
     let id = new_id("profile");
     let mut profile = ensure_object(&input);
+    normalize_profile_secret_input(&mut profile, None);
     profile.insert("id".to_string(), Value::String(id.clone()));
     profile.insert("group".to_string(), Value::String(group));
     profile.insert("parentId".to_string(), parent_id);
@@ -339,6 +433,7 @@ pub fn update_profile(app: &AppHandle, profile_id: &str, input: Value) -> Result
         .unwrap_or(Value::Null);
 
     let mut profile = ensure_object(&input);
+    normalize_profile_secret_input(&mut profile, Some(&previous));
     profile.insert("id".to_string(), Value::String(profile_id.to_string()));
     profile.insert("group".to_string(), Value::String(group));
     profile.insert("parentId".to_string(), parent_id);
@@ -763,13 +858,37 @@ pub fn update_command_template(
     command_id: &str,
     input: Value,
 ) -> Result<Value, AppError> {
-    let mut commands = read_json_array(app, "commands.json")?;
+    let (_, mut commands) = read_and_heal_command_library(app)?;
     let idx = commands
         .iter()
         .position(|c| c.get("id").and_then(|v| v.as_str()) == Some(command_id))
         .ok_or_else(|| AppError::Storage("Command not found".to_string()))?;
+    let previous = commands[idx].clone();
     let mut updated = ensure_object(&input);
     updated.insert("id".to_string(), Value::String(command_id.to_string()));
+    updated.insert(
+        "type".to_string(),
+        Value::String("command-template".to_string()),
+    );
+    if updated.get("order").and_then(Value::as_f64).is_none() {
+        updated.insert(
+            "order".to_string(),
+            previous
+                .get("order")
+                .cloned()
+                .unwrap_or_else(|| Value::Number(chrono_now_ms().into())),
+        );
+    }
+    if updated.get("command").and_then(Value::as_str).is_none() {
+        updated.insert("command".to_string(), Value::String(String::new()));
+    }
+    if updated
+        .get("appendCarriageReturn")
+        .and_then(Value::as_bool)
+        .is_none()
+    {
+        updated.insert("appendCarriageReturn".to_string(), Value::Bool(true));
+    }
     let updated_value = Value::Object(updated);
     commands[idx] = updated_value.clone();
     write_json_array(app, "commands.json", &commands)?;
@@ -1136,6 +1255,76 @@ mod tests {
             stored["profile-current"]["password"]["storage"].as_str(),
             Some("plain-text-fallback")
         );
+    }
+
+    #[test]
+    fn redacted_edit_placeholders_preserve_stored_profile_secrets() {
+        let previous = json!({
+            "id": "profile-1",
+            "password": "stored-password",
+            "passphrase": "stored-passphrase",
+            "privateKeyPath": "/keys/id_ed25519",
+            "proxy": {
+                "type": "http",
+                "host": "proxy.example.com",
+                "port": 8080,
+                "password": "stored-proxy-password"
+            }
+        });
+        let mut edit = json!({
+            "id": "profile-1",
+            "password": "",
+            "passphrase": "",
+            "privateKeyPath": "",
+            "proxyPassword": "",
+            "proxy": {
+                "type": "http",
+                "host": "proxy.example.com",
+                "port": 8080
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        assert!(normalize_profile_secret_input(&mut edit, Some(&previous)));
+        assert_eq!(edit["password"], "stored-password");
+        assert_eq!(edit["passphrase"], "stored-passphrase");
+        assert_eq!(edit["privateKeyPath"], "/keys/id_ed25519");
+        assert_eq!(edit["proxy"]["password"], "stored-proxy-password");
+        assert!(!edit.contains_key("proxyPassword"));
+
+        let public = strip_secret_fields(&Value::Object(edit));
+        assert!(public.get("password").is_none());
+        assert!(public.get("passphrase").is_none());
+        assert!(public.get("privateKeyPath").is_none());
+        assert!(public.get("proxyPassword").is_none());
+        assert!(public["proxy"].get("password").is_none());
+    }
+
+    #[test]
+    fn proxy_form_password_is_normalized_and_can_be_explicitly_cleared() {
+        let mut create = json!({
+            "proxyPassword": "new-proxy-password",
+            "proxy": { "type": "socks5", "host": "proxy.example.com", "port": 1080 }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(normalize_profile_secret_input(&mut create, None));
+        assert_eq!(create["proxy"]["password"], "new-proxy-password");
+        assert!(!create.contains_key("proxyPassword"));
+
+        let previous = Value::Object(create.clone());
+        let mut clear = json!({
+            "proxyPassword": null,
+            "proxy": { "type": "socks5", "host": "proxy.example.com", "port": 1080 }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(normalize_profile_secret_input(&mut clear, Some(&previous)));
+        assert!(clear["proxy"].get("password").is_none());
     }
 
     #[cfg(unix)]

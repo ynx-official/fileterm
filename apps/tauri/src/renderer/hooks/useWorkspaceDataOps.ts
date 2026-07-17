@@ -4,6 +4,7 @@ import {
   type FileTermDesktopApi,
   type WorkspaceSnapshot
 } from '@fileterm/core'
+import { useRef } from 'react'
 
 interface UseWorkspaceDataOpsParams {
   desktopApi: FileTermDesktopApi | null
@@ -22,6 +23,8 @@ export function useWorkspaceDataOps({
   onError,
   onCloseCurrentWindow
 }: UseWorkspaceDataOpsParams) {
+  const pendingOperationCountRef = useRef(0)
+
   const withAtomicOp = async ({
     scope,
     action,
@@ -32,18 +35,26 @@ export function useWorkspaceDataOps({
     onAfter?: () => void
   }) => {
     if (!desktopApi) {
-      return
+      return false
     }
 
     try {
-      onBusyChange(true)
+      pendingOperationCountRef.current += 1
+      if (pendingOperationCountRef.current === 1) {
+        onBusyChange(true)
+      }
       const snapshot = await action()
       onApplySnapshot(snapshot)
       onAfter?.()
+      return true
     } catch (err) {
       onError(scope, err)
+      return false
     } finally {
-      onBusyChange(false)
+      pendingOperationCountRef.current = Math.max(0, pendingOperationCountRef.current - 1)
+      if (pendingOperationCountRef.current === 0) {
+        onBusyChange(false)
+      }
     }
   }
 

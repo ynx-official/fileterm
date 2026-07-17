@@ -7,6 +7,7 @@ use tokio_serial::{DataBits, FlowControl, Parity, SerialPortBuilderExt, StopBits
 use super::telnet::reject_unsupported;
 use super::terminal::{decode_terminal, emit_terminal_data, encode_terminal, set_terminal_state};
 use super::WorkerCmd;
+use crate::services::WorkspaceTabStatus;
 
 pub fn start_serial_worker(
     tab_id: String,
@@ -19,7 +20,13 @@ pub fn start_serial_worker(
         if let Err(error) = run_serial_worker(&tab_id, &profile, command_rx, &app).await {
             crate::services::logging::session(&app, "ERROR", "serial", &tab_id, &error);
             emit_terminal_data(&app, &tab_id, &format!("\r\n[Serial] {error}\r\n")).await;
-            set_terminal_state(&app, &tab_id, format!("Serial error: {error}"), false).await;
+            set_terminal_state(
+                &app,
+                &tab_id,
+                format!("Serial error: {error}"),
+                WorkspaceTabStatus::Error,
+            )
+            .await;
         }
     });
 }
@@ -77,7 +84,7 @@ async fn run_serial_worker(
         app,
         tab_id,
         format!("Serial {device_path} @ {baud_rate}"),
-        true,
+        WorkspaceTabStatus::Connected,
     )
     .await;
     emit_terminal_data(app, tab_id, "串口已连接\r\n").await;
@@ -97,7 +104,7 @@ async fn run_serial_worker(
                     Some(WorkerCmd::Disconnect) | None => {
                         crate::services::logging::session(app, "INFO", "serial", tab_id, "disconnecting");
                         let _ = writer.shutdown().await;
-                        set_terminal_state(app, tab_id, "Serial disconnected".to_string(), false).await;
+                        set_terminal_state(app, tab_id, "Serial disconnected".to_string(), WorkspaceTabStatus::Closed).await;
                         return Ok(());
                     }
                     Some(command) => reject_unsupported(command, "Serial 不支持此文件或隧道操作"),
@@ -107,7 +114,7 @@ async fn run_serial_worker(
                 let count = read.map_err(|error| serial_error(device_path, error))?;
                 if count == 0 {
                     crate::services::logging::session(app, "WARN", "serial", tab_id, "device disconnected");
-                    set_terminal_state(app, tab_id, "Serial device disconnected".to_string(), false).await;
+                    set_terminal_state(app, tab_id, "Serial device disconnected".to_string(), WorkspaceTabStatus::Closed).await;
                     return Ok(());
                 }
                 emit_terminal_data(app, tab_id, &decode_terminal(&buffer[..count], &encoding)).await;

@@ -1,5 +1,6 @@
 import type { FileTermDesktopApi } from '@fileterm/core'
 import { CloseButton } from '../common/CloseButton'
+import { t } from '../../i18n'
 
 export function WindowMenubar({ desktopApi, isMaximized }: { desktopApi?: FileTermDesktopApi; isMaximized: boolean }) {
   const openWindowMenu = (menu: 'file' | 'view' | 'window', target: HTMLButtonElement) => {
@@ -11,18 +12,18 @@ export function WindowMenubar({ desktopApi, isMaximized }: { desktopApi?: FileTe
     <div className="window-menubar" data-tauri-drag-region="deep">
       <div className="window-menu-items">
         <button type="button" onClick={(event) => openWindowMenu('file', event.currentTarget)}>
-          File
+          {t.nativeMenuFile}
         </button>
         <button type="button" onClick={(event) => openWindowMenu('view', event.currentTarget)}>
-          View
+          {t.nativeMenuView}
         </button>
         <button type="button" onClick={(event) => openWindowMenu('window', event.currentTarget)}>
-          Window
+          {t.nativeMenuWindow}
         </button>
       </div>
       <div className="window-control-buttons">
         <button
-          aria-label="Minimize"
+          aria-label={t.windowMinimize}
           type="button"
           onClick={() => {
             void desktopApi?.minimizeCurrentWindow()
@@ -33,7 +34,7 @@ export function WindowMenubar({ desktopApi, isMaximized }: { desktopApi?: FileTe
           </svg>
         </button>
         <button
-          aria-label="Maximize"
+          aria-label={isMaximized ? t.windowRestore : t.windowMaximize}
           type="button"
           onClick={() => {
             void desktopApi?.toggleMaximizeCurrentWindow()
@@ -55,7 +56,7 @@ export function WindowMenubar({ desktopApi, isMaximized }: { desktopApi?: FileTe
           )}
         </button>
         <CloseButton
-          aria-label="Close"
+          aria-label={t.windowClose}
           onClick={() => {
             void desktopApi?.closeCurrentWindow()
           }}

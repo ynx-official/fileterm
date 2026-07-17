@@ -43,7 +43,26 @@ pub struct WorkspaceTab {
     pub session_type: String,
     pub title: String,
     pub layout: String, // "terminal-file" | "file-only" | "terminal-only"
-    pub status: String, // "connecting" | "connected" | "disconnected"
+    pub status: WorkspaceTabStatus,
+}
+
+/// Rust-side mirror of `packages/core::TabStatus`. Keeping this as an enum
+/// prevents backend-only strings such as `disconnected` from leaking into the
+/// renderer and silently breaking menus/status views.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkspaceTabStatus {
+    Idle,
+    Connecting,
+    Connected,
+    Error,
+    Closed,
+}
+
+impl WorkspaceTabStatus {
+    pub fn is_connected(self) -> bool {
+        self == Self::Connected
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -133,6 +152,28 @@ pub fn reconnect_mode_for_profile(profile: &serde_json::Value) -> Option<String>
     )
 }
 
+/// Initial browser path for file-capable sessions. SSH follows Electron's
+/// `currentRemotePath` default (`.`), while FTP keeps its protocol root `/`.
+pub fn initial_remote_path_for_profile(profile: &serde_json::Value) -> String {
+    if let Some(path) = profile
+        .get("remotePath")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        return path.to_string();
+    }
+    match profile
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("ssh")
+    {
+        "ssh" => ".".to_string(),
+        "ftp" => "/".to_string(),
+        _ => String::new(),
+    }
+}
+
 /// The local endpoint to connect when an SSH server opens a `forwarded-tcpip`
 /// channel for a remote (`-R`) rule. These stay main-process only; renderer
 /// receives the public tunnel snapshot through the command result instead.
@@ -193,7 +234,14 @@ pub struct WorkspaceState {
     /// Import plans retain sanitized source data in main process until the
     /// renderer confirms a selected subset and conflict strategy.
     pub connection_import_plans: Arc<RwLock<HashMap<String, Vec<ConnectionImportPlanEntry>>>>,
+    /// Serializes profile/folder/command read-modify-write transactions from
+    /// independent Tauri windows. Unlike Electron's single main event loop,
+    /// Tauri commands can otherwise overwrite each other's JSON snapshots.
+    pub library_mutation: Arc<Mutex<()>>,
     pub update_status: Arc<RwLock<Option<serde_json::Value>>>,
+    /// Matches Electron's update check single-flight promise. Concurrent UI
+    /// clicks wait for the active check and reuse its final status.
+    pub update_check: Arc<Mutex<()>>,
 }
 
 impl Default for WorkspaceState {
@@ -217,7 +265,9 @@ impl Default for WorkspaceState {
             transfer_last_event: Arc::new(Mutex::new(HashMap::new())),
             transfer_progress_samples: Arc::new(Mutex::new(HashMap::new())),
             connection_import_plans: Arc::new(RwLock::new(HashMap::new())),
+            library_mutation: Arc::new(Mutex::new(())),
             update_status: Arc::new(RwLock::new(None)),
+            update_check: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -240,7 +290,8 @@ impl WorkspaceState {
 #[cfg(test)]
 mod tests {
     use super::{
-        reconnect_mode_for_profile, ConnectionCapabilities, TransferRunHandle, WorkspaceState,
+        initial_remote_path_for_profile, reconnect_mode_for_profile, ConnectionCapabilities,
+        TransferRunHandle, WorkspaceState, WorkspaceTabStatus,
     };
     use std::sync::{Arc, Mutex};
     use tauri::ipc::Channel;
@@ -264,6 +315,20 @@ mod tests {
     }
 
     #[test]
+    fn tab_status_serializes_to_the_core_union_values() {
+        let statuses = [
+            (WorkspaceTabStatus::Idle, "idle"),
+            (WorkspaceTabStatus::Connecting, "connecting"),
+            (WorkspaceTabStatus::Connected, "connected"),
+            (WorkspaceTabStatus::Error, "error"),
+            (WorkspaceTabStatus::Closed, "closed"),
+        ];
+        for (status, expected) in statuses {
+            assert_eq!(serde_json::to_value(status).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn reconnect_mode_is_present_only_for_ssh_profiles() {
         assert_eq!(
             reconnect_mode_for_profile(&serde_json::json!({
@@ -281,6 +346,25 @@ mod tests {
                 &serde_json::json!({ "type": "ftp", "reconnectMode": "auto" })
             ),
             None
+        );
+    }
+
+    #[test]
+    fn initial_remote_path_respects_profile_and_protocol_defaults() {
+        assert_eq!(
+            initial_remote_path_for_profile(&serde_json::json!({
+                "type": "ssh",
+                "remotePath": "/srv/app"
+            })),
+            "/srv/app"
+        );
+        assert_eq!(
+            initial_remote_path_for_profile(&serde_json::json!({ "type": "ssh" })),
+            "."
+        );
+        assert_eq!(
+            initial_remote_path_for_profile(&serde_json::json!({ "type": "ftp" })),
+            "/"
         );
     }
 

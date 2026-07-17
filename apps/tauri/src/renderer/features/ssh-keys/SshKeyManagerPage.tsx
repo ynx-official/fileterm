@@ -66,6 +66,7 @@ export function SshKeyManagerPage({
   const [expandedFolderIds, setExpandedFolderIds] = useState<Set<string>>(new Set())
   const [editingFolder, setEditingFolder] = useState<{ id: string; name: string } | null>(null)
   const [pendingDelete, setPendingDelete] = useState<DeleteTarget | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const [dragging, setDragging] = useState<DragItem | null>(null)
   const [dragOver, setDragOver] = useState<{ id: string; kind: DragItem['kind']; position: DragPosition } | null>(null)
   const dragStateRef = useRef<{
@@ -76,6 +77,7 @@ export function SshKeyManagerPage({
   const [isCreatingFolder, setIsCreatingFolder] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const uiStateRevisionRef = useRef(0)
+  const busyRef = useRef(false)
 
   useEffect(() => {
     let disposed = false
@@ -216,56 +218,76 @@ export function SshKeyManagerPage({
     })
   }
 
-  const saveFolderRename = () => {
+  const saveFolderRename = async () => {
     if (!editingFolder) return
     const name = editingFolder.name.trim()
     const current = folders.find((folder) => folder.id === editingFolder.id)
     if (
-      name &&
-      name !== current?.name &&
-      !folders.some((folder) => folder.id !== editingFolder.id && folder.name === name)
+      !name ||
+      name === current?.name ||
+      folders.some((folder) => folder.id !== editingFolder.id && folder.name === name)
     ) {
-      persistUiState(
+      setEditingFolder(null)
+      return
+    }
+    if (busyRef.current) return
+
+    busyRef.current = true
+    setBusy(true)
+    try {
+      const persisted = await persistUiState(
         folders.map((folder) => (folder.id === editingFolder.id ? { ...folder, name } : folder)),
         assignments
       )
+      if (persisted) setEditingFolder(null)
+    } finally {
+      busyRef.current = false
+      setBusy(false)
     }
-    setEditingFolder(null)
   }
 
   const requestDelete = (kind: DeleteTarget['kind'], id: string, name: string) => {
+    clearError()
+    setDeleteError(null)
     setPendingDelete({ kind, id, name })
   }
 
   const confirmDelete = async () => {
-    if (!pendingDelete) return
+    if (!pendingDelete || busyRef.current) return
+    const target = pendingDelete
+    busyRef.current = true
     setBusy(true)
+    setDeleteError(null)
     try {
-      if (pendingDelete.kind === 'key') {
-        await deleteKey(pendingDelete.id)
-        if (assignments[pendingDelete.id]) {
+      if (target.kind === 'key') {
+        await deleteKey(target.id)
+        if (assignments[target.id]) {
           const nextAssignments = { ...assignments }
-          delete nextAssignments[pendingDelete.id]
-          persistUiState(folders, nextAssignments)
+          delete nextAssignments[target.id]
+          await persistUiState(folders, nextAssignments)
         }
       } else {
         const nextAssignments = { ...assignments }
         Object.keys(nextAssignments).forEach((keyId) => {
-          if (nextAssignments[keyId] === pendingDelete.id) delete nextAssignments[keyId]
+          if (nextAssignments[keyId] === target.id) delete nextAssignments[keyId]
         })
-        persistUiState(
-          folders.filter((folder) => folder.id !== pendingDelete.id),
+        const persisted = await persistUiState(
+          folders.filter((folder) => folder.id !== target.id),
           nextAssignments
         )
+        if (!persisted) return
         setExpandedFolderIds((current) => {
           const next = new Set(current)
-          next.delete(pendingDelete.id)
+          next.delete(target.id)
           return next
         })
-        if (activeFolderId === pendingDelete.id) setActiveFolderId('all')
+        if (activeFolderId === target.id) setActiveFolderId('all')
       }
       setPendingDelete(null)
+    } catch (cause) {
+      setDeleteError(cause instanceof Error ? cause.message : String(cause))
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
   }
@@ -495,7 +517,8 @@ export function SshKeyManagerPage({
   }
 
   const handleImport = async (note: string, sourcePath?: string, folderId?: string) => {
-    if (!sourcePath) return
+    if (!sourcePath || busyRef.current) return
+    busyRef.current = true
     setBusy(true)
     try {
       const result = await importKey(note, sourcePath)
@@ -503,28 +526,32 @@ export function SshKeyManagerPage({
         const nextAssignments = { ...assignments }
         if (folderId) nextAssignments[result.key.id] = folderId
         else delete nextAssignments[result.key.id]
-        persistUiState(folders, nextAssignments)
+        await persistUiState(folders, nextAssignments)
       }
       setNoteDialog(null)
     } catch {
       // useSshKeyLibrary 已将可展示错误写入 error 状态。
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
   }
 
   const handleEditNote = async (keyId: string, note: string, folderId?: string) => {
+    if (busyRef.current) return
+    busyRef.current = true
     setBusy(true)
     try {
       await updateNote(keyId, note)
       const nextAssignments = { ...assignments }
       if (folderId) nextAssignments[keyId] = folderId
       else delete nextAssignments[keyId]
-      persistUiState(folders, nextAssignments)
+      await persistUiState(folders, nextAssignments)
       setNoteDialog(null)
     } catch {
       // useSshKeyLibrary 已将可展示错误写入 error 状态。
     } finally {
+      busyRef.current = false
       setBusy(false)
     }
   }
@@ -713,14 +740,15 @@ export function SshKeyManagerPage({
                               <input
                                 autoFocus
                                 className="manager-inline-input"
+                                disabled={busy}
                                 value={editingFolder.name}
-                                onBlur={saveFolderRename}
+                                onBlur={() => void saveFolderRename()}
                                 onChange={(event) => setEditingFolder({ id: folder.id, name: event.target.value })}
                                 onClick={(event) => event.stopPropagation()}
                                 onKeyDown={(event) => {
                                   event.stopPropagation()
-                                  if (event.key === 'Enter') saveFolderRename()
-                                  if (event.key === 'Escape') setEditingFolder(null)
+                                  if (event.key === 'Enter') void saveFolderRename()
+                                  if (event.key === 'Escape' && !busy) setEditingFolder(null)
                                 }}
                               />
                             ) : (
@@ -820,7 +848,7 @@ export function SshKeyManagerPage({
 
       {noteDialog ? (
         <SshKeyNoteDialog
-          errorMessage={error}
+          errorMessage={error || uiStateError}
           folders={folders}
           initialFolderId={
             noteDialog.mode === 'edit' ? folderForKey(noteDialog.keyId) : activeFolderId === 'all' ? '' : activeFolderId
@@ -850,8 +878,12 @@ export function SshKeyManagerPage({
               : `确定删除 ${pendingDelete.name} 吗？此操作不会删除原始文件。`
           }
           isSubmitting={busy}
+          errorMessage={deleteError || error || uiStateError}
           onClose={() => {
-            if (!busy) setPendingDelete(null)
+            if (!busyRef.current) {
+              setDeleteError(null)
+              setPendingDelete(null)
+            }
           }}
           onConfirm={() => void confirmDelete()}
           title={t.delete}

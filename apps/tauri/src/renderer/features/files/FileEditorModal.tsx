@@ -273,7 +273,7 @@ export function FileEditorModal({
             {isSaving ? <span aria-hidden="true" className="button-spinner" /> : null}
             <span>{isSaving ? t.saving : t.save}</span>
           </button>
-          <CloseButton onClick={onClose} />
+          <CloseButton disabled={isBusy || isSaving} onClick={onClose} />
         </div>
       </div>
 

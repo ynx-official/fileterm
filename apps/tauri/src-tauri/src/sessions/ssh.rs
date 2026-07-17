@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,9 @@ use tokio_socks::tcp::Socks5Stream;
 use tokio_util::sync::CancellationToken;
 
 use super::{TransferFileStat, WorkerCmd};
+use crate::services::WorkspaceTabStatus;
+
+const DEFAULT_SSH_KEY_FILES: [&str; 4] = ["id_ed25519", "id_ecdsa", "id_rsa", "id_dsa"];
 
 fn resource_monitoring_enabled(profile: &Value) -> bool {
     profile
@@ -142,9 +146,10 @@ pub fn start_ssh_worker(
             crate::services::logging::session(&app, "INFO", "ssh", &tid, "worker cancelled");
             return;
         }
-        match run_result {
+        let final_status = match run_result {
             Ok(()) => {
                 emit_terminal_data(&app, &tid, "连接已断开\r\n").await;
+                WorkspaceTabStatus::Closed
             }
             Err(e) => {
                 crate::services::logging::session(
@@ -155,9 +160,10 @@ pub fn start_ssh_worker(
                     format!("worker failed: {e}"),
                 );
                 emit_terminal_data(&app, &tid, &format!("连接失败: {}\r\n", e)).await;
+                WorkspaceTabStatus::Error
             }
-        }
-        update_tab_status_and_emit(&app, &tid, "disconnected").await;
+        };
+        update_tab_status_and_emit(&app, &tid, final_status).await;
 
         // ── Auto-reconnect with 2000ms delay ───────────────────────────────
         // Mirrors Electron's `workspace-service.ts` autoReconnectingTabs:
@@ -316,6 +322,12 @@ impl Handler for ClientHandler {
             "accept-and-save" => {
                 // Persist the trusted fingerprint so future connects
                 // short-circuit the prompt.
+                let library_mutation = self
+                    .app
+                    .state::<crate::services::workspace::WorkspaceState>()
+                    .library_mutation
+                    .clone();
+                let _guard = library_mutation.lock().await;
                 let _ = crate::services::profile_ops::update_trusted_host_fingerprint(
                     &self.app,
                     &self.profile_id,
@@ -841,15 +853,15 @@ async fn read_socks5_host(socket: &mut TcpStream, address_type: u8) -> Result<St
 // Worker loop
 // ─────────────────────────────────────────────────────────────────────────────
 
-async fn update_tab_status_and_emit(app: &AppHandle, tab_id: &str, status: &str) {
+async fn update_tab_status_and_emit(app: &AppHandle, tab_id: &str, status: WorkspaceTabStatus) {
     let state = app.state::<crate::services::workspace::WorkspaceState>();
-    let connected = status == "connected";
+    let connected = status.is_connected();
     let mut summary = "连接已断开".to_string();
     let mut transcript = String::new();
     {
         let mut tabs = state.tabs.write().await;
         if let Some(tab) = tabs.iter_mut().find(|t| t.id == tab_id) {
-            tab.status = status.to_string();
+            tab.status = status;
         }
     }
     {
@@ -1798,6 +1810,110 @@ enum AuthenticationResult {
     Rejected,
 }
 
+fn default_ssh_key_paths(home_directory: &Path) -> Vec<PathBuf> {
+    DEFAULT_SSH_KEY_FILES
+        .iter()
+        .map(|file_name| home_directory.join(".ssh").join(file_name))
+        .collect()
+}
+
+async fn authenticate_private_key_content(
+    handle: &mut Handle<ClientHandler>,
+    username: &str,
+    key_content: &str,
+    passphrase: Option<&str>,
+) -> Result<bool, String> {
+    let key_pair = russh::keys::decode_secret_key(key_content, passphrase)
+        .map_err(|error| error.to_string())?;
+    // Best-effort: pick the strongest RSA hash the server advertises. For
+    // non-RSA keys, hash_alg is ignored by PrivateKeyWithHashAlg::new.
+    let hash_alg: Option<russh::keys::HashAlg> = if key_pair.algorithm().is_rsa() {
+        match handle.best_supported_rsa_hash().await {
+            Ok(Some(Some(hash))) => Some(hash),
+            _ => Some(russh::keys::HashAlg::Sha512),
+        }
+    } else {
+        None
+    };
+    let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), hash_alg);
+    handle
+        .authenticate_publickey(username, key_with_hash)
+        .await
+        .map(|result| result.success())
+        .map_err(|error| error.to_string())
+}
+
+async fn try_system_authenticate(
+    handle: &mut Handle<ClientHandler>,
+    username: &str,
+    profile: &Value,
+    app: &AppHandle,
+) -> Result<AuthenticationResult, String> {
+    let mut candidate_found = false;
+    let mut authentication_attempted = false;
+    let mut candidate_errors = Vec::new();
+
+    // Agent support is Unix-only in russh, but a missing/broken agent must not
+    // prevent the default-key fallback (including on Windows).
+    #[cfg(unix)]
+    match russh::keys::agent::client::AgentClient::connect_env().await {
+        Ok(mut agent) => {
+            candidate_found = true;
+            match agent.request_identities().await {
+                Ok(identities) => {
+                    for identity in identities {
+                        authentication_attempted = true;
+                        let public_key = identity.public_key().into_owned();
+                        match handle
+                            .authenticate_publickey_with(username, public_key, None, &mut agent)
+                            .await
+                        {
+                            Ok(result) if result.success() => {
+                                return Ok(AuthenticationResult::Authenticated)
+                            }
+                            Ok(_) => {}
+                            Err(error) => candidate_errors.push(error.to_string()),
+                        }
+                    }
+                }
+                Err(error) => candidate_errors.push(error.to_string()),
+            }
+        }
+        Err(error) => candidate_errors.push(error.to_string()),
+    }
+
+    let home_directory = app.path().home_dir().map_err(|error| error.to_string())?;
+    let passphrase = profile.get("passphrase").and_then(Value::as_str);
+    for path in default_ssh_key_paths(&home_directory) {
+        let key_content = match std::fs::read_to_string(&path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                candidate_found = true;
+                candidate_errors.push(error.to_string());
+                continue;
+            }
+        };
+        candidate_found = true;
+        match authenticate_private_key_content(handle, username, &key_content, passphrase).await {
+            Ok(true) => return Ok(AuthenticationResult::Authenticated),
+            Ok(false) => authentication_attempted = true,
+            Err(error) => candidate_errors.push(error),
+        }
+    }
+
+    if !candidate_found {
+        return Err("No SSH agent or default private key found on this computer".to_string());
+    }
+    if !authentication_attempted && !candidate_errors.is_empty() {
+        return Err(format!(
+            "Unable to load SSH agent/default private key: {}",
+            candidate_errors.remove(0)
+        ));
+    }
+    Ok(AuthenticationResult::Rejected)
+}
+
 #[derive(Clone, Debug)]
 struct KeyboardInteractivePrompt {
     prompt: String,
@@ -1836,6 +1952,9 @@ async fn try_authenticate(
                 .get("password")
                 .and_then(|p| p.as_str())
                 .unwrap_or("");
+            if password.is_empty() {
+                return try_system_authenticate(handle, username, profile, app).await;
+            }
             let res = handle
                 .authenticate_password(username, password)
                 .await
@@ -1872,24 +1991,14 @@ async fn try_authenticate(
                 )
             };
 
-            let key_pair = russh::keys::decode_secret_key(&key_content, passphrase.as_deref())
-                .map_err(|e| e.to_string())?;
-            // Best-effort: pick the strongest RSA hash the server advertises.
-            // For non-RSA keys, hash_alg is ignored by PrivateKeyWithHashAlg::new.
-            let hash_alg: Option<russh::keys::HashAlg> = if key_pair.algorithm().is_rsa() {
-                match handle.best_supported_rsa_hash().await {
-                    Ok(Some(Some(h))) => Some(h),
-                    _ => Some(russh::keys::HashAlg::Sha512),
-                }
-            } else {
-                None
-            };
-            let key_with_hash = PrivateKeyWithHashAlg::new(Arc::new(key_pair), hash_alg);
-            let res = handle
-                .authenticate_publickey(username, key_with_hash)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(if res.success() {
+            let authenticated = authenticate_private_key_content(
+                handle,
+                username,
+                &key_content,
+                passphrase.as_deref(),
+            )
+            .await?;
+            Ok(if authenticated {
                 AuthenticationResult::Authenticated
             } else if profile.get("password").and_then(Value::as_str).is_some() {
                 AuthenticationResult::NeedsFreshKeyboardInteractive
@@ -1921,37 +2030,7 @@ async fn try_authenticate(
                 },
             )
         }
-        _ => {
-            // russh's environment-backed agent client uses a Unix socket and
-            // is not available on Windows. Fail explicitly there rather than
-            // compiling a nonexistent `connect_env` implementation.
-            #[cfg(unix)]
-            {
-                let mut agent = russh::keys::agent::client::AgentClient::connect_env()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let identities = agent
-                    .request_identities()
-                    .await
-                    .map_err(|e| e.to_string())?;
-                for identity in identities {
-                    let pub_key = identity.public_key().into_owned();
-                    let res = handle
-                        .authenticate_publickey_with(username, pub_key, None, &mut agent)
-                        .await
-                        .map_err(|e| e.to_string())?;
-                    if res.success() {
-                        return Ok(AuthenticationResult::Authenticated);
-                    }
-                }
-                Ok(AuthenticationResult::Rejected)
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (handle, username);
-                Err("SSH Agent authentication is not supported on this platform.".to_string())
-            }
-        }
+        _ => try_system_authenticate(handle, username, profile, app).await,
     }
 }
 
@@ -2500,7 +2579,7 @@ async fn run_worker_loop(
         );
     }
 
-    update_tab_status_and_emit(app, tab_id, "connected").await;
+    update_tab_status_and_emit(app, tab_id, WorkspaceTabStatus::Connected).await;
 
     // Emit "connected" notice so the user sees confirmation in the terminal.
     // Mirrors Electron's `appendSystemMessage('连接主机成功\r\n')`.
@@ -2517,6 +2596,15 @@ async fn run_worker_loop(
         let existing_reconnect_mode = sessions
             .get(tab_id)
             .and_then(|session| session.reconnect_mode.clone());
+        let existing_remote_path = sessions
+            .get(tab_id)
+            .map(|session| session.remote_path.clone())
+            .unwrap_or_else(|| {
+                crate::services::workspace::initial_remote_path_for_profile(profile)
+            });
+        let existing_shell_cwd = sessions
+            .get(tab_id)
+            .and_then(|session| session.shell_cwd.clone());
         sessions.insert(
             tab_id.to_string(),
             crate::services::SessionSnapshot {
@@ -2528,8 +2616,8 @@ async fn run_worker_loop(
                 access_host: format!("{}:{}", host, port),
                 summary: format!("{}@{}", username, host),
                 terminal_transcript: existing_transcript,
-                remote_path: "/".to_string(),
-                shell_cwd: Some("/".to_string()),
+                remote_path: existing_remote_path,
+                shell_cwd: existing_shell_cwd,
                 follow_shell_cwd: true,
                 remote_files_loading: false,
                 remote_files: Vec::new(),
@@ -2561,9 +2649,18 @@ async fn run_worker_loop(
     let (sftp_arc, sftp_unavailable_reason) = match open_sftp_session(&handle).await {
         Ok(sftp) => {
             let sftp_arc = Arc::new(RwLock::new(sftp));
+            let initial_remote_path = {
+                let sessions = state.sessions.read().await;
+                sessions
+                    .get(tab_id)
+                    .map(|session| session.remote_path.clone())
+                    .unwrap_or_else(|| {
+                        crate::services::workspace::initial_remote_path_for_profile(profile)
+                    })
+            };
             let initial_files = {
                 let sftp = sftp_arc.write().await;
-                list_dir(&sftp, "/").await
+                list_dir(&sftp, &initial_remote_path).await
             };
             match initial_files {
                 Ok(files) => {
@@ -2573,11 +2670,12 @@ async fn run_worker_loop(
                     }
                 }
                 Err(error) => {
-                    // A usable SFTP channel can still lack access to `/`.
+                    // A usable SFTP channel can still lack access to the
+                    // profile's configured starting directory.
                     emit_terminal_data(
                         app,
                         tab_id,
-                        &format!("\r\n[files] 列出根目录失败: {error}\r\n"),
+                        &format!("\r\n[files] 列出目录 {initial_remote_path} 失败: {error}\r\n"),
                     )
                     .await;
                 }
@@ -5055,8 +5153,8 @@ fn format_perm(perm: u32, is_dir: bool, is_link: bool) -> String {
 mod tests {
     use super::{
         build_http_connect_request, capture_sudo_password_input, coalesce_terminal_input,
-        format_sftp_unavailable_reason, is_password_prompt, looks_like_mfa_prompt,
-        looks_like_root_prompt, looks_like_shell_prompt, parent_remote_path,
+        default_ssh_key_paths, format_sftp_unavailable_reason, is_password_prompt,
+        looks_like_mfa_prompt, looks_like_root_prompt, looks_like_shell_prompt, parent_remote_path,
         remote_bind_host_matches, resource_monitoring_enabled, suppress_shell_setup_echo,
         track_cwd_and_user, track_sudo_prompt_from_terminal,
         try_keyboard_interactive_with_responder, tunnel_bind_address, validate_tunnel_rule,
@@ -5066,6 +5164,7 @@ mod tests {
     #[cfg(unix)]
     use super::{forward_local_connection, forward_socks5_connection};
     use std::borrow::Cow;
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
@@ -5452,6 +5551,20 @@ mod tests {
         assert_eq!(
             parent_remote_path("/home/stoffel/下载/"),
             Some("/home/stoffel".to_string())
+        );
+    }
+
+    #[test]
+    fn default_ssh_key_candidates_match_electron_precedence() {
+        let home = Path::new("/home/fileterm");
+        assert_eq!(
+            default_ssh_key_paths(home),
+            vec![
+                home.join(".ssh/id_ed25519"),
+                home.join(".ssh/id_ecdsa"),
+                home.join(".ssh/id_rsa"),
+                home.join(".ssh/id_dsa"),
+            ]
         );
     }
 

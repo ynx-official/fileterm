@@ -188,8 +188,12 @@ platform probe
 - macOS 菜单栏托盘图标使用 `apps/tauri/build/trayTemplate*.png` template 资源，由 Rust/Tauri backend 设置 template 属性。
 - Tauri 托盘由 Rust backend 显式创建：macOS 使用独立 template 图标，Windows/Linux 使用应用图标。主窗口与可见子窗口隐藏到托盘后会成组恢复；普通关闭请求与真正退出请求保持分离。
 - 应用更新通过 Rust/Tauri update service 统一管理，renderer 仅经 `Rust commands/events -> tauri-api.ts -> renderer` 查询状态和触发检查；当前使用 GitHub Release 版本检查与安全发布页交接，签名静默 updater 仍待 Phase 5 发布资产。
-- 原生关闭快捷键由 Rust/Tauri backend 统一收口：macOS 使用 `Cmd+Q` 请求应用退出确认、`Cmd+W` 请求关闭当前工作区项/子窗口；Windows/Linux 分别保持 `Alt+F4` 退出与 `Ctrl+W` 关闭窗口语义。最后一个工作区项只触发普通窗口关闭/隐藏，不得直接销毁主窗口；托盘退出和应用退出快捷键必须走同一确认与 transfer journal 清理链路。
-- 主题和语言属于 Rust backend 持久化的 UI preferences；资源监控是 SSH 连接配置，关闭后该连接不采集资源数据，工作区仅保留窄侧栏。
+- 原生关闭快捷键由 Rust/Tauri backend 统一收口：macOS 使用 `Cmd+Q` 请求应用退出确认、`Cmd+W` 请求关闭当前工作区项/子窗口；Windows/Linux 分别保持 `Alt+F4` 退出与 `Ctrl+W` 关闭窗口语义。最后一个工作区项只触发普通窗口关闭/隐藏，不得直接销毁主窗口；托盘退出和应用退出快捷键必须走同一确认与 transfer journal 清理链路。真正退出前还必须逐个等待独立 Monaco 编辑器完成保存或确认丢弃，任一编辑器取消都会中止 session/transfer shutdown。
+- 主题和语言属于 Rust backend 持久化的 UI preferences；Tauri 应用菜单、托盘菜单与 Windows 自绘 menubar 必须从同一份 locale 构建并在语言切换后刷新。macOS 应用菜单保留 About/Services/Hide/Bring All to Front 等标准角色，但 Quit 仍走 FileTerm 自己的脏编辑器、活动连接和 transfer cleanup 确认链路。资源监控是 SSH 连接配置，关闭后该连接不采集资源数据，工作区仅保留窄侧栏。
+- Renderer 的持久化操作必须返回并应用 Rust command 的最新 snapshot；跨窗口广播只负责同步其他窗口，不能作为发起窗口更新成功状态的唯一来源。弹窗、传输与隧道操作在 React 提交态之外还必须使用同步 guard，避免下一帧禁用按钮前的快速双击重复调用 backend。
+- Tauri workspace tab 状态由 Rust 枚举限制为 core `TabStatus` 的 `idle/connecting/connected/error/closed`；正常或主动断开使用 `closed`，worker/连接失败使用 `error`，renderer 不接受运行时自造状态字符串。
+- profile、folder、command 的持久化 mutation 由 Rust workspace 级锁串行化，成功后统一广播 `workspace:snapshot`；完整快照读取使用同一把锁，不能观察跨文件级联写入的中间态。广播失败只记录告警，不能把已经落盘的操作伪装成失败并诱发重复提交。
+- Rust 存储层可在 main-side 读取时合并 `profile-secrets.json`，但 `workspace:snapshot` 与独立窗口使用的 connection library 在跨 IPC 前必须统一剥离密码、私钥口令、私钥路径和代理密码。renderer 编辑脱敏 profile 时提交的空白 secret 只表示“未替换”，由 main-side 保留原值；显式 `null` 才表示清除。表单层 `proxyPassword` 必须在 main-side 规范化为 `proxy.password` 后进入 secret 文件，不能落入公开 `profiles.json`。
 - Rust backend 在 Tauri userData 缺少迁移 marker 时，最多一次导入旧 Electron 用户目录中的应用自有 JSON/SSH key 数据；Tauri 当前数据按 ID 优先，legacy 只补缺失记录，整批 staging/commit 失败会回滚且不写 marker。迁移成功后不再 live merge，Chromium session、缓存与日志始终不迁移。
 - 连接与 WebDAV 凭据继续明文分文件保存，不接入 macOS safeStorage/钥匙串；Unix secret/key 文件在创建、迁移和读取自愈时收紧为 `0600`，profile 删除会重建 secret map 以清理孤儿记录。Windows 依赖应用数据目录的 best-effort 用户隔离。
 - Tauri backend 的持久化诊断统一进入 `services/logging.rs`：日志按 `app/window/protocol:tab/metrics/tunnel/transfer:id/local/update/webdav/profile` 分 scope，使用 `DEBUG/INFO/WARN/ERROR` 级别，并执行大小轮转与凭据标签脱敏。服务层不得只写 `stderr`；终端内容、文件内容、密码、token、私钥口令和完整主机指纹不得进入日志。
