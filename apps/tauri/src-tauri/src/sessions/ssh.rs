@@ -1035,6 +1035,20 @@ fn track_cwd_and_user(chunk: &str, buffer: &mut String) -> (Option<String>, Opti
     (cwd, user)
 }
 
+/// Map the identity reported by the interactive shell to the file pane access
+/// model. Cached sudo credentials are deliberately not part of this decision:
+/// they make a future root switch reusable, but they do not mean the current
+/// shell is still privileged after `exit` returns to the login user.
+fn resolve_shell_file_access(login_user: &str, shell_user: &str) -> (&'static str, Option<String>) {
+    let login_user = login_user.trim();
+    let shell_user = shell_user.trim();
+    if login_user.is_empty() || shell_user.is_empty() || login_user == shell_user {
+        ("user", None)
+    } else {
+        ("root", Some(shell_user.to_string()))
+    }
+}
+
 /// Remove CSI/OSC control sequences before inspecting a prompt. This mirrors
 /// Electron's root-prompt heuristic without feeding visual escape codes into
 /// the comparison.
@@ -3182,24 +3196,32 @@ async fn run_worker_loop(
                                         // shell user == login user ⇒ 切回 user 视角
                                         let login = s.login_user.clone();
                                         if let Some(login_user) = login {
-                                            if user.as_str() != login_user.as_str() {
-                                                // sudo -i / su 切到其他用户：自动启用 root 视角
-                                                if s.file_access_mode != "root" {
-                                                    s.file_access_mode = "root".to_string();
-                                                    // sudo_user 用观察到的 shell user（如 "root"）
-                                                    s.sudo_user = Some(user.clone());
-                                                    s.has_reusable_sudo_auth = sudo_password.is_some();
-                                                    file_mode_switch = Some(("root".to_string(), Some(user.clone())));
-                                                    // `sudo -i` normally keeps the same CWD. Refresh
-                                                    // anyway so the file pane switches its access model
-                                                    // instead of waiting for a subsequent `cd`.
-                                                    cwd_to_follow = s.shell_cwd.clone();
+                                            let (target_mode, observed_sudo_user) =
+                                                resolve_shell_file_access(&login_user, user);
+                                            if s.file_access_mode != target_mode {
+                                                s.file_access_mode = target_mode.to_string();
+                                                if let Some(observed_sudo_user) = observed_sudo_user {
+                                                    // sudo -i / su 切到其他用户：用实际 shell
+                                                    // 身份作为 root 文件视角的目标用户。
+                                                    s.sudo_user = Some(observed_sudo_user.clone());
+                                                    s.has_reusable_sudo_auth =
+                                                        sudo_password.is_some();
+                                                    file_mode_switch = Some((
+                                                        target_mode.to_string(),
+                                                        Some(observed_sudo_user),
+                                                    ));
+                                                } else {
+                                                    // `exit` 回到登录用户时必须立即恢复 user
+                                                    // 视角。保留 sudo_user / 密码缓存只用于下次
+                                                    // 手动切 root，不得让工具栏继续显示 root。
+                                                    file_mode_switch = Some((
+                                                        target_mode.to_string(),
+                                                        s.sudo_user.clone(),
+                                                    ));
                                                 }
-                                            } else if s.file_access_mode == "root" && !s.has_reusable_sudo_auth {
-                                                // 切回登录用户：若没有用户显式配置的 sudo 凭据，
-                                                // 自动切回 user 视角
-                                                s.file_access_mode = "user".to_string();
-                                                file_mode_switch = Some(("user".to_string(), None));
+                                                // 身份变化即使没有伴随 CWD 变化也要刷新当前
+                                                // 目录，确保列表内容和访问模型同步切换。
+                                                cwd_to_follow = s.shell_cwd.clone();
                                             }
                                         }
                                     }
@@ -3426,13 +3448,13 @@ async fn handle_worker_cmd_without_sftp(
             let prev_sudo_password = sudo_password.clone();
             let prev_mode = file_access_mode.clone();
 
-            *sudo_user = new_sudo_user.clone();
+            if let Some(next_user) = new_sudo_user.filter(|user| !user.trim().is_empty()) {
+                *sudo_user = Some(next_user);
+            }
             if let Some(pwd) = new_sudo_password {
                 if !pwd.is_empty() {
                     *sudo_password = Some(pwd);
                 }
-            } else {
-                *sudo_password = None;
             }
 
             if mode == "root" {
@@ -4196,15 +4218,14 @@ async fn handle_worker_cmd(
             let prev_sudo_password = sudo_password.clone();
             let prev_mode = file_access_mode.clone();
 
-            *sudo_user = new_sudo_user.clone();
+            if let Some(next_user) = new_sudo_user.filter(|user| !user.trim().is_empty()) {
+                *sudo_user = Some(next_user);
+            }
             if let Some(pwd) = new_sudo_password {
                 if !pwd.is_empty() {
                     *sudo_password = Some(pwd);
                 }
                 // empty password ⇒ keep existing (cache reuse)
-            } else {
-                // No password provided — fall back to `sudo -n`.
-                *sudo_password = None;
             }
 
             if mode == "root" {
@@ -4246,16 +4267,8 @@ pub async fn list_dir(sftp: &SftpSession, dir_path: &str) -> Result<Vec<Value>, 
     let mut items = Vec::new();
     // SFTP servers commonly omit `..` from read_dir. Keep the file pane
     // navigation consistent with Electron by creating the parent row ourselves.
-    if let Some(parent_path) = parent_remote_path(dir_path) {
-        items.push(serde_json::json!({
-            "name": "..",
-            "path": parent_path,
-            "type": "folder",
-            "size": "-",
-            "modified": "",
-            "permission": "",
-            "ownerGroup": "",
-        }));
+    if let Some(parent_item) = parent_remote_item(dir_path) {
+        items.push(parent_item);
     }
     for entry in entries {
         let name = entry.file_name();
@@ -4317,6 +4330,20 @@ fn parent_remote_path(dir_path: &str) -> Option<String> {
         Some(index) => Some(normalized[..index].to_string()),
         None => Some("/".to_string()),
     }
+}
+
+fn parent_remote_item(dir_path: &str) -> Option<Value> {
+    parent_remote_path(dir_path).map(|parent_path| {
+        serde_json::json!({
+            "name": "..",
+            "path": parent_path,
+            "type": "folder",
+            "size": "-",
+            "modified": "",
+            "permission": "",
+            "ownerGroup": "",
+        })
+    })
 }
 
 async fn read_file(sftp: &SftpSession, path: &str, encoding: &str) -> Result<String, String> {
@@ -4933,6 +4960,9 @@ async fn exec_list_dir_via_shell(
     let path_norm = path.trim_end_matches('/');
 
     let mut items = Vec::new();
+    if let Some(parent_item) = parent_remote_item(path) {
+        items.push(parent_item);
+    }
     for line in output.lines() {
         let line = line.trim_end_matches('\n');
         if line.is_empty() {
@@ -5154,12 +5184,12 @@ mod tests {
     use super::{
         build_http_connect_request, capture_sudo_password_input, coalesce_terminal_input,
         default_ssh_key_paths, format_sftp_unavailable_reason, is_password_prompt,
-        looks_like_mfa_prompt, looks_like_root_prompt, looks_like_shell_prompt, parent_remote_path,
-        remote_bind_host_matches, resource_monitoring_enabled, suppress_shell_setup_echo,
-        track_cwd_and_user, track_sudo_prompt_from_terminal,
-        try_keyboard_interactive_with_responder, tunnel_bind_address, validate_tunnel_rule,
-        KeyboardInteractiveRequest, ShellSetupEchoSuppression, SshTunnelRule,
-        SHELL_SETUP_SETTLE_DELAY,
+        looks_like_mfa_prompt, looks_like_root_prompt, looks_like_shell_prompt, parent_remote_item,
+        parent_remote_path, remote_bind_host_matches, resolve_shell_file_access,
+        resource_monitoring_enabled, suppress_shell_setup_echo, track_cwd_and_user,
+        track_sudo_prompt_from_terminal, try_keyboard_interactive_with_responder,
+        tunnel_bind_address, validate_tunnel_rule, KeyboardInteractiveRequest,
+        ShellSetupEchoSuppression, SshTunnelRule, SHELL_SETUP_SETTLE_DELAY,
     };
     #[cfg(unix)]
     use super::{forward_local_connection, forward_socks5_connection};
@@ -5495,6 +5525,22 @@ mod tests {
     }
 
     #[test]
+    fn shell_identity_controls_file_access_independently_of_cached_sudo_auth() {
+        assert_eq!(
+            resolve_shell_file_access("stoffel", "root"),
+            ("root", Some("root".to_string()))
+        );
+        assert_eq!(
+            resolve_shell_file_access("stoffel", "postgres"),
+            ("root", Some("postgres".to_string()))
+        );
+        assert_eq!(
+            resolve_shell_file_access("stoffel", "stoffel"),
+            ("user", None)
+        );
+    }
+
+    #[test]
     fn terminal_sudo_password_cache_is_cleared_after_auth_failure() {
         let mut prompt_buffer = String::new();
         let mut awaiting = false;
@@ -5552,6 +5598,9 @@ mod tests {
             parent_remote_path("/home/stoffel/下载/"),
             Some("/home/stoffel".to_string())
         );
+        assert!(parent_remote_item("/").is_none());
+        assert_eq!(parent_remote_item("/root").unwrap()["path"], "/");
+        assert_eq!(parent_remote_item("/root").unwrap()["name"], "..");
     }
 
     #[test]
