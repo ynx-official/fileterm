@@ -41,6 +41,43 @@ async function updateJsonFile(relativePath, mutate) {
   await writeFile(targetPath, `${JSON.stringify(parsed, null, 2)}\n`, 'utf8')
 }
 
+async function updateTextFile(relativePath, mutate) {
+  const targetPath = path.join(rootDir, relativePath)
+  const raw = await readFile(targetPath, 'utf8')
+  await writeFile(targetPath, mutate(raw), 'utf8')
+}
+
+function updateCargoPackageVersion(raw) {
+  const packageStart = raw.indexOf('[package]')
+  if (packageStart < 0) {
+    throw new Error('apps/tauri/src-tauri/Cargo.toml is missing [package].')
+  }
+  const nextSection = raw.indexOf('\n[', packageStart + '[package]'.length)
+  const packageEnd = nextSection < 0 ? raw.length : nextSection
+  const packageBlock = raw.slice(packageStart, packageEnd)
+  if (!/^version\s*=\s*"[^"]+"\s*$/m.test(packageBlock)) {
+    throw new Error('apps/tauri/src-tauri/Cargo.toml is missing package.version.')
+  }
+  const updatedBlock = packageBlock.replace(/^version\s*=\s*"[^"]+"\s*$/m, `version = "${nextVersion}"`)
+  return `${raw.slice(0, packageStart)}${updatedBlock}${raw.slice(packageEnd)}`
+}
+
+function updateCargoLockVersion(raw) {
+  const packagePattern = /(\[\[package\]\]\r?\nname = "fileterm"\r?\nversion = ")[^"]+("\r?\n)/
+  if (!packagePattern.test(raw)) {
+    throw new Error('apps/tauri/src-tauri/Cargo.lock is missing the fileterm package entry.')
+  }
+  return raw.replace(packagePattern, `$1${nextVersion}$2`)
+}
+
+function updateTauriConfigVersion(raw) {
+  const config = JSON.parse(raw)
+  if (typeof config.version !== 'string') {
+    throw new Error('apps/tauri/src-tauri/tauri.conf.json is missing version.')
+  }
+  return raw.replace(/("version"\s*:\s*")[^"]+("\s*,)/, `$1${nextVersion}$2`)
+}
+
 await Promise.all(
   packageJsonPaths.map((relativePath) =>
     updateJsonFile(relativePath, (pkg) => {
@@ -84,4 +121,8 @@ await updateJsonFile('package-lock.json', (lockfile) => {
   }
 })
 
-console.log(`Synced workspace package versions from root: ${nextVersion}`)
+await updateTextFile('apps/tauri/src-tauri/tauri.conf.json', updateTauriConfigVersion)
+await updateTextFile('apps/tauri/src-tauri/Cargo.toml', updateCargoPackageVersion)
+await updateTextFile('apps/tauri/src-tauri/Cargo.lock', updateCargoLockVersion)
+
+console.log(`Synced workspace and Tauri bundle versions from root: ${nextVersion}`)

@@ -34,5 +34,8 @@ npm run test:electron
 
 ## 数据边界
 
-Tauri 与 Electron 不共享可写 userData。迁移/比较数据通过导入导出或后续专门
-的同步协议完成，避免 JSON repository、secret 文件和 transfer journal 并发写入。
+Tauri 与 Electron 不共享可写 userData。Tauri 首次启动时可从旧 Electron userData
+执行一次带版本 marker 的导入：Tauri 已有记录优先，legacy 只补缺失 ID，整批写入失败
+则回滚且不落 marker。迁移成功后禁止 live merge；后续比较或交换数据只能通过显式
+导入导出或专门同步协议完成，避免 JSON repository、secret 文件和 transfer journal
+并发写入。

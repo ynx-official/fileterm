@@ -494,7 +494,9 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 .await
                 .unwrap();
-            let mut target = tokio::net::TcpStream::connect(target_address).await.unwrap();
+            let mut target = tokio::net::TcpStream::connect(target_address)
+                .await
+                .unwrap();
             tokio::io::copy_bidirectional(&mut client, &mut target)
                 .await
                 .unwrap();
@@ -545,7 +547,9 @@ mod tests {
                 .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
                 .await
                 .unwrap();
-            let mut target = tokio::net::TcpStream::connect(target_address).await.unwrap();
+            let mut target = tokio::net::TcpStream::connect(target_address)
+                .await
+                .unwrap();
             tokio::io::copy_bidirectional(&mut client, &mut target)
                 .await
                 .unwrap();

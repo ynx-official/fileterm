@@ -436,22 +436,22 @@ impl WorkspaceSessionRuntime {
 
 ### 4.2 论证：是否在迁移中引入 SQLite
 
-| 维度                 | 继续 JSON（推荐第一阶段）            | 引入 SQLite                           |
-| -------------------- | ------------------------------------ | ------------------------------------- |
-| 与现有用户数据兼容   | ✅ 零迁移，直接读旧文件              | ❌ 需一次性导入脚本 + 双向兼容期      |
-| 迁移复杂度           | 低（Rust 逐字复刻读写逻辑）          | 高（schema 设计 + ORM + 迁移 + 测试） |
-| 并发写               | 需串行化（当前是全量写，单进程足够） | 原生支持                              |
-| profile 规模（当前） | 几十~几百条，全量读写无性能问题      | 杀鸡用牛刀                            |
-| 命令历史增长         | 可能增长，但已按 profile 分桶        | 适合（可索引/分页）                   |
-| 风险                 | 低                                   | 与协议迁移耦合，回归面扩大            |
-| 用户期望             | 与现有行为完全一致                   | 需解释「为什么数据格式变了」          |
+| 维度                 | 继续 JSON（推荐第一阶段）             | 引入 SQLite                           |
+| -------------------- | ------------------------------------- | ------------------------------------- |
+| 与现有用户数据兼容   | ✅ 保持 JSON schema，一次性导入旧目录 | ❌ 需 schema 导入脚本 + 双向兼容期    |
+| 迁移复杂度           | 低（Rust 逐字复刻读写逻辑）           | 高（schema 设计 + ORM + 迁移 + 测试） |
+| 并发写               | 需串行化（当前是全量写，单进程足够）  | 原生支持                              |
+| profile 规模（当前） | 几十~几百条，全量读写无性能问题       | 杀鸡用牛刀                            |
+| 命令历史增长         | 可能增长，但已按 profile 分桶         | 适合（可索引/分页）                   |
+| 风险                 | 低                                    | 与协议迁移耦合，回归面扩大            |
+| 用户期望             | 与现有行为完全一致                    | 需解释「为什么数据格式变了」          |
 
 **结论与决策：**
 
 > **第一阶段（Phase 2 存储迁移）继续使用 JSON 文件，不引入 SQLite。** 理由：
 >
 > 1. 当前 profile/命令规模远未到 JSON 性能瓶颈；
-> 2. JSON 与现有 Electron 用户数据零迁移成本，是「契约不变」原则在存储层的延伸；
+> 2. JSON 与现有 Electron 用户数据保持 schema 兼容，可用一次性事务导入而无需领域转换；
 > 3. 把存储格式变更与后端语言迁移**解耦**，降低单次迁移风险；
 > 4. `transfer-journal` 已是原子写，Rust 侧直接复刻即可。
 
@@ -540,15 +540,16 @@ impl JsonProfileRepository {
 
 #### 4.3.4 数据兼容与迁移
 
-| 场景                                | 处理                                                                                                |
-| ----------------------------------- | --------------------------------------------------------------------------------------------------- |
-| 旧 Electron 用户首次启动 Tauri      | Rust `JsonProfileRepository` 直接读现有 JSON，无需转换                                              |
-| `normalizeStoredProfile` 旧格式自愈 | Rust 侧复刻同等归一化逻辑（补 `type`/`authType`/`sftpEnabled`/`remotePath`/`forwards` 等默认值）    |
-| inline secret 迁移                  | Rust 启动时检测并执行 `migrate_profile_secrets`                                                     |
-| legacy demo 数据清理                | Rust 复刻 `remove_legacy_demo_data`（同样 id 集合）                                                 |
-| 写回兼容                            | Rust 写出的 JSON 格式与 TS 一致（`serde_json::to_string_pretty`，2 空格缩进），保证 Electron 仍可读 |
+| 场景                                | 处理                                                                                             |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| 旧 Electron 用户首次启动 Tauri      | 从独立 Electron userData 一次性导入；Tauri 当前 ID 优先，legacy 只补缺失记录                     |
+| `normalizeStoredProfile` 旧格式自愈 | Rust 侧复刻同等归一化逻辑（补 `type`/`authType`/`sftpEnabled`/`remotePath`/`forwards` 等默认值） |
+| inline secret 迁移                  | Rust 启动时检测并执行 `migrate_profile_secrets`                                                  |
+| legacy demo 数据清理                | Rust 复刻 `remove_legacy_demo_data`（同样 id 集合）                                              |
+| 事务与幂等                          | staging 后按文件提交；失败恢复备份且不写 marker；成功后禁止 live merge                           |
+| 写回兼容                            | Rust 写出的 JSON schema 与 TS 一致，但两个 runtime 不互相写同一 userData                         |
 
-> 验收：同一份用户数据目录，Electron 与 Tauri 互相读写，profile/secret/folder/command/history 行为完全一致。
+> 验收：隔离的 Electron fixture 可被 Tauri 一次性导入；重复启动幂等、当前数据优先、删除不复活，任一文件提交失败时恢复迁移前状态。
 
 ---
 
@@ -1113,9 +1114,9 @@ gantt
 | ------------------------------ | ----------------------------------------------------------------------- |
 | M2.1 JsonProfileRepository     | 读写现有 JSON，profile/folder/command CRUD + 自愈 + secret 分离行为一致 |
 | M2.2 Workspace snapshot/连接库 | getSnapshot/getConnectionLibrary/导入导出；snapshot 广播                |
-| M2.3 旧用户数据兼容            | 旧 Electron userData 可被 Tauri 读取，互相读写一致                      |
+| M2.3 旧用户数据兼容            | 一次性 current-wins 导入；marker 幂等、删除不复活、提交失败可回滚       |
 
-**验收：** 旧 Electron 用户数据可被 Tauri 读取；创建/编辑/删除/排序行为一致。
+**验收：** 旧 Electron 用户数据可被 Tauri 一次性导入；之后两个 runtime 只写各自 userData。
 
 **风险：** group/parentId 自愈逻辑复杂，边界 case 多；secret 文件权限跨平台差异。
 

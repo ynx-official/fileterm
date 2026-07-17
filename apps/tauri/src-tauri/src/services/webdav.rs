@@ -125,6 +125,7 @@ fn read_config(app: &AppHandle) -> Result<StoredConfig, AppError> {
     if !path.exists() {
         return Ok(StoredConfig::default());
     }
+    lock_down_config_file(&path)?;
     let content = fs::read_to_string(path).map_err(|error| AppError::Storage(error.to_string()))?;
     let mut config: StoredConfig = serde_json::from_str(&content)
         .map_err(|error| AppError::Serialization(error.to_string()))?;
@@ -136,16 +137,29 @@ fn read_config(app: &AppHandle) -> Result<StoredConfig, AppError> {
 
 fn write_config(app: &AppHandle, config: &StoredConfig) -> Result<(), AppError> {
     let path = config_path(app)?;
-    let temporary = path.with_file_name("webdav-sync.json.tmp");
+    let temporary = path.with_file_name(format!(".webdav-sync.json.{}.tmp", uuid::Uuid::new_v4()));
     let content = serde_json::to_vec_pretty(config)
         .map_err(|error| AppError::Serialization(error.to_string()))?;
-    fs::write(&temporary, content).map_err(|error| AppError::Storage(error.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600));
+    crate::storage::write_restricted_file(&temporary, &content)?;
+    if let Err(error) = lock_down_config_file(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
     }
-    fs::rename(&temporary, path).map_err(|error| AppError::Storage(error.to_string()))
+    crate::storage::replace_file_atomically(&temporary, &path)?;
+    lock_down_config_file(&path)
+}
+
+#[cfg(unix)]
+fn lock_down_config_file(path: &std::path::Path) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| AppError::Storage(error.to_string()))
+}
+
+#[cfg(not(unix))]
+fn lock_down_config_file(_path: &std::path::Path) -> Result<(), AppError> {
+    Ok(())
 }
 
 fn configured(app: &AppHandle) -> Result<StoredConfig, AppError> {
@@ -412,7 +426,9 @@ pub async fn upload(app: &AppHandle) -> Result<Value, AppError> {
     let result = upload_inner(app).await;
     match &result {
         Ok(_) => crate::services::logging::info(app, "webdav", "upload completed"),
-        Err(error) => crate::services::logging::error(app, "webdav", format!("upload failed: {error}")),
+        Err(error) => {
+            crate::services::logging::error(app, "webdav", format!("upload failed: {error}"))
+        }
     }
     result
 }
@@ -499,7 +515,9 @@ pub async fn download(app: &AppHandle) -> Result<Value, AppError> {
                 value.get("skipped").and_then(Value::as_u64).unwrap_or(0)
             ),
         ),
-        Err(error) => crate::services::logging::error(app, "webdav", format!("download failed: {error}")),
+        Err(error) => {
+            crate::services::logging::error(app, "webdav", format!("download failed: {error}"))
+        }
     }
     result
 }
@@ -554,7 +572,7 @@ async fn download_payload(
     client: &Client,
     config: &StoredConfig,
 ) -> Result<(Vec<u8>, Option<String>), AppError> {
-    let response = authenticated(client.get(remote_url(&config)?), &config)
+    let response = authenticated(client.get(remote_url(config)?), config)
         .send()
         .await
         .map_err(|error| command_error(format!("WebDAV 下载失败: {error}")))?;
@@ -581,7 +599,8 @@ async fn download_payload(
 #[cfg(test)]
 mod tests {
     use super::{
-        client, download_payload, normalize_remote_path, parse_bundle, sha256_hex, upload_payload, StoredConfig,
+        client, download_payload, normalize_remote_path, parse_bundle, sha256_hex, upload_payload,
+        StoredConfig,
     };
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -685,7 +704,9 @@ mod tests {
             let put_request = read_request(&mut put).await;
             assert!(put_request.starts_with("PUT /profiles.json HTTP/1.1\r\n"));
             assert!(put_request.contains("if-none-match: *\r\n"));
-            assert!(put_request.contains(&format!("content-length: {}\r\n", expected_payload.len())));
+            assert!(
+                put_request.contains(&format!("content-length: {}\r\n", expected_payload.len()))
+            );
             let mut body = vec![0_u8; expected_payload.len()];
             put.read_exact(&mut body).await.unwrap();
             assert_eq!(body, expected_payload);
@@ -708,7 +729,9 @@ mod tests {
             content_hash: None,
         };
         assert_eq!(
-            upload_payload(&client().unwrap(), &config, payload).await.unwrap(),
+            upload_payload(&client().unwrap(), &config, payload)
+                .await
+                .unwrap(),
             Some("\"etag-after-write\"".to_string())
         );
         server.await.unwrap();
@@ -718,7 +741,8 @@ mod tests {
     async fn real_webdav_server_downloads_payload_and_hash_is_verified() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let profiles = json!([{ "name": "dev", "type": "ssh", "host": "example.test", "port": 22 }]);
+        let profiles =
+            json!([{ "name": "dev", "type": "ssh", "host": "example.test", "port": 22 }]);
         let profile_bytes = serde_json::to_vec(&profiles).unwrap();
         let payload = serde_json::to_vec(&json!({
             "schemaVersion": 1,

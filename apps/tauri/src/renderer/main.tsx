@@ -67,11 +67,27 @@ const handleWindowMouseDown = (e: MouseEvent) => {
 
 window.addEventListener('mousedown', handleWindowMouseDown, true)
 
-window.fileterm = createTauriApi()
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
-  </React.StrictMode>
-)
+const root = ReactDOM.createRoot(document.getElementById('root')!)
+
+void createTauriApi()
+  .then((api) => {
+    // Runtime metadata is synchronous in the shared desktop contract. Mount
+    // only after native metadata resolves so first-read consumers never see
+    // placeholder version, architecture, or platform fields.
+    window.fileterm = api
+    root.render(
+      <React.StrictMode>
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>
+      </React.StrictMode>
+    )
+  })
+  .catch((error: unknown) => {
+    console.error('Failed to initialize the Tauri desktop bridge:', error)
+    root.render(
+      <div role="alert" className="app-bootstrap-error">
+        无法初始化桌面运行时，请重新启动 FileTerm。
+      </div>
+    )
+  })

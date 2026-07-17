@@ -8,6 +8,7 @@ use suppaftp::tokio::{
     AsyncFtpStream, AsyncNativeTlsConnector, AsyncNativeTlsFtpStream, ImplAsyncFtpStream,
     TokioTlsStream,
 };
+use suppaftp::{FtpError, Status};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
@@ -85,7 +86,10 @@ async fn run_ftp_worker(
         "INFO",
         "ftp",
         tab_id,
-        format!("connected host={host} port={port} entries={}", initial_files.len()),
+        format!(
+            "connected host={host} port={port} entries={}",
+            initial_files.len()
+        ),
     );
     set_ftp_state(
         app,
@@ -96,9 +100,24 @@ async fn run_ftp_worker(
         Some(initial_files),
     )
     .await;
-    let mut transfer_jobs = Vec::new();
+    let mut transfer_jobs = tokio::task::JoinSet::new();
+    let cleanup_app = app.clone();
+    let cleanup_tab_id = tab_id.to_string();
+    tokio::spawn(async move {
+        if let Err(error) =
+            crate::services::transfers::retry_pending_cleanup_for_tab(&cleanup_app, &cleanup_tab_id)
+                .await
+        {
+            crate::services::logging::warn(
+                &cleanup_app,
+                &format!("transfer:{cleanup_tab_id}"),
+                format!("pending cleanup retry failed: {error}"),
+            );
+        }
+    });
 
     loop {
+        while transfer_jobs.try_join_next().is_some() {}
         match command_rx.recv().await {
             Some(WorkerCmd::ListRemoteFiles { path, respond_to }) => {
                 let _ = respond_to.send(client_list(&mut client, &path, &mut listing_state).await);
@@ -205,7 +224,7 @@ async fn run_ftp_worker(
                 let host = host.to_string();
                 let app = app.clone();
                 let tab_id = tab_id.to_string();
-                transfer_jobs.push(tauri::async_runtime::spawn(async move {
+                transfer_jobs.spawn(async move {
                     let result = async {
                         let mut transfer_client = connect_ftp(&profile, &host, port).await?;
                         crate::services::logging::session(
@@ -230,7 +249,7 @@ async fn run_ftp_worker(
                     }
                     .await;
                     let _ = respond_to.send(result);
-                }));
+                });
             }
             Some(WorkerCmd::DownloadRemoteFile {
                 remote_path,
@@ -244,7 +263,7 @@ async fn run_ftp_worker(
                 let host = host.to_string();
                 let app = app.clone();
                 let tab_id = tab_id.to_string();
-                transfer_jobs.push(tauri::async_runtime::spawn(async move {
+                transfer_jobs.spawn(async move {
                     let result = async {
                         let mut transfer_client = connect_ftp(&profile, &host, port).await?;
                         crate::services::logging::session(
@@ -269,7 +288,7 @@ async fn run_ftp_worker(
                     }
                     .await;
                     let _ = respond_to.send(result);
-                }));
+                });
             }
             Some(WorkerCmd::ReplaceRemoteFile {
                 partial_path,
@@ -280,9 +299,7 @@ async fn run_ftp_worker(
                     .send(client_replace(&mut client, &partial_path, &destination_path).await);
             }
             Some(WorkerCmd::CommitRemoteStaging { respond_to, .. }) => {
-                let _ = respond_to.send(Err(
-                    "FTP 不使用 SSH root staging 提交链路".to_string(),
-                ));
+                let _ = respond_to.send(Err("FTP 不使用 SSH root staging 提交链路".to_string()));
             }
             Some(WorkerCmd::RemoveRemoteFile { path, respond_to }) => {
                 let _ = respond_to.send(client_remove(&mut client, &path).await);
@@ -297,8 +314,10 @@ async fn run_ftp_worker(
             Some(WorkerCmd::WriteTerminal(_)) | Some(WorkerCmd::ResizeTerminal { .. }) => {}
             Some(WorkerCmd::Disconnect) | None => {
                 crate::services::logging::session(app, "INFO", "ftp", tab_id, "disconnecting");
-                for job in transfer_jobs {
-                    job.abort();
+                transfer_jobs.abort_all();
+                while transfer_jobs.join_next().await.is_some() {
+                    // Drain aborted and already-completed jobs before the
+                    // session worker releases its runtime state.
                 }
                 let _ = client_quit(&mut client).await;
                 set_ftp_state(
@@ -389,13 +408,10 @@ async fn connect_ftp_with_tls_connector(
             Ok(FtpClient::Secure(client))
         }
         "implicit" => {
-            let mut client = AsyncNativeTlsFtpStream::connect_secure_implicit(
-                address,
-                tls_connector,
-                host,
-            )
-            .await
-            .map_err(|error| error.to_string())?;
+            let mut client =
+                AsyncNativeTlsFtpStream::connect_secure_implicit(address, tls_connector, host)
+                    .await
+                    .map_err(|error| error.to_string())?;
             client
                 .login(username, password)
                 .await
@@ -571,7 +587,30 @@ async fn remove_file<T: TokioTlsStream + Send>(
     ftp: &mut ImplAsyncFtpStream<T>,
     path: &str,
 ) -> Result<(), String> {
-    ftp.rm(path).await.map_err(|error| error.to_string())
+    match ftp.rm(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if is_ftp_file_not_found(&error) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn is_ftp_file_not_found(error: &FtpError) -> bool {
+    let FtpError::UnexpectedResponse(response) = error else {
+        return false;
+    };
+    if response.status != Status::FileUnavailable {
+        return false;
+    }
+    let message = String::from_utf8_lossy(&response.body).to_lowercase();
+    [
+        "not found",
+        "no such",
+        "does not exist",
+        "cannot find",
+        "can't find",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 async fn quit<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>) -> Result<(), String> {
@@ -625,7 +664,9 @@ async fn list_files_with_state<T: TokioTlsStream + Send>(
         // before MLSD. Some embedded FTP servers accept MLSD but still send
         // classic Unix LIST rows; parsing those as MLSD first succeeds with
         // the entire row as the name and zeroed metadata.
-        let Some(parsed) = parse_ftp_listing_line(&line) else { continue };
+        let Some(parsed) = parse_ftp_listing_line(&line) else {
+            continue;
+        };
         let entry = parsed.entry;
         let name = entry.name();
         if matches!(name, "." | "..") {
@@ -764,9 +805,17 @@ fn looks_like_mlsd_line(line: &str) -> bool {
 
 fn is_unsupported_ftp_command(message: &str) -> bool {
     let normalized = message.to_ascii_lowercase();
-    ["500", "501", "502", "504", "unknown command", "not implemented", "unsupported"]
-        .iter()
-        .any(|needle| normalized.contains(needle))
+    [
+        "500",
+        "501",
+        "502",
+        "504",
+        "unknown command",
+        "not implemented",
+        "unsupported",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 fn ftp_listing_permission(line: &str) -> String {
@@ -787,7 +836,11 @@ fn ftp_listing_permission(line: &str) -> String {
     if mode.len() != 3 || !mode.bytes().all(|value| matches!(value, b'0'..=b'7')) {
         return String::new();
     }
-    let kind = if lower.contains("type=dir;") { 'd' } else { '-' };
+    let kind = if lower.contains("type=dir;") {
+        'd'
+    } else {
+        '-'
+    };
     let mut permission = String::with_capacity(10);
     permission.push(kind);
     for value in mode.bytes().map(|value| value - b'0') {
@@ -934,15 +987,13 @@ async fn upload_file<T: TokioTlsStream + Send + 'static>(
                     ftp.resume_transfer(attempt_offset as usize)
                         .await
                         .map_err(|rest_error| {
-                            format!(
-                                "FTP 续传失败：APPE={append_error}；REST={rest_error}"
-                            )
+                            format!("FTP 续传失败：APPE={append_error}；REST={rest_error}")
                         })?;
-                    ftp.put_with_stream(remote_path).await.map_err(|stor_error| {
-                        format!(
-                            "FTP 续传失败：APPE={append_error}；REST+STOR={stor_error}"
-                        )
-                    })?
+                    ftp.put_with_stream(remote_path)
+                        .await
+                        .map_err(|stor_error| {
+                            format!("FTP 续传失败：APPE={append_error}；REST+STOR={stor_error}")
+                        })?
                 }
             }
         } else {
@@ -976,9 +1027,11 @@ async fn upload_file<T: TokioTlsStream + Send + 'static>(
             .await
             .map_err(|error| error.to_string())?;
 
-        let uploaded_size = ftp.size(remote_path).await.map_err(|error| {
-            format!("FTP 上传后无法校验断点大小: {error}")
-        })? as u64;
+        let uploaded_size = ftp
+            .size(remote_path)
+            .await
+            .map_err(|error| format!("FTP 上传后无法校验断点大小: {error}"))?
+            as u64;
         if uploaded_size == total {
             return Ok(());
         }
@@ -1134,12 +1187,27 @@ mod tests {
     use super::connect_ftp_with_tls_connector;
     use super::{
         client_list, client_quit, client_read, client_write, connect_ftp, ftp_listing_permission,
-        join_remote_path, parent_remote_path, parse_ftp_listing_line, upload_file, FtpClient,
-        FtpListingState,
+        is_ftp_file_not_found, join_remote_path, parent_remote_path, parse_ftp_listing_line,
+        upload_file, FtpClient, FtpListingState,
     };
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
     use tokio::sync::Mutex;
+
+    #[test]
+    fn cleanup_treats_only_missing_ftp_files_as_idempotent() {
+        let missing = suppaftp::FtpError::UnexpectedResponse(suppaftp::types::Response {
+            status: suppaftp::Status::FileUnavailable,
+            body: b"No such file or directory".to_vec(),
+        });
+        let denied = suppaftp::FtpError::UnexpectedResponse(suppaftp::types::Response {
+            status: suppaftp::Status::FileUnavailable,
+            body: b"Permission denied".to_vec(),
+        });
+
+        assert!(is_ftp_file_not_found(&missing));
+        assert!(!is_ftp_file_not_found(&denied));
+    }
 
     #[test]
     fn parses_classic_unix_listing_before_mlsd_fallback() {
@@ -1169,7 +1237,8 @@ mod tests {
 
     #[test]
     fn marks_unstructured_serv_u_rows_for_capability_probe() {
-        let parsed = parse_ftp_listing_line("reports").expect("name-only row should remain visible");
+        let parsed =
+            parse_ftp_listing_line("reports").expect("name-only row should remain visible");
 
         assert_eq!(parsed.entry.name(), "reports");
         assert!(!parsed.type_is_trusted);
@@ -1198,19 +1267,25 @@ mod tests {
         client_quit(&mut client).await.unwrap();
         server.await.unwrap();
         let commands = commands.lock().await;
-        assert_eq!(commands.iter().filter(|command| *command == "MLSD").count(), 1);
-        assert_eq!(commands.iter().filter(|command| *command == "LIST").count(), 2);
+        assert_eq!(
+            commands.iter().filter(|command| *command == "MLSD").count(),
+            1
+        );
+        assert_eq!(
+            commands.iter().filter(|command| *command == "LIST").count(),
+            2
+        );
     }
 
-    async fn run_classic_listing_server(
-        listener: TcpListener,
-        commands: Arc<Mutex<Vec<String>>>,
-    ) {
+    async fn run_classic_listing_server(listener: TcpListener, commands: Arc<Mutex<Vec<String>>>) {
         let (control, _) = listener.accept().await.unwrap();
         let (reader, mut writer) = control.into_split();
         let mut reader = BufReader::new(reader);
         let mut data_listener = None;
-        writer.write_all(b"220 Serv-U compatible fixture\r\n").await.unwrap();
+        writer
+            .write_all(b"220 Serv-U compatible fixture\r\n")
+            .await
+            .unwrap();
         let mut line = String::new();
         loop {
             line.clear();
@@ -1222,7 +1297,10 @@ mod tests {
             let verb = verb.to_ascii_uppercase();
             commands.lock().await.push(verb.clone());
             match verb.as_str() {
-                "USER" => writer.write_all(b"331 Password required\r\n").await.unwrap(),
+                "USER" => writer
+                    .write_all(b"331 Password required\r\n")
+                    .await
+                    .unwrap(),
                 "PASS" => writer.write_all(b"230 Logged in\r\n").await.unwrap(),
                 "TYPE" | "OPTS" => writer.write_all(b"200 OK\r\n").await.unwrap(),
                 "EPSV" | "PASV" => {
@@ -1242,7 +1320,10 @@ mod tests {
                 }
                 "MLSD" => writer.write_all(b"500 Unknown command\r\n").await.unwrap(),
                 "LIST" => {
-                    writer.write_all(b"150 Opening data connection\r\n").await.unwrap();
+                    writer
+                        .write_all(b"150 Opening data connection\r\n")
+                        .await
+                        .unwrap();
                     let (mut data, _) = data_listener.take().unwrap().accept().await.unwrap();
                     data.write_all(
                         b"drwxr-xr-x 2 0 0 4096 Jun 18 23:00 folder\r\n-rw-r--r-- 1 0 0 2048 Jun 18 23:00 payload.bin\r\n",
@@ -1250,7 +1331,10 @@ mod tests {
                     .await
                     .unwrap();
                     data.shutdown().await.unwrap();
-                    writer.write_all(b"226 Transfer complete\r\n").await.unwrap();
+                    writer
+                        .write_all(b"226 Transfer complete\r\n")
+                        .await
+                        .unwrap();
                 }
                 "QUIT" => {
                     writer.write_all(b"221 Goodbye\r\n").await.unwrap();
@@ -1287,7 +1371,10 @@ mod tests {
             let verb = verb.to_ascii_uppercase();
             commands.lock().await.push(verb.clone());
             match verb.as_str() {
-                "USER" => writer.write_all(b"331 Password required\r\n").await.unwrap(),
+                "USER" => writer
+                    .write_all(b"331 Password required\r\n")
+                    .await
+                    .unwrap(),
                 "PASS" => writer.write_all(b"230 Logged in\r\n").await.unwrap(),
                 "TYPE" | "OPTS" => writer.write_all(b"200 OK\r\n").await.unwrap(),
                 "EPSV" | "PASV" => {
@@ -1307,12 +1394,18 @@ mod tests {
                 }
                 "APPE" if supports_appe => {
                     assert_eq!(argument, "/resume.bin");
-                    writer.write_all(b"150 Opening data connection\r\n").await.unwrap();
+                    writer
+                        .write_all(b"150 Opening data connection\r\n")
+                        .await
+                        .unwrap();
                     let (mut data, _) = data_listener.take().unwrap().accept().await.unwrap();
                     let mut suffix = Vec::new();
                     data.read_to_end(&mut suffix).await.unwrap();
                     stored.lock().await.extend_from_slice(&suffix);
-                    writer.write_all(b"226 Transfer complete\r\n").await.unwrap();
+                    writer
+                        .write_all(b"226 Transfer complete\r\n")
+                        .await
+                        .unwrap();
                 }
                 "APPE" => {
                     let _ = data_listener.take().unwrap().accept().await.unwrap();
@@ -1320,11 +1413,17 @@ mod tests {
                 }
                 "REST" => {
                     rest_offset = argument.parse().unwrap();
-                    writer.write_all(b"350 Restarting at offset\r\n").await.unwrap();
+                    writer
+                        .write_all(b"350 Restarting at offset\r\n")
+                        .await
+                        .unwrap();
                 }
                 "STOR" => {
                     assert_eq!(argument, "/resume.bin");
-                    writer.write_all(b"150 Opening data connection\r\n").await.unwrap();
+                    writer
+                        .write_all(b"150 Opening data connection\r\n")
+                        .await
+                        .unwrap();
                     let (mut data, _) = data_listener.take().unwrap().accept().await.unwrap();
                     let mut suffix = Vec::new();
                     data.read_to_end(&mut suffix).await.unwrap();
@@ -1332,7 +1431,10 @@ mod tests {
                     bytes.truncate(rest_offset);
                     bytes.extend_from_slice(&suffix);
                     rest_offset = 0;
-                    writer.write_all(b"226 Transfer complete\r\n").await.unwrap();
+                    writer
+                        .write_all(b"226 Transfer complete\r\n")
+                        .await
+                        .unwrap();
                 }
                 "SIZE" => {
                     let size = stored.lock().await.len();
@@ -1365,10 +1467,8 @@ mod tests {
             stored.clone(),
             commands.clone(),
         ));
-        let root = std::env::temp_dir().join(format!(
-            "fileterm-ftp-resume-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("fileterm-ftp-resume-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&root).await.unwrap();
         let source = root.join("resume.bin");
         tokio::fs::write(&source, b"abcdef").await.unwrap();
@@ -1395,13 +1495,22 @@ mod tests {
         assert_eq!(*stored.lock().await, b"abcdef");
 
         let commands = commands.lock().await;
-        let appe = commands.iter().position(|command| command == "APPE").unwrap();
+        let appe = commands
+            .iter()
+            .position(|command| command == "APPE")
+            .unwrap();
         if supports_appe {
             assert!(!commands.iter().any(|command| command == "REST"));
             assert!(!commands.iter().any(|command| command == "STOR"));
         } else {
-            let rest = commands.iter().position(|command| command == "REST").unwrap();
-            let stor = commands.iter().position(|command| command == "STOR").unwrap();
+            let rest = commands
+                .iter()
+                .position(|command| command == "REST")
+                .unwrap();
+            let stor = commands
+                .iter()
+                .position(|command| command == "STOR")
+                .unwrap();
             assert!(appe < rest && rest < stor);
         }
         assert!(commands.iter().any(|command| command == "SIZE"));
@@ -1455,11 +1564,9 @@ mod tests {
                     .write_all(b"230 Logged in\r\n")
                     .await
                     .unwrap(),
-                "PBSZ" | "PROT" | "TYPE" | "OPTS" => control
-                    .get_mut()
-                    .write_all(b"200 OK\r\n")
-                    .await
-                    .unwrap(),
+                "PBSZ" | "PROT" | "TYPE" | "OPTS" => {
+                    control.get_mut().write_all(b"200 OK\r\n").await.unwrap()
+                }
                 "PASV" | "EPSV" => {
                     let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
                     let port = data.local_addr().unwrap().port();
@@ -1473,7 +1580,11 @@ mod tests {
                             port % 256
                         )
                     };
-                    control.get_mut().write_all(response.as_bytes()).await.unwrap();
+                    control
+                        .get_mut()
+                        .write_all(response.as_bytes())
+                        .await
+                        .unwrap();
                 }
                 "STOR" => {
                     assert_eq!(argument, "/roundtrip.txt");
@@ -1512,7 +1623,11 @@ mod tests {
                         .unwrap();
                 }
                 "QUIT" => {
-                    control.get_mut().write_all(b"221 Goodbye\r\n").await.unwrap();
+                    control
+                        .get_mut()
+                        .write_all(b"221 Goodbye\r\n")
+                        .await
+                        .unwrap();
                     return;
                 }
                 _ => control.get_mut().write_all(b"200 OK\r\n").await.unwrap(),
@@ -1548,7 +1663,11 @@ mod tests {
                 run_secured_ftps_session(secured, &acceptor, stored, false).await;
                 return;
             }
-            control.get_mut().write_all(b"500 Send AUTH TLS first\r\n").await.unwrap();
+            control
+                .get_mut()
+                .write_all(b"500 Send AUTH TLS first\r\n")
+                .await
+                .unwrap();
         }
     }
 
@@ -1571,11 +1690,12 @@ mod tests {
         let cert = root.join("cert.pem");
         let identity = root.join("identity.p12");
         let openssl = "/usr/bin/openssl";
-        assert!(std::path::Path::new(openssl).exists(), "real FTPS fixture requires {openssl}");
+        assert!(
+            std::path::Path::new(openssl).exists(),
+            "real FTPS fixture requires {openssl}"
+        );
         let certificate = std::process::Command::new(openssl)
-            .args([
-                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout",
-            ])
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout"])
             .arg(&key)
             .args(["-out"])
             .arg(&cert)

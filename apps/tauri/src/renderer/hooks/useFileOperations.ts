@@ -854,6 +854,7 @@ export function useFileOperations({
     const handleNativeDrop = (event: Event) => {
       const detail = (event as CustomEvent).detail as {
         paths?: unknown
+        consume?: unknown
         position?: { x?: unknown; y?: unknown } | null
       }
       const paths = Array.isArray(detail?.paths)
@@ -875,6 +876,9 @@ export function useFileOperations({
       ]
       if (!targetMarkedByDragOver && !targets.some((target) => target?.closest('.remote-pane'))) {
         return
+      }
+      if (typeof detail.consume === 'function') {
+        detail.consume()
       }
       nativeRemoteDropTargetAtRef.current = 0
       nativeDropConsumedAtRef.current = Date.now()

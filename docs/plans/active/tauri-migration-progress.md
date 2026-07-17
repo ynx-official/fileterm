@@ -3,7 +3,7 @@
 | 项目     | 值                                                                                                                         |
 | -------- | -------------------------------------------------------------------------------------------------------------------------- |
 | 文档版本 | v1.2                                                                                                                       |
-| 更新日期 | 2026-07-15                                                                                                                 |
+| 更新日期 | 2026-07-17                                                                                                                 |
 | 状态     | Tauri 与 Electron 均为独立运行入口；Tauri Phase 0–4 的代码主体与本地协议夹具已完成，Phase 5 发布与外部发行候选验收进行中。 |
 | 关联文档 | `russh-migration.md`、`rust-backend-migration-plan.md`                                                                     |
 
@@ -18,7 +18,7 @@
 | Electron 运行时 | Electron `42.4.0` 位于 `apps/electron`，拥有独立 main、preload、renderer、测试和打包配置。            |
 | Tauri 运行时    | Tauri v2 位于 `apps/tauri`；Rust crate 锁定 `tauri 2.11.5`、`russh 0.62.2`、`russh-sftp 2.3.0`。      |
 | npm manifest    | `apps/tauri/package.json` 与 `apps/electron/package.json` 分别声明运行时依赖；lockfile 同时锁定两者。 |
-| 数据边界        | 两个 app 使用不同 userData 根，不能并发写同一份 profile、secret 或 transfer journal。                 |
+| 数据边界        | 两个 app 使用不同 userData；Tauri 仅首次 current-wins 导入 Electron 数据，之后禁止 live merge。       |
 | 前端边界        | React renderer、CSS、hooks、bridge/preload 均物理分叉；共享只允许进入 `packages/*`。                  |
 
 因此，当前不是“二选一”的切换阶段：两个 runtime 并行演进。剩余 Tauri 工作集中在跨平台构建、真实服务/设备验收和签名发布；跨端功能必须单独计划与验证。
@@ -27,7 +27,7 @@
 
 | 阶段    | 代码状态                          | 不能宣称完成的原因                                                                                                                                                                                            |
 | ------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Phase 0 | ✅ 代码/contract 完成，待 UI 手测 | 已改为从 Rust/Tauri runtime 异步回填 metadata，并缓存原生 drag-drop 的绝对路径供 DOM drop 消费；需在实际 Tauri webview 验证事件时序和多文件路径。                                                             |
+| Phase 0 | ✅ 代码/contract 完成，待 UI 手测 | renderer mount 前等待 Rust/Tauri metadata；原生 drag-drop 路径保留至目标确认消费。仍需在实际 Tauri webview 验证事件时序、多文件路径与 Windows 内部排序。                                                      |
 | Phase 1 | ✅ 代码/contract 完成，待 UI 手测 | `showWindowMenu` 已替换为 Rust 原生 File/View/Window 弹出菜单；文件编辑器取消关闭已清除 main-side pending state。仍未在打包 Tauri 应用中手测菜单坐标、缩放、关闭确认和多窗口焦点。                            |
 | Phase 2 | ✅ 代码与 contract 覆盖已完成     | 未做完整多窗口 renderer 端到端回归；作为实现里程碑完成，但不是发行验收。                                                                                                                                      |
 | Phase 3 | ⚠️ 代码主体已实现                 | 真实 sshd 已覆盖公钥、exec、SFTP、HTTP/SOCKS5 代理、local/dynamic direct-tcpip；跳板、远程转发、sudo/root、CWD UI 事件、完整指标流和 OpenSSH/PAM MFA 尚未在发行候选闭环。macOS 远端指标当前探测为 `unknown`。 |
@@ -40,7 +40,7 @@
 - ✅ `apps/tauri/src/bridge/tauri-api.ts` 建立，Tauri renderer 不再直接 import Electron 类型
 - ✅ Tauri 基础 commands：平台信息、剪贴板、UI preferences/state
 - ✅ React bridge 接入，renderer 通过 `tauri-api.ts` 初始化
-- ✅ Contract test 建立（`tests/contract.rs`，9 项断言）
+- ✅ Contract test 建立（`tests/contract.rs`，14 项断言）
 - ✅ 命令命名 `app_` 前缀、事件命名 `namespace:name` 格式冻结
 
 ### Phase 1：Tauri 桌面壳垂直切片 ✅ 代码/contract 完成，待打包 UI 手测
@@ -62,8 +62,9 @@
 - ✅ group/parentId 双向自愈（5 个单元测试覆盖）
 - ✅ Secrets stripping + 持久化（contract test 专项断言）
 - ✅ Ordering（profile/folder/command/command-folder）
-- ✅ 旧 Electron userData 兼容（按 id 去重合并 + secrets 回填）
-- ✅ SSH 私钥库：旧 Electron `ssh-keys` 元数据、私钥文件和保存的口令按 ID 迁移；私钥文件以独立目录保存，profile 仅引用 `privateKeyId`。
+- ✅ 旧 Electron userData 一次性迁移：version marker、Tauri current-wins、删除不复活、整批失败回滚。
+- ✅ SSH 私钥库：旧 Electron `ssh-keys` 元数据、索引内私钥文件和保存口令只迁移一次；孤儿 secret/key 不导入，私钥文件以独立目录保存，profile 仅引用 `privateKeyId`。
+- ✅ 明文 secret 边界：不使用 safeStorage/钥匙串；Unix 创建、迁移和读取自愈均强制 `0600`，profile 删除同步清理孤儿 secret。
 - ✅ Workspace snapshot 广播
 
 ### Phase 3：SSH 工作区主链路 ⚠️ 实现主体完成，发行候选验收未完成
@@ -96,7 +97,7 @@
 - ✅ `suppaftp` FTP/FTPS：plain、显式 TLS 与隐式 TLS，文件 CRUD、APPE 优先并回退 REST+STOR 的断点上传、断点下载、可回滚 rename 与取消；浏览/控制连接和每条传输连接已隔离，显式/隐式 TLS 控制与数据通道已由本地真实 TLS 夹具验证。
 - ✅ Telnet：`tokio::net` transport、RFC 854 IAC/NAWS/TERMINAL-TYPE、SOCKS5/HTTP CONNECT、resize 与退出关闭 socket；直接 socket、HTTP CONNECT 与 SOCKS5 均由真实 TCP 夹具验证，真实设备/第三方代理服务待验收。
 - ✅ Serial：`tokio-serial` 的波特率/数据位/停止位/奇偶校验/硬件/软件流控映射和设备断开处理。`mark/space` parity 受 `serialport` 跨平台 API 限制，会返回明确错误而不静默降级；Linux PTY 已有自动验证，macOS/Windows 仍需要实体或可用虚拟串口。
-- ✅ 统一 TransferService：持久 journal、单文件/目录 manifest、上传/下载、hash/identity 校验、暂停/继续/取消/丢弃、tab 关闭与应用退出清理。
+- ✅ 统一 TransferService：持久 journal、单文件/目录 manifest、上传/下载、hash/identity 校验、generation/run handle、暂停/继续/取消/丢弃等待、`cleanupPending` 和应用退出收敛。
 - ✅ root SFTP 两阶段提交：`/tmp` 任务 staging → 目标同目录 `.fileterm-part` → 正式目标，逐阶段大小校验并兼容迁移旧 journal；正式目标不会直接参与 `/tmp` 跨文件系统移动。
 - ✅ WebDAV：HTTPS 默认、Basic Auth、ETag 前置条件冲突检测、SHA-256 bundle 校验、秘密字段剥离与 5 MB 输入上限；本地 HTTP fixture 已覆盖 HEAD、成功 PUT、GET、`If-Match` 412 和下载 hash 校验。
 - ✅ Electron parity：SSH Config/外部 JSON profile 导入导出、命令历史/发送偏好、文件编辑器关闭确认、跨窗口 UI/最大化事件、CSP、应用/SSH/协议错误本地日志。
@@ -111,7 +112,8 @@
 - 🔲 Tauri updater + 签名公证
 - 🔲 Windows/Linux 安装包与三平台签名/公证
 - 🔲 同版本、同配置的三平台性能对比
-- 🔲 用户数据迁移工具 + 失败回滚
+- ✅ 自动 legacy 数据迁移 + 文件级失败回滚
+- 🔲 发行候选迁移演练 + 安装包级回滚
 - 🔲 正式发布
 
 ---
@@ -172,7 +174,7 @@
 - 剪贴板 + openExternalUrl
 - 本地文件操作（list/read/write/mkdir/create/copy/move/rename/delete/permissions/selectFiles/selectDirectory，含 EXDEV 回退 + 递归 chmod）
 - macOS keychain 规避（plain-text-fallback）
-- Legacy 数据迁移（旧 Electron userData 兼容）
+- Legacy 数据迁移（旧 Electron userData 一次性 current-wins 导入，带 marker/回滚）
 - 命令模板级联删除（parentId 上移到祖父）
 
 ---
@@ -216,7 +218,7 @@
 
 22. 三平台签名/公证 + 安装包
 23. 性能对比 Electron
-24. 用户数据迁移工具 + 回滚保障
+24. ~~自动用户数据迁移 + 文件级回滚~~ ✅；继续完成发行候选迁移演练与安装包回滚保障
 
 ---
 

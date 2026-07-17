@@ -1,11 +1,11 @@
-pub mod ssh;
-pub mod system_metrics;
+pub mod ftp;
 pub mod local_files;
 pub mod serial;
+pub mod ssh;
+pub mod system_metrics;
 pub mod telnet;
 mod telnet_direct;
 pub mod terminal;
-pub mod ftp;
 
 pub enum WorkerCmd {
     WriteTerminal(String),

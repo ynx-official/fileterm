@@ -1,14 +1,14 @@
-use tauri::{ipc::Channel, AppHandle, Emitter, Manager, WebviewWindow};
-use serde::{Serialize, Deserialize};
-use serde_json::Value;
+use crate::sessions::WorkerCmd;
+use crate::storage::{new_id, read_json_array, write_json_array};
+use crate::AppError;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::Duration;
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager, WebviewWindow};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
-use crate::AppError;
-use crate::storage::{read_json_array, write_json_array, new_id};
-use crate::sessions::WorkerCmd;
 
 /// 等待 worker 接收命令的最大时间。worker 主循环被 SFTP init / shell
 /// channel 写阻塞 时，mpsc 一旦满，send 会永久 await，导致前端 invoke
@@ -52,10 +52,13 @@ async fn send_terminal_input(
         .get(tab_id)
         .cloned()
         .ok_or_else(|| AppError::Storage("Terminal session not found".to_string()))?;
-    timeout(WORKER_CMD_SEND_TIMEOUT, sender.send(WorkerCmd::WriteTerminal(data)))
-        .await
-        .map_err(|_| AppError::Storage("Terminal worker busy".to_string()))?
-        .map_err(|error| AppError::Storage(error.to_string()))
+    timeout(
+        WORKER_CMD_SEND_TIMEOUT,
+        sender.send(WorkerCmd::WriteTerminal(data)),
+    )
+    .await
+    .map_err(|_| AppError::Storage("Terminal worker busy".to_string()))?
+    .map_err(|error| AppError::Storage(error.to_string()))
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -104,11 +107,11 @@ pub struct ImportSshKeyInput {
 
 fn write_json_object(app: &AppHandle, name: &str, value: &Value) -> Result<(), AppError> {
     let path = crate::storage::workspace_file(app, name)?;
-    let temporary = path.with_file_name(format!("{name}.tmp"));
+    let temporary = path.with_file_name(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
     let content = serde_json::to_vec_pretty(value)
         .map_err(|error| AppError::Serialization(error.to_string()))?;
     std::fs::write(&temporary, content).map_err(|error| AppError::Storage(error.to_string()))?;
-    std::fs::rename(temporary, path).map_err(|error| AppError::Storage(error.to_string()))
+    crate::storage::replace_file_atomically(&temporary, &path)
 }
 
 #[tauri::command]
@@ -164,8 +167,8 @@ pub fn app_get_runtime_version() -> String {
 
 #[tauri::command]
 pub fn app_read_clipboard_text() -> Result<String, AppError> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|error| AppError::Clipboard(error.to_string()))?;
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| AppError::Clipboard(error.to_string()))?;
     clipboard
         .get_text()
         .map_err(|error| AppError::Clipboard(error.to_string()))
@@ -173,8 +176,8 @@ pub fn app_read_clipboard_text() -> Result<String, AppError> {
 
 #[tauri::command]
 pub fn app_write_clipboard_text(text: String) -> Result<(), AppError> {
-    let mut clipboard = arboard::Clipboard::new()
-        .map_err(|error| AppError::Clipboard(error.to_string()))?;
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| AppError::Clipboard(error.to_string()))?;
     clipboard
         .set_text(text)
         .map_err(|error| AppError::Clipboard(error.to_string()))
@@ -182,7 +185,20 @@ pub fn app_write_clipboard_text(text: String) -> Result<(), AppError> {
 
 #[tauri::command]
 pub fn app_open_external_url(url: String) -> Result<(), AppError> {
-    open::that(url).map_err(|error| AppError::Command(error.to_string()))
+    let parsed = validate_external_url(&url)?;
+    open::that(parsed.as_str()).map_err(|error| AppError::Command(error.to_string()))
+}
+
+fn validate_external_url(url: &str) -> Result<url::Url, AppError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|error| AppError::Command(format!("外部链接无效: {error}")))?;
+    if matches!(parsed.scheme(), "http" | "https") {
+        Ok(parsed)
+    } else {
+        Err(AppError::Command(
+            "仅允许打开 http 或 https 外部链接".to_string(),
+        ))
+    }
 }
 
 #[tauri::command]
@@ -207,8 +223,7 @@ pub async fn app_install_update(app: AppHandle) -> Result<(), AppError> {
 
 #[tauri::command]
 pub fn app_open_logs_directory(app: AppHandle) -> Result<(), AppError> {
-    let log_directory = crate::storage::state_path(&app)?
-        .with_file_name("logs");
+    let log_directory = crate::storage::state_path(&app)?.with_file_name("logs");
     std::fs::create_dir_all(&log_directory)
         .map_err(|error| AppError::Storage(error.to_string()))?;
     open::that(log_directory).map_err(|error| AppError::Command(error.to_string()))
@@ -218,8 +233,8 @@ pub fn app_open_logs_directory(app: AppHandle) -> Result<(), AppError> {
 pub fn app_get_ui_preferences(app: AppHandle) -> Result<UiPreferences, AppError> {
     let path = crate::storage::state_path(&app)?;
     if path.exists() {
-        let content = std::fs::read_to_string(path)
-            .map_err(|error| AppError::Storage(error.to_string()))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|error| AppError::Storage(error.to_string()))?;
         let preferences: UiPreferences = serde_json::from_str(&content)
             .map_err(|error| AppError::Serialization(error.to_string()))?;
         Ok(preferences)
@@ -335,13 +350,16 @@ pub fn app_set_terminal_command_history(
         .ok_or_else(|| AppError::Serialization("命令历史文件格式无效".to_string()))?;
     object.insert(
         profile_id,
-        serde_json::to_value(sanitized).map_err(|error| AppError::Serialization(error.to_string()))?,
+        serde_json::to_value(sanitized)
+            .map_err(|error| AppError::Serialization(error.to_string()))?,
     );
     write_json_object(&app, "command-history.json", &value)
 }
 
 #[tauri::command]
-pub fn app_get_command_send_preferences(app: AppHandle) -> Result<CommandSendPreferences, AppError> {
+pub fn app_get_command_send_preferences(
+    app: AppHandle,
+) -> Result<CommandSendPreferences, AppError> {
     let value = crate::storage::read_json_object(&app, "command-send-preferences.json")?;
     let preferences = serde_json::from_value::<CommandSendPreferences>(value).unwrap_or_default();
     Ok(CommandSendPreferences {
@@ -358,7 +376,10 @@ pub fn app_set_command_send_preferences(
     app: AppHandle,
     preferences: CommandSendPreferences,
 ) -> Result<(), AppError> {
-    if !matches!(preferences.send_scope.as_str(), "current" | "all-ssh" | "selected-ssh") {
+    if !matches!(
+        preferences.send_scope.as_str(),
+        "current" | "all-ssh" | "selected-ssh"
+    ) {
         return Err(AppError::Command("命令发送范围无效".to_string()));
     }
     let selected_tab_ids = preferences
@@ -397,7 +418,9 @@ pub fn app_list_ssh_keys(app: AppHandle) -> Result<Vec<serde_json::Value>, AppEr
 }
 
 #[tauri::command]
-pub async fn app_select_ssh_key_file(app: AppHandle) -> Result<Option<serde_json::Value>, AppError> {
+pub async fn app_select_ssh_key_file(
+    app: AppHandle,
+) -> Result<Option<serde_json::Value>, AppError> {
     crate::services::ssh_keys::select_file(&app).await
 }
 
@@ -406,7 +429,10 @@ pub fn app_import_ssh_key(
     app: AppHandle,
     input: Option<ImportSshKeyInput>,
 ) -> Result<Option<serde_json::Value>, AppError> {
-    let input = input.unwrap_or(ImportSshKeyInput { source_path: None, note: None });
+    let input = input.unwrap_or(ImportSshKeyInput {
+        source_path: None,
+        note: None,
+    });
     let result = crate::services::ssh_keys::import(&app, input.source_path, input.note)?;
     if result.is_some() {
         emit_ssh_keys_changed(&app)?;
@@ -437,17 +463,32 @@ fn emit_ssh_keys_changed(app: &AppHandle) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-pub async fn app_preview_connection_import(app: AppHandle, source: Option<String>) -> Result<Option<serde_json::Value>, AppError> {
+pub async fn app_preview_connection_import(
+    app: AppHandle,
+    source: Option<String>,
+) -> Result<Option<serde_json::Value>, AppError> {
     let dialog = rfd::AsyncFileDialog::new()
         .add_filter("Connection files", &["json", "config", "txt"])
         .set_title("选择连接配置或目录");
     let paths = match source.as_deref() {
-        Some("folder") => dialog.pick_folder().await.map(|folder| vec![folder.path().to_path_buf()]),
-        Some("files") | None => dialog.pick_files().await.map(|files| files.into_iter().map(|file| file.path().to_path_buf()).collect()),
+        Some("folder") => dialog
+            .pick_folder()
+            .await
+            .map(|folder| vec![folder.path().to_path_buf()]),
+        Some("files") | None => dialog.pick_files().await.map(|files| {
+            files
+                .into_iter()
+                .map(|file| file.path().to_path_buf())
+                .collect()
+        }),
         _ => return Err(AppError::Command("导入来源无效".to_string())),
     };
-    let Some(paths) = paths else { return Ok(None); };
-    crate::services::connections::create_import_plan_from_paths(&app, paths).await.map(Some)
+    let Some(paths) = paths else {
+        return Ok(None);
+    };
+    crate::services::connections::create_import_plan_from_paths(&app, paths)
+        .await
+        .map(Some)
 }
 
 #[tauri::command]
@@ -476,7 +517,11 @@ pub async fn app_commit_connection_json_import(
 
 #[tauri::command]
 pub async fn app_export_connections(app: AppHandle, format: String) -> Result<bool, AppError> {
-    let extension = if format == "compatible" { "json" } else { "fileterm.json" };
+    let extension = if format == "compatible" {
+        "json"
+    } else {
+        "fileterm.json"
+    };
     let Some(target) = rfd::AsyncFileDialog::new()
         .set_file_name(format!("fileterm-connections.{extension}"))
         .add_filter("JSON", &["json"])
@@ -493,16 +538,25 @@ pub async fn app_export_connections(app: AppHandle, format: String) -> Result<bo
 }
 
 #[tauri::command]
-pub async fn app_export_connections_as_files(app: AppHandle, format: String) -> Result<bool, AppError> {
+pub async fn app_export_connections_as_files(
+    app: AppHandle,
+    format: String,
+) -> Result<bool, AppError> {
     let Some(target) = rfd::AsyncFileDialog::new().pick_folder().await else {
         return Ok(false);
     };
     let (profiles, _) = crate::services::profile_ops::read_and_heal_profiles(&app)?;
     let mut used_names = std::collections::HashSet::new();
     for profile in profiles {
-        let id = profile.get("id").and_then(Value::as_str).unwrap_or("connection");
+        let id = profile
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("connection");
         let name = profile.get("name").and_then(Value::as_str).unwrap_or(id);
-        let filename = format!("{}.json", crate::services::connections::export_filename(name, id, &mut used_names));
+        let filename = format!(
+            "{}.json",
+            crate::services::connections::export_filename(name, id, &mut used_names)
+        );
         let payload = if format == "compatible" {
             serde_json::json!({
                 "id": profile.get("id"), "name": profile.get("name"),
@@ -536,7 +590,10 @@ pub fn app_get_webdav_sync_config(app: AppHandle) -> Result<serde_json::Value, A
 }
 
 #[tauri::command]
-pub fn app_set_webdav_sync_config(app: AppHandle, input: serde_json::Value) -> Result<serde_json::Value, AppError> {
+pub fn app_set_webdav_sync_config(
+    app: AppHandle,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, AppError> {
     crate::services::webdav::save_config(&app, input)
 }
 
@@ -564,79 +621,57 @@ pub async fn app_workspace_mutation(
 ) -> Result<serde_json::Value, AppError> {
     match operation.as_str() {
         "create-profile" => {
-            let mut profiles = read_json_array(&app, "profiles.json")?;
             if let Some(input) = payload.get("input").cloned() {
-                let mut profile = input.clone();
-                let port = profile.get("port").cloned().unwrap_or(serde_json::json!(22));
-                if let Some(obj) = profile.as_object_mut() {
-                    obj.insert("id".to_string(), Value::String(new_id("profile")));
-                    obj.insert("port".to_string(), port);
-                }
-                profiles.push(profile);
-                write_json_array(&app, "profiles.json", &profiles)?;
+                crate::services::profile_ops::create_profile(&app, input)?;
             }
         }
         "create-folder" => {
-            let mut folders = read_json_array(&app, "folders.json")?;
-            let name = payload.get("name").and_then(|n| n.as_str()).unwrap_or("新建分类");
+            let name = payload
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("新建分类");
             let parent_id = payload.get("parentId").and_then(|id| id.as_str());
-            folders.push(serde_json::json!({
-                "id": new_id("folder"),
-                "name": name,
-                "parentId": parent_id
-            }));
-            write_json_array(&app, "folders.json", &folders)?;
+            crate::services::profile_ops::create_folder(&app, name, parent_id)?;
         }
         "create-command-folder" => {
-            let mut folders = read_json_array(&app, "command-folders.json")?;
-            let name = payload.get("name").and_then(|n| n.as_str()).unwrap_or("新建命令分类");
+            let name = payload
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("新建命令分类");
             let parent_id = payload.get("parentId").and_then(|id| id.as_str());
-            folders.push(serde_json::json!({
-                "id": new_id("cmd-folder"),
-                "name": name,
-                "parentId": parent_id
-            }));
-            write_json_array(&app, "command-folders.json", &folders)?;
+            crate::services::profile_ops::create_command_folder(&app, name, parent_id)?;
         }
         "create-command" => {
-            let mut commands = read_json_array(&app, "commands.json")?;
             if let Some(input) = payload.get("input").cloned() {
-                let mut command = input.clone();
-                if let Some(obj) = command.as_object_mut() {
-                    obj.insert("id".to_string(), Value::String(new_id("cmd")));
-                }
-                commands.push(command);
-                write_json_array(&app, "commands.json", &commands)?;
+                crate::services::profile_ops::create_command_template(&app, input)?;
             }
         }
-        _ => return Err(AppError::Command(format!("Unsupported operation: {operation}"))),
+        _ => {
+            return Err(AppError::Command(format!(
+                "Unsupported operation: {operation}"
+            )))
+        }
     }
     get_workspace_snapshot(app).await
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OpenWindowInput {
     pub kind: String,
     pub mode: Option<String>,
-    #[serde(rename = "profileId")]
     pub profile_id: Option<String>,
-    #[serde(rename = "commandId")]
     pub command_id: Option<String>,
-    #[serde(rename = "folderId")]
     pub folder_id: Option<String>,
     pub source: Option<String>,
     pub path: Option<String>,
     pub name: Option<String>,
-    #[serde(rename = "tabId")]
     pub tab_id: Option<String>,
     pub encoding: Option<String>,
 }
 
 #[tauri::command]
-pub fn app_open_window(
-    app: AppHandle,
-    input: OpenWindowInput,
-) -> Result<(), AppError> {
+pub fn app_open_window(app: AppHandle, input: OpenWindowInput) -> Result<(), AppError> {
     crate::open_child_window(&app, input)
 }
 
@@ -742,13 +777,14 @@ pub async fn get_workspace_snapshot(app: AppHandle) -> Result<serde_json::Value,
     let transfers = state.transfers.read().await.clone();
 
     // Read + heal profiles, then strip secrets before exposing in snapshot.
-    let (profiles_with_secrets, folders) = crate::services::profile_ops::read_and_heal_profiles(&app)?;
+    let (profiles_with_secrets, folders) =
+        crate::services::profile_ops::read_and_heal_profiles(&app)?;
     let profiles: Vec<serde_json::Value> = profiles_with_secrets
         .iter()
-        .map(|p| crate::services::profile_ops::strip_secret_fields_public(p))
+        .map(crate::services::profile_ops::strip_secret_fields_public)
         .collect();
-    let command_folders = read_json_array(&app, "command-folders.json")?;
-    let commands = read_json_array(&app, "commands.json")?;
+    let (command_folders, commands) =
+        crate::services::profile_ops::read_and_heal_command_library(&app)?;
 
     Ok(serde_json::json!({
         "profiles": profiles,
@@ -769,7 +805,10 @@ async fn send_worker_cmd<T>(
 ) -> Result<T, AppError> {
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     let workers = state.workers.read().await;
-    let sender = workers.get(tab_id).ok_or_else(|| AppError::Storage("Session not found".to_string()))?.clone();
+    let sender = workers
+        .get(tab_id)
+        .ok_or_else(|| AppError::Storage("Session not found".to_string()))?
+        .clone();
     drop(workers);
 
     let (tx, rx) = oneshot::channel();
@@ -785,7 +824,7 @@ async fn send_worker_cmd<T>(
         .await
         .map_err(|_| AppError::Storage("远程文件操作超时，请检查连接后重试".to_string()))?
         .map_err(|e| AppError::Storage(e.to_string()))?
-        .map_err(|e| AppError::Storage(e))?;
+        .map_err(AppError::Storage)?;
     Ok(res)
 }
 
@@ -793,8 +832,9 @@ async fn refresh_remote_files(app: &AppHandle, tab_id: &str, path: &str) -> Resu
     let files = send_worker_cmd(app, tab_id, |tx| WorkerCmd::ListRemoteFiles {
         path: path.to_string(),
         respond_to: tx,
-    }).await?;
-    
+    })
+    .await?;
+
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     let mut sessions = state.sessions.write().await;
     if let Some(session) = sessions.get_mut(tab_id) {
@@ -834,10 +874,7 @@ fn start_session_worker(
     }
 }
 
-async fn stop_session_worker(
-    state: &crate::services::workspace::WorkspaceState,
-    tab_id: &str,
-) {
+async fn stop_session_worker(state: &crate::services::workspace::WorkspaceState, tab_id: &str) {
     if let Some(control) = state.worker_controls.write().await.remove(tab_id) {
         // Cancel first: a command sender cannot wake a worker which is inside
         // an SSH read/metrics parse. This also prevents a stale worker from
@@ -850,7 +887,11 @@ async fn stop_session_worker(
         // 超时即放弃：worker 主循环卡死时 channel 已满，send 不进去；
         // 但 sender 已经从 workers map 移除并即将 drop，worker 的
         // `cmd_rx.recv()` 会返回 None 走清理路径，无需依赖这条 Disconnect。
-        let _ = timeout(WORKER_DISCONNECT_TIMEOUT, sender.send(WorkerCmd::Disconnect)).await;
+        let _ = timeout(
+            WORKER_DISCONNECT_TIMEOUT,
+            sender.send(WorkerCmd::Disconnect),
+        )
+        .await;
     }
 }
 
@@ -877,7 +918,11 @@ pub async fn shutdown_session_workers(app: &AppHandle) {
     for sender in senders {
         // Cmd+Q 退出链路：任何单个卡死 worker 都不能阻塞整体退出。
         // 超时后直接 drop sender，worker 收到 recv()==None 自动清理。
-        let _ = timeout(WORKER_DISCONNECT_TIMEOUT, sender.send(WorkerCmd::Disconnect)).await;
+        let _ = timeout(
+            WORKER_DISCONNECT_TIMEOUT,
+            sender.send(WorkerCmd::Disconnect),
+        )
+        .await;
     }
 }
 
@@ -887,16 +932,24 @@ pub async fn app_open_profile(
     profile_id: String,
 ) -> Result<serde_json::Value, AppError> {
     let profiles = read_json_array(&app, "profiles.json")?;
-    let profile = profiles.iter().find(|p| p.get("id").and_then(|id| id.as_str()) == Some(&profile_id))
+    let profile = profiles
+        .iter()
+        .find(|p| p.get("id").and_then(|id| id.as_str()) == Some(&profile_id))
         .ok_or_else(|| AppError::Storage("Profile not found".to_string()))?;
 
     // Match Electron's open lifecycle: recency is about the user's intent to
     // open a connection, not whether the later network handshake succeeds.
     crate::services::profile_ops::touch_profile(&app, &profile_id)?;
-    
-    let profile_type = profile.get("type").and_then(|t| t.as_str()).unwrap_or("ssh");
-    let name = profile.get("name").and_then(|n| n.as_str()).unwrap_or("SSH Session");
-    
+
+    let profile_type = profile
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("ssh");
+    let name = profile
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("SSH Session");
+
     let tab_id = format!("tab-{}", uuid::Uuid::new_v4());
     let new_tab = crate::services::WorkspaceTab {
         id: tab_id.clone(),
@@ -914,7 +967,10 @@ pub async fn app_open_profile(
         .or_else(|| profile.get("devicePath").and_then(Value::as_str))
         .unwrap_or("127.0.0.1");
     let port = profile.get("port").and_then(|p| p.as_i64()).unwrap_or(22) as u16;
-    let username = profile.get("username").and_then(|u| u.as_str()).unwrap_or("root");
+    let username = profile
+        .get("username")
+        .and_then(|u| u.as_str())
+        .unwrap_or("root");
 
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     {
@@ -924,29 +980,32 @@ pub async fn app_open_profile(
         *active = Some(tab_id.clone());
 
         let mut sessions = state.sessions.write().await;
-        sessions.insert(tab_id.clone(), crate::services::SessionSnapshot {
-            profile_id: profile_id.clone(),
-            access_host: format!("{}:{}", host, port),
-            summary: format!("{}@{}", username, host),
-            terminal_transcript: "连接主机...\r\n".to_string(),
-            remote_path: "/".to_string(),
-            shell_cwd: Some("/".to_string()),
-            follow_shell_cwd: true,
-            remote_files_loading: false,
-            remote_files: Vec::new(),
-            sftp_unavailable_reason: None,
-            file_access_mode: "user".to_string(),
-            sudo_user: None,
-            has_reusable_sudo_auth: false,
-            login_user: None,
-            shell_user: None,
-            connected: false,
-            system_metrics: None,
-            capabilities: crate::services::workspace::ConnectionCapabilities::for_session_type(
-                profile_type,
-            ),
-            reconnect_mode: crate::services::workspace::reconnect_mode_for_profile(profile),
-        });
+        sessions.insert(
+            tab_id.clone(),
+            crate::services::SessionSnapshot {
+                profile_id: profile_id.clone(),
+                access_host: format!("{}:{}", host, port),
+                summary: format!("{}@{}", username, host),
+                terminal_transcript: "连接主机...\r\n".to_string(),
+                remote_path: "/".to_string(),
+                shell_cwd: Some("/".to_string()),
+                follow_shell_cwd: true,
+                remote_files_loading: false,
+                remote_files: Vec::new(),
+                sftp_unavailable_reason: None,
+                file_access_mode: "user".to_string(),
+                sudo_user: None,
+                has_reusable_sudo_auth: false,
+                login_user: None,
+                shell_user: None,
+                connected: false,
+                system_metrics: None,
+                capabilities: crate::services::workspace::ConnectionCapabilities::for_session_type(
+                    profile_type,
+                ),
+                reconnect_mode: crate::services::workspace::reconnect_mode_for_profile(profile),
+            },
+        );
     }
 
     let (tx, rx) = mpsc::channel(100);
@@ -962,7 +1021,11 @@ pub async fn app_open_profile(
         workers.insert(tab_id.clone(), tx);
     }
     if let Some(sender) = terminal_input_tx {
-        state.terminal_inputs.write().await.insert(tab_id.clone(), sender);
+        state
+            .terminal_inputs
+            .write()
+            .await
+            .insert(tab_id.clone(), sender);
     }
     state
         .worker_controls
@@ -1003,15 +1066,20 @@ pub async fn app_reconnect_tab(
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     let profile_id = {
         let tabs = state.tabs.read().await;
-        tabs.iter().find(|t| t.id == tab_id).map(|t| t.profile_id.clone())
+        tabs.iter()
+            .find(|t| t.id == tab_id)
+            .map(|t| t.profile_id.clone())
     };
 
     if let Some(pid) = profile_id {
         let profiles = read_json_array(&app, "profiles.json")?;
-        if let Some(profile) = profiles.iter().find(|p| p.get("id").and_then(|id| id.as_str()) == Some(&pid)) {
+        if let Some(profile) = profiles
+            .iter()
+            .find(|p| p.get("id").and_then(|id| id.as_str()) == Some(&pid))
+        {
             // Terminate existing worker
             stop_session_worker(&state, &tab_id).await;
-            
+
             // Set connecting status. Preserve the existing transcript so the
             // renderer can re-hydrate the terminal with prior history on
             // reconnect (mirrors Electron's BoundedTextBuffer retention).
@@ -1029,10 +1097,13 @@ pub async fn app_reconnect_tab(
                     session.shell_user = None;
                     session.file_access_mode = "user".to_string();
                     session.has_reusable_sudo_auth = false;
-                    session.reconnect_mode = crate::services::workspace::reconnect_mode_for_profile(profile);
+                    session.reconnect_mode =
+                        crate::services::workspace::reconnect_mode_for_profile(profile);
                     // Append a reconnect separator instead of wiping history.
                     if !session.terminal_transcript.is_empty() {
-                        session.terminal_transcript.push_str("\r\n--- 重新连接 ---\r\n");
+                        session
+                            .terminal_transcript
+                            .push_str("\r\n--- 重新连接 ---\r\n");
                     }
                     session.terminal_transcript.push_str("连接主机...\r\n");
                     // Cap to 200k chars (matches Electron's BoundedTextBuffer).
@@ -1043,7 +1114,8 @@ pub async fn app_reconnect_tab(
                         {
                             cut += 1;
                         }
-                        session.terminal_transcript = session.terminal_transcript[cut..].to_string();
+                        session.terminal_transcript =
+                            session.terminal_transcript[cut..].to_string();
                     }
                     session.remote_files = Vec::new();
                     session.system_metrics = None;
@@ -1072,7 +1144,11 @@ pub async fn app_reconnect_tab(
                 workers.insert(tab_id.clone(), tx);
             }
             if let Some(sender) = terminal_input_tx {
-                state.terminal_inputs.write().await.insert(tab_id.clone(), sender);
+                state
+                    .terminal_inputs
+                    .write()
+                    .await
+                    .insert(tab_id.clone(), sender);
             }
             state
                 .worker_controls
@@ -1099,7 +1175,8 @@ pub async fn app_disconnect_tab(
     app: AppHandle,
     tab_id: String,
 ) -> Result<serde_json::Value, AppError> {
-    crate::services::transfers::pause_for_tab(&app, &tab_id, "连接断开，可在重连后继续传输").await?;
+    crate::services::transfers::pause_for_tab(&app, &tab_id, "连接断开，可在重连后继续传输")
+        .await?;
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     let was_connected = state
         .sessions
@@ -1133,27 +1210,30 @@ pub async fn app_disconnect_tab(
     if was_connected {
         crate::sessions::terminal::emit_terminal_data(&app, &tab_id, "\r\n连接已断开\r\n").await;
     }
-    crate::sessions::terminal::set_terminal_state(&app, &tab_id, "连接已断开".to_string(), false).await;
+    crate::sessions::terminal::set_terminal_state(&app, &tab_id, "连接已断开".to_string(), false)
+        .await;
     get_workspace_snapshot(app).await
 }
 
 #[tauri::command]
-pub async fn app_close_tab(
-    app: AppHandle,
-    tab_id: String,
-) -> Result<serde_json::Value, AppError> {
-    crate::services::transfers::pause_for_tab(&app, &tab_id, "标签关闭后已暂停，可在重连后继续传输").await?;
+pub async fn app_close_tab(app: AppHandle, tab_id: String) -> Result<serde_json::Value, AppError> {
+    crate::services::transfers::pause_for_tab(
+        &app,
+        &tab_id,
+        "标签关闭后已暂停，可在重连后继续传输",
+    )
+    .await?;
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     stop_session_worker(&state, &tab_id).await;
     {
         let mut tabs = state.tabs.write().await;
         tabs.retain(|t| t.id != tab_id);
-        
+
         let mut active = state.active_tab_id.write().await;
         if *active == Some(tab_id.clone()) {
             *active = tabs.last().map(|t| t.id.clone());
         }
-        
+
         let mut sessions = state.sessions.write().await;
         sessions.remove(&tab_id);
     }
@@ -1171,10 +1251,7 @@ pub async fn app_write_terminal(
 }
 
 #[tauri::command]
-pub fn app_subscribe_terminal_data(
-    app: AppHandle,
-    channel: Channel<serde_json::Value>,
-) {
+pub fn app_subscribe_terminal_data(app: AppHandle, channel: Channel<serde_json::Value>) {
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     state.register_terminal_output_channel(channel);
 }
@@ -1191,7 +1268,16 @@ pub async fn app_resize_terminal(
     let state = app.state::<crate::services::workspace::WorkspaceState>();
     let workers = state.workers.read().await;
     if let Some(sender) = workers.get(&tab_id) {
-        let _ = timeout(WORKER_CMD_SEND_TIMEOUT, sender.send(WorkerCmd::ResizeTerminal { cols, rows, width, height })).await;
+        let _ = timeout(
+            WORKER_CMD_SEND_TIMEOUT,
+            sender.send(WorkerCmd::ResizeTerminal {
+                cols,
+                rows,
+                width,
+                height,
+            }),
+        )
+        .await;
     }
     Ok(())
 }
@@ -1277,7 +1363,8 @@ pub async fn app_read_remote_file(
         path: target_path,
         encoding: enc,
         respond_to: tx,
-    }).await
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1294,8 +1381,9 @@ pub async fn app_write_remote_file(
         content,
         encoding: enc,
         respond_to: tx,
-    }).await?;
-    
+    })
+    .await?;
+
     let parent = std::path::Path::new(&target_path)
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -1315,8 +1403,9 @@ pub async fn app_create_remote_directory(
         parent_path: parent_path.clone(),
         name,
         respond_to: tx,
-    }).await?;
-    
+    })
+    .await?;
+
     let _ = refresh_remote_files(&app, &tab_id, &parent_path).await;
     get_workspace_snapshot(app).await
 }
@@ -1332,8 +1421,9 @@ pub async fn app_create_remote_file(
         parent_path: parent_path.clone(),
         name,
         respond_to: tx,
-    }).await?;
-    
+    })
+    .await?;
+
     let _ = refresh_remote_files(&app, &tab_id, &parent_path).await;
     get_workspace_snapshot(app).await
 }
@@ -1351,8 +1441,9 @@ pub async fn app_copy_remote_path(
         destination_path: destination_path.clone(),
         target_type,
         respond_to: tx,
-    }).await?;
-    
+    })
+    .await?;
+
     let parent = std::path::Path::new(&destination_path)
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -1372,8 +1463,9 @@ pub async fn app_move_remote_path(
         target_path: target_path.clone(),
         destination_path: destination_path.clone(),
         respond_to: tx,
-    }).await?;
-    
+    })
+    .await?;
+
     let parent_src = std::path::Path::new(&target_path)
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -1382,7 +1474,7 @@ pub async fn app_move_remote_path(
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "/".to_string());
-        
+
     let _ = refresh_remote_files(&app, &tab_id, &parent_src).await;
     if parent_src != parent_dest {
         let _ = refresh_remote_files(&app, &tab_id, &parent_dest).await;
@@ -1401,8 +1493,9 @@ pub async fn app_rename_remote_path(
         target_path: target_path.clone(),
         new_name,
         respond_to: tx,
-    }).await?;
-    
+    })
+    .await?;
+
     let parent = std::path::Path::new(&target_path)
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -1422,8 +1515,9 @@ pub async fn app_delete_remote_path(
         target_path: target_path.clone(),
         target_type,
         respond_to: tx,
-    }).await?;
-    
+    })
+    .await?;
+
     let parent = std::path::Path::new(&target_path)
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
@@ -1432,19 +1526,61 @@ pub async fn app_delete_remote_path(
     get_workspace_snapshot(app).await
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum PermissionApplyTarget {
+    All,
+    Files,
+    Directories,
+}
+
+impl PermissionApplyTarget {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Files => "files",
+            Self::Directories => "directories",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemotePermissionChangeOptions {
+    mode: String,
+    #[serde(default)]
+    recursive: bool,
+    #[serde(default)]
+    apply_to: Option<PermissionApplyTarget>,
+}
+
+fn parse_remote_permission_mode(mode: &str) -> Result<u32, AppError> {
+    let trimmed = mode.trim();
+    if !(3..=4).contains(&trimmed.len())
+        || !trimmed
+            .chars()
+            .all(|character| matches!(character, '0'..='7'))
+    {
+        return Err(AppError::Command(
+            "权限值必须是 3 到 4 位八进制数字，例如 755".to_string(),
+        ));
+    }
+    u32::from_str_radix(trimmed, 8).map_err(|error| AppError::Command(error.to_string()))
+}
+
 #[tauri::command]
 pub async fn app_change_remote_permissions(
     app: AppHandle,
     tab_id: String,
     target_path: String,
-    options: serde_json::Value,
+    options: RemotePermissionChangeOptions,
 ) -> Result<serde_json::Value, AppError> {
-    let permissions = options.get("permissions").and_then(|p| p.as_u64()).unwrap_or(0o755) as u32;
-    let recursive = options.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+    let permissions = parse_remote_permission_mode(&options.mode)?;
+    let recursive = options.recursive;
     let apply_to = options
-        .get("applyTo")
-        .and_then(|v| v.as_str())
-        .unwrap_or("all")
+        .apply_to
+        .unwrap_or(PermissionApplyTarget::All)
+        .as_str()
         .to_string();
     send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::ChangeRemotePermissions {
         target_path: target_path.clone(),
@@ -1452,7 +1588,8 @@ pub async fn app_change_remote_permissions(
         recursive,
         apply_to,
         respond_to: tx,
-    }).await?;
+    })
+    .await?;
 
     let parent = std::path::Path::new(&target_path)
         .parent()
@@ -1484,7 +1621,8 @@ pub async fn app_set_remote_file_access_mode(
         sudo_user,
         sudo_password,
         respond_to: tx,
-    }).await?;
+    })
+    .await?;
 
     get_workspace_snapshot(app).await
 }
@@ -1512,7 +1650,14 @@ pub async fn app_upload_file(
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned);
-    crate::services::transfers::create_upload(&app, tab_id, local_path, remote_directory, target_name).await?;
+    crate::services::transfers::create_upload(
+        &app,
+        tab_id,
+        local_path,
+        remote_directory,
+        target_name,
+    )
+    .await?;
     get_workspace_snapshot(app).await
 }
 
@@ -1530,7 +1675,14 @@ pub async fn app_download_file(
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
         .map(ToOwned::to_owned);
-    crate::services::transfers::create_download(&app, tab_id, remote_path, local_directory, target_name).await?;
+    crate::services::transfers::create_download(
+        &app,
+        tab_id,
+        remote_path,
+        local_directory,
+        target_name,
+    )
+    .await?;
     get_workspace_snapshot(app).await
 }
 
@@ -1567,31 +1719,46 @@ pub async fn app_download_remote_path(
 }
 
 #[tauri::command]
-pub async fn app_cancel_transfer(app: AppHandle, transfer_id: String) -> Result<serde_json::Value, AppError> {
+pub async fn app_cancel_transfer(
+    app: AppHandle,
+    transfer_id: String,
+) -> Result<serde_json::Value, AppError> {
     crate::services::transfers::discard(&app, transfer_id).await?;
     get_workspace_snapshot(app).await
 }
 
 #[tauri::command]
-pub async fn app_pause_transfer(app: AppHandle, transfer_id: String) -> Result<serde_json::Value, AppError> {
+pub async fn app_pause_transfer(
+    app: AppHandle,
+    transfer_id: String,
+) -> Result<serde_json::Value, AppError> {
     crate::services::transfers::pause(&app, transfer_id).await?;
     get_workspace_snapshot(app).await
 }
 
 #[tauri::command]
-pub async fn app_resume_transfer(app: AppHandle, transfer_id: String) -> Result<serde_json::Value, AppError> {
+pub async fn app_resume_transfer(
+    app: AppHandle,
+    transfer_id: String,
+) -> Result<serde_json::Value, AppError> {
     crate::services::transfers::resume(&app, transfer_id).await?;
     get_workspace_snapshot(app).await
 }
 
 #[tauri::command]
-pub async fn app_discard_transfer(app: AppHandle, transfer_id: String) -> Result<serde_json::Value, AppError> {
+pub async fn app_discard_transfer(
+    app: AppHandle,
+    transfer_id: String,
+) -> Result<serde_json::Value, AppError> {
     crate::services::transfers::discard(&app, transfer_id).await?;
     get_workspace_snapshot(app).await
 }
 
 #[tauri::command]
-pub async fn app_clear_transfers(app: AppHandle, transfer_ids: Vec<String>) -> Result<serde_json::Value, AppError> {
+pub async fn app_clear_transfers(
+    app: AppHandle,
+    transfer_ids: Vec<String>,
+) -> Result<serde_json::Value, AppError> {
     crate::services::transfers::clear(&app, transfer_ids).await?;
     get_workspace_snapshot(app).await
 }
@@ -1601,7 +1768,10 @@ pub async fn app_list_ssh_tunnels(
     app: AppHandle,
     tab_id: String,
 ) -> Result<Vec<serde_json::Value>, AppError> {
-    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::ListSshTunnels { respond_to: tx }).await
+    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::ListSshTunnels {
+        respond_to: tx,
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1623,7 +1793,11 @@ pub async fn app_start_ssh_tunnel(
     tab_id: String,
     rule_id: String,
 ) -> Result<Vec<serde_json::Value>, AppError> {
-    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::StartSshTunnel { rule_id, respond_to: tx }).await
+    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::StartSshTunnel {
+        rule_id,
+        respond_to: tx,
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1632,7 +1806,11 @@ pub async fn app_stop_ssh_tunnel(
     tab_id: String,
     rule_id: String,
 ) -> Result<Vec<serde_json::Value>, AppError> {
-    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::StopSshTunnel { rule_id, respond_to: tx }).await
+    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::StopSshTunnel {
+        rule_id,
+        respond_to: tx,
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1641,7 +1819,11 @@ pub async fn app_delete_ssh_tunnel(
     tab_id: String,
     rule_id: String,
 ) -> Result<Vec<serde_json::Value>, AppError> {
-    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::DeleteSshTunnel { rule_id, respond_to: tx }).await
+    send_worker_cmd(&app, &tab_id, |tx| WorkerCmd::DeleteSshTunnel {
+        rule_id,
+        respond_to: tx,
+    })
+    .await
 }
 
 #[tauri::command]
@@ -1870,10 +2052,10 @@ mod command_template_tests {
     #[test]
     fn renders_positional_command_template_arguments() {
         assert_eq!(
-            render_command_template("deploy [p#1] --region [p#2] --empty=[p#3]", &[
-                "api".to_string(),
-                "cn-north".to_string(),
-            ]),
+            render_command_template(
+                "deploy [p#1] --region [p#2] --empty=[p#3]",
+                &["api".to_string(), "cn-north".to_string(),]
+            ),
             "deploy api --region cn-north --empty="
         );
     }
@@ -1903,7 +2085,9 @@ mod window_lifecycle_tests {
     #[test]
     fn main_window_close_keeps_the_lifecycle_guard() {
         assert!(!renderer_approved_close_should_destroy("main"));
-        assert!(renderer_approved_close_should_destroy("file-editor-local-1"));
+        assert!(renderer_approved_close_should_destroy(
+            "file-editor-local-1"
+        ));
         assert!(renderer_approved_close_should_destroy("connection-manager"));
     }
 }
@@ -1915,7 +2099,10 @@ mod ui_state_tests {
     #[test]
     fn reads_current_object_ui_state() {
         let states = normalize_ui_state(serde_json::json!({ "main.tab-ui": "tabs" })).unwrap();
-        assert_eq!(states.get("main.tab-ui").and_then(|value| value.as_str()), Some("tabs"));
+        assert_eq!(
+            states.get("main.tab-ui").and_then(|value| value.as_str()),
+            Some("tabs")
+        );
     }
 
     #[test]
@@ -1926,7 +2113,9 @@ mod ui_state_tests {
         }))
         .unwrap();
         assert_eq!(
-            electron.get("ssh-key-manager-ui").and_then(|value| value.as_str()),
+            electron
+                .get("ssh-key-manager-ui")
+                .and_then(|value| value.as_str()),
             Some("folders")
         );
 
@@ -1935,8 +2124,74 @@ mod ui_state_tests {
         ]))
         .unwrap();
         assert_eq!(
-            legacy.get("ssh-key-manager-ui").and_then(|value| value.as_str()),
+            legacy
+                .get("ssh-key-manager-ui")
+                .and_then(|value| value.as_str()),
             Some("legacy-folders")
         );
+    }
+}
+
+#[cfg(test)]
+mod permission_contract_tests {
+    use super::{
+        parse_remote_permission_mode, PermissionApplyTarget, RemotePermissionChangeOptions,
+    };
+
+    #[test]
+    fn reads_shared_camel_case_permission_contract() {
+        let options: RemotePermissionChangeOptions = serde_json::from_value(serde_json::json!({
+            "mode": "0640",
+            "recursive": true,
+            "applyTo": "files"
+        }))
+        .expect("shared permission options should deserialize");
+
+        assert_eq!(parse_remote_permission_mode(&options.mode).unwrap(), 0o640);
+        assert!(options.recursive);
+        assert!(matches!(
+            options.apply_to,
+            Some(PermissionApplyTarget::Files)
+        ));
+    }
+
+    #[test]
+    fn rejects_legacy_permissions_field_instead_of_defaulting_to_0755() {
+        let options = serde_json::from_value::<RemotePermissionChangeOptions>(serde_json::json!({
+            "permissions": 384,
+            "recursive": false
+        }));
+        assert!(options.is_err());
+    }
+
+    #[test]
+    fn validates_octal_permission_modes() {
+        assert_eq!(parse_remote_permission_mode("600").unwrap(), 0o600);
+        assert_eq!(parse_remote_permission_mode("755").unwrap(), 0o755);
+        assert!(parse_remote_permission_mode("888").is_err());
+        assert!(parse_remote_permission_mode("75").is_err());
+    }
+}
+
+#[cfg(test)]
+mod external_url_tests {
+    use super::validate_external_url;
+
+    #[test]
+    fn external_url_policy_accepts_only_web_links() {
+        for allowed in [
+            "https://github.com/St0ff3l/fileterm",
+            "http://127.0.0.1/docs",
+        ] {
+            assert!(validate_external_url(allowed).is_ok());
+        }
+        for denied in [
+            "file:///etc/passwd",
+            "ssh://example.com",
+            "javascript:alert(1)",
+        ] {
+            assert!(validate_external_url(denied).is_err());
+        }
+        assert!(validate_external_url("not a url").is_err());
     }
 }

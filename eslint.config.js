@@ -17,6 +17,7 @@ module.exports = [
       '**/dist-electron/**',
       '**/release/**',
       '**/coverage/**',
+      '.claude/**',
       'apps/tauri/src-tauri/target/**',
       'apps/tauri/src-tauri/gen/**'
     ]

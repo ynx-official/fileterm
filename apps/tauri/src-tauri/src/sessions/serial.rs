@@ -215,11 +215,12 @@ while True:
             .expect("python3 must be available for the virtual serial fixture");
         let stdout = child.stdout.take().expect("fixture stdout must be piped");
         let mut lines = BufReader::new(stdout).lines();
-        let device_path = tokio::time::timeout(std::time::Duration::from_secs(3), lines.next_line())
-            .await
-            .expect("virtual serial fixture timed out")
-            .expect("virtual serial fixture output failed")
-            .expect("virtual serial fixture did not provide a device path");
+        let device_path =
+            tokio::time::timeout(std::time::Duration::from_secs(3), lines.next_line())
+                .await
+                .expect("virtual serial fixture timed out")
+                .expect("virtual serial fixture output failed")
+                .expect("virtual serial fixture did not provide a device path");
 
         let stream = tokio_serial::new(&device_path, 115_200)
             .open_native_async()
@@ -231,7 +232,10 @@ while True:
         let mut received = Vec::new();
         let mut buffer = [0_u8; 64];
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while !received.windows(b"echo:ping".len()).any(|window| window == b"echo:ping") {
+            while !received
+                .windows(b"echo:ping".len())
+                .any(|window| window == b"echo:ping")
+            {
                 let count = reader.read(&mut buffer).await.unwrap();
                 assert!(count > 0, "virtual serial peer closed before echoing data");
                 received.extend_from_slice(&buffer[..count]);

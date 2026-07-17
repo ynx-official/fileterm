@@ -129,7 +129,11 @@ pub async fn open_release_page(app: &AppHandle) -> Result<(), AppError> {
     let result = open::that(url).map_err(|error| AppError::Command(error.to_string()));
     match &result {
         Ok(()) => crate::services::logging::info(app, "update", "release page opened"),
-        Err(error) => crate::services::logging::error(app, "update", format!("open release page failed: {error}")),
+        Err(error) => crate::services::logging::error(
+            app,
+            "update",
+            format!("open release page failed: {error}"),
+        ),
     }
     result
 }

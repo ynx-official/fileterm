@@ -22,9 +22,8 @@
 //!    uses the `namespace:name` form (`terminal:data`, `workspace:snapshot`,
 //!    `app:window-close-request`, ...). No bare names.
 
-use fileterm_lib::services::profile_ops::{
-    heal_profiles, strip_secret_fields_public,
-};
+use fileterm_lib::commands::OpenWindowInput;
+use fileterm_lib::services::profile_ops::{heal_profiles, strip_secret_fields_public};
 use serde_json::{json, Value};
 
 fn folder(id: &str, name: &str) -> Value {
@@ -39,7 +38,9 @@ fn profile(id: &str, group: &str, parent_id: Option<&str>) -> Value {
     obj.insert("group".to_string(), Value::String(group.to_string()));
     obj.insert(
         "parentId".to_string(),
-        parent_id.map(|s| Value::String(s.to_string())).unwrap_or(Value::Null),
+        parent_id
+            .map(|s| Value::String(s.to_string()))
+            .unwrap_or(Value::Null),
     );
     Value::Object(obj)
 }
@@ -59,14 +60,23 @@ fn strip_removes_top_level_secret_fields() {
         "port": 22,
     });
     let stripped = strip_secret_fields_public(&profile);
-    assert!(stripped.get("password").is_none(), "password must be stripped");
-    assert!(stripped.get("passphrase").is_none(), "passphrase must be stripped");
+    assert!(
+        stripped.get("password").is_none(),
+        "password must be stripped"
+    );
+    assert!(
+        stripped.get("passphrase").is_none(),
+        "passphrase must be stripped"
+    );
     assert!(
         stripped.get("privateKeyPath").is_none(),
         "privateKeyPath must be stripped"
     );
     // Non-secret fields stay intact.
-    assert_eq!(stripped.get("host").and_then(|v| v.as_str()), Some("example.com"));
+    assert_eq!(
+        stripped.get("host").and_then(|v| v.as_str()),
+        Some("example.com")
+    );
     assert_eq!(stripped.get("port").and_then(|v| v.as_i64()), Some(22));
 }
 
@@ -89,8 +99,14 @@ fn strip_removes_nested_proxy_password() {
         .get("proxy")
         .and_then(|v| v.as_object())
         .expect("proxy object should survive stripping");
-    assert!(proxy.get("password").is_none(), "proxy.password must be stripped");
-    assert_eq!(proxy.get("host").and_then(|v| v.as_str()), Some("127.0.0.1"));
+    assert!(
+        proxy.get("password").is_none(),
+        "proxy.password must be stripped"
+    );
+    assert_eq!(
+        proxy.get("host").and_then(|v| v.as_str()),
+        Some("127.0.0.1")
+    );
     assert_eq!(proxy.get("port").and_then(|v| v.as_i64()), Some(1080));
 }
 
@@ -252,4 +268,96 @@ fn contract_events_use_namespace_colon_name() {
             "event `{name}` must not have an empty namespace or name"
         );
     }
+}
+
+// ── Nested payload contracts ─────────────────────────────────────────────
+
+#[test]
+fn file_editor_window_payload_uses_camel_case_tab_id() {
+    let input: OpenWindowInput = serde_json::from_value(json!({
+        "kind": "file-editor",
+        "source": "remote",
+        "path": "/etc/hosts",
+        "name": "hosts",
+        "tabId": "tab-ssh-1",
+        "encoding": "utf-8"
+    }))
+    .expect("camelCase file editor input should deserialize");
+    assert_eq!(input.tab_id.as_deref(), Some("tab-ssh-1"));
+
+    let snake_case = serde_json::from_value::<OpenWindowInput>(json!({
+        "kind": "file-editor",
+        "source": "remote",
+        "path": "/etc/hosts",
+        "name": "hosts",
+        "tab_id": "tab-ssh-1"
+    }));
+    assert!(
+        snake_case.is_err(),
+        "snake_case payloads must fail instead of silently dropping tabId"
+    );
+}
+
+#[test]
+fn tauri_bridge_forwards_file_editor_tab_id_in_camel_case() {
+    let bridge = include_str!("../../src/bridge/tauri-api.ts");
+    assert!(
+        bridge.contains("tabId: input.tabId"),
+        "bridge must forward the remote editor session as tabId"
+    );
+    assert!(
+        !bridge.contains("tab_id: input.tabId"),
+        "bridge must not emit Rust field spellings"
+    );
+}
+
+#[test]
+fn tauri_bridge_is_structurally_checked_without_runtime_proxy_fallback() {
+    let bridge = include_str!("../../src/bridge/tauri-api.ts");
+    assert!(
+        bridge.contains("satisfies FileTermDesktopApi"),
+        "bridge object must be checked against the shared API at compile time"
+    );
+    assert!(
+        !bridge.contains("as unknown as FileTermDesktopApi"),
+        "bridge must not bypass the shared API type"
+    );
+    assert!(
+        !bridge.contains("new Proxy("),
+        "missing bridge methods must fail typecheck instead of becoming runtime stubs"
+    );
+}
+
+#[test]
+fn tauri_renderer_mounts_only_after_native_metadata_is_ready() {
+    let bridge = include_str!("../../src/bridge/tauri-api.ts");
+    assert!(bridge.contains("export async function createTauriApi"));
+    assert!(!bridge.contains("appVersion: '0.0.0'"));
+    assert!(!bridge.contains("arch = 'unknown'"));
+
+    let bootstrap = include_str!("../../src/renderer/main.tsx");
+    let assign = bootstrap
+        .find("window.fileterm = api")
+        .expect("bootstrap must expose the resolved API");
+    let render = bootstrap
+        .find("root.render(")
+        .expect("bootstrap must mount React");
+    assert!(
+        assign < render,
+        "native metadata must resolve before React mounts"
+    );
+}
+
+#[test]
+fn native_drop_fallback_is_cleared_only_after_renderer_consumption() {
+    let bridge = include_str!("../../src/bridge/tauri-api.ts");
+    assert!(
+        bridge.contains("consume: clearNativeDropFallback"),
+        "native drop events must expose an explicit acknowledgement"
+    );
+    let renderer = include_str!("../../src/renderer/hooks/useFileOperations.ts");
+    assert!(
+        renderer.contains("detail.consume()"),
+        "the accepted remote-pane drop must acknowledge native path consumption"
+    );
 }

@@ -125,7 +125,7 @@ function createInitialFile(
   isFileEditorWindow: boolean,
   input: FileEditorWindowInput | null
 ): FileContentSnapshot | null {
-  if (!isFileEditorWindow || !input) {
+  if (!isFileEditorWindow || !input || (input.source === 'remote' && !input.tabId)) {
     return null
   }
 
@@ -164,6 +164,14 @@ export function useFileEditor({
 
   useEffect(() => {
     if (!desktopApi || !isFileEditorWindow || !windowInput) {
+      return
+    }
+
+    if (windowInput.source === 'remote' && !windowInput.tabId) {
+      setErrorMessage(
+        formatErrorRef.current('打开文件编辑器', new Error('远程文件编辑器缺少会话标识，已阻止读取和保存'))
+      )
+      setIsLoading(false)
       return
     }
 
@@ -265,10 +273,11 @@ export function useFileEditor({
             await onLocalFileSavedRef.current?.()
           }
         } else {
-          const tabId = file.tabId ?? activeTabId
-          if (tabId) {
-            onApplySnapshotRef.current(await desktopApi.writeRemoteFile(tabId, file.path, content, encoding))
+          const tabId = isFileEditorWindow ? file.tabId : (file.tabId ?? activeTabId)
+          if (!tabId) {
+            throw new Error('远程文件编辑器缺少会话标识，已阻止保存')
           }
+          onApplySnapshotRef.current(await desktopApi.writeRemoteFile(tabId, file.path, content, encoding))
         }
 
         setFile((current) => (current ? { ...current, content, encoding } : current))
@@ -292,13 +301,14 @@ export function useFileEditor({
 
       try {
         setIsLoading(true)
-        const tabId = file.tabId ?? activeTabId
+        const tabId = isFileEditorWindow ? file.tabId : (file.tabId ?? activeTabId)
+        if (file.source === 'remote' && !tabId) {
+          throw new Error('远程文件编辑器缺少会话标识，已阻止重新读取')
+        }
         const content =
           file.source === 'local'
             ? await desktopApi.readLocalFile(file.path, encoding)
-            : tabId
-              ? await desktopApi.readRemoteFile(tabId, file.path, encoding)
-              : file.content
+            : await desktopApi.readRemoteFile(tabId!, file.path, encoding)
         setFile({ ...file, content, encoding })
         setErrorMessage(null)
         setIsDirty(false)
@@ -309,7 +319,7 @@ export function useFileEditor({
         setIsLoading(false)
       }
     },
-    [activeTabId, desktopApi, file]
+    [activeTabId, desktopApi, file, isFileEditorWindow]
   )
 
   const close = useCallback(() => {

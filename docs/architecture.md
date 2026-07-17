@@ -190,7 +190,8 @@ platform probe
 - 应用更新通过 Rust/Tauri update service 统一管理，renderer 仅经 `Rust commands/events -> tauri-api.ts -> renderer` 查询状态和触发检查；当前使用 GitHub Release 版本检查与安全发布页交接，签名静默 updater 仍待 Phase 5 发布资产。
 - 原生关闭快捷键由 Rust/Tauri backend 统一收口：macOS 使用 `Cmd+Q` 请求应用退出确认、`Cmd+W` 请求关闭当前工作区项/子窗口；Windows/Linux 分别保持 `Alt+F4` 退出与 `Ctrl+W` 关闭窗口语义。最后一个工作区项只触发普通窗口关闭/隐藏，不得直接销毁主窗口；托盘退出和应用退出快捷键必须走同一确认与 transfer journal 清理链路。
 - 主题和语言属于 Rust backend 持久化的 UI preferences；资源监控是 SSH 连接配置，关闭后该连接不采集资源数据，工作区仅保留窄侧栏。
-- 产品更名后，Rust backend 首次启动只迁移旧 Electron 用户目录中的应用自有 JSON 数据；Chromium session、缓存与日志不迁移。
+- Rust backend 在 Tauri userData 缺少迁移 marker 时，最多一次导入旧 Electron 用户目录中的应用自有 JSON/SSH key 数据；Tauri 当前数据按 ID 优先，legacy 只补缺失记录，整批 staging/commit 失败会回滚且不写 marker。迁移成功后不再 live merge，Chromium session、缓存与日志始终不迁移。
+- 连接与 WebDAV 凭据继续明文分文件保存，不接入 macOS safeStorage/钥匙串；Unix secret/key 文件在创建、迁移和读取自愈时收紧为 `0600`，profile 删除会重建 secret map 以清理孤儿记录。Windows 依赖应用数据目录的 best-effort 用户隔离。
 - Tauri backend 的持久化诊断统一进入 `services/logging.rs`：日志按 `app/window/protocol:tab/metrics/tunnel/transfer:id/local/update/webdav/profile` 分 scope，使用 `DEBUG/INFO/WARN/ERROR` 级别，并执行大小轮转与凭据标签脱敏。服务层不得只写 `stderr`；终端内容、文件内容、密码、token、私钥口令和完整主机指纹不得进入日志。
 
 ## 4.3 传输暂停与恢复边界

@@ -30,6 +30,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Audit npm dependencies
+        run: npm audit --audit-level=low
+
       - name: Build packages (core → shared → storage)
         run: |
           npm run build -w @fileterm/core
@@ -75,6 +78,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
+      - name: Check the full Tauri Rust application
+        working-directory: apps/tauri/src-tauri
+        run: cargo check --locked --all-targets
+
       - name: Verify direct Telnet socket release
         if: runner.os != 'Windows'
         working-directory: apps/tauri/src-tauri
@@ -108,7 +115,7 @@ jobs:
         run: cargo test sessions::serial::tests::virtual_pty_round_trip_exercises_the_real_serial_stack
 
   tauri-real-protocols:
-    name: Tauri real protocol fixtures (ubuntu-latest)
+    name: Tauri quality + real protocol fixtures (ubuntu-latest)
     runs-on: ubuntu-latest
 
     steps:
@@ -117,12 +124,57 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
 
       - name: Install protocol fixtures and Linux Tauri dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y openssh-server openssl python3 libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
+      - name: Typecheck Tauri renderer
+        run: npm run typecheck -w @fileterm/tauri
+
+      - name: Check Rust formatting
+        working-directory: apps/tauri/src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Run strict Clippy
+        working-directory: apps/tauri/src-tauri
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
       - name: Exercise Tauri protocol services
         working-directory: apps/tauri/src-tauri
-        run: cargo test --lib -- --test-threads=1
+        run: cargo test --locked -- --test-threads=1
+
+      - name: Build Tauri production binary
+        run: npm run build -w @fileterm/tauri -- --no-bundle
+
+  rust-security-audit:
+    name: RustSec dependency audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Audit Tauri Cargo.lock
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: apps/tauri/src-tauri
+          # Scoped, time-bounded exceptions are reviewed in:
+          # docs/quality/rustsec-advisory-exceptions.md
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0194,RUSTSEC-2026-0195

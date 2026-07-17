@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,6 @@ struct StoredSshKeySecrets {
 }
 
 struct KeyPaths {
-    base_dir: PathBuf,
     keys_dir: PathBuf,
     index_path: PathBuf,
     secrets_path: PathBuf,
@@ -59,7 +58,6 @@ impl KeyPaths {
         Ok(Self {
             keys_dir: base_dir.join("ssh-keys"),
             secrets_path: base_dir.join("ssh-key-secrets.json"),
-            base_dir,
             index_path,
         })
     }
@@ -68,10 +66,6 @@ impl KeyPaths {
         uuid::Uuid::parse_str(id)
             .map_err(|_| AppError::Command("无效的 SSH 密钥 ID".to_string()))?;
         Ok(self.keys_dir.join(format!("{id}.key")))
-    }
-
-    fn legacy_dir(&self) -> Option<PathBuf> {
-        Some(self.base_dir.parent()?.join("FileTerm"))
     }
 }
 
@@ -149,7 +143,6 @@ pub fn import(
     };
     let key_path = paths.key_path(&key.id)?;
     write_bytes_atomic(&key_path, &inspected.bytes)?;
-    lock_down_file(&key_path);
     index.keys.insert(0, key.clone());
     if let Err(error) = write_index(&paths, &index) {
         let _ = fs::remove_file(&key_path);
@@ -227,7 +220,9 @@ pub fn resolve(app: &AppHandle, key_id: &str) -> Result<ManagedSshKey, AppError>
         .into_iter()
         .find(|key| key.id == key_id)
         .ok_or_else(|| AppError::Command("选择的 SSH 密钥不存在，请重新选择。".to_string()))?;
-    let private_key = fs::read_to_string(paths.key_path(&key.id)?)
+    let key_path = paths.key_path(&key.id)?;
+    lock_down_file(&key_path)?;
+    let private_key = fs::read_to_string(key_path)
         .map_err(|error| AppError::Storage(format!("无法读取 SSH 私钥: {error}")))?;
     let saved_passphrase = read_secrets(&paths)?.passphrases.get(&key.id).cloned();
     Ok(ManagedSshKey {
@@ -261,8 +256,7 @@ pub fn set_passphrase(
 fn ensure_store(app: &AppHandle) -> Result<KeyPaths, AppError> {
     let paths = KeyPaths::for_app(app)?;
     fs::create_dir_all(&paths.keys_dir).map_err(|error| AppError::Storage(error.to_string()))?;
-    lock_down_dir(&paths.keys_dir);
-    migrate_legacy(&paths)?;
+    lock_down_dir(&paths.keys_dir)?;
     if !paths.index_path.exists() {
         write_index(
             &paths,
@@ -280,72 +274,10 @@ fn ensure_store(app: &AppHandle) -> Result<KeyPaths, AppError> {
                 passphrases: HashMap::new(),
             },
         )?;
+    } else {
+        lock_down_file(&paths.secrets_path)?;
     }
     Ok(paths)
-}
-
-fn migrate_legacy(paths: &KeyPaths) -> Result<(), AppError> {
-    let Some(legacy_dir) = paths.legacy_dir() else {
-        return Ok(());
-    };
-    let legacy_index_path = legacy_dir.join("ssh-keys.json");
-    if !legacy_index_path.exists() {
-        return Ok(());
-    }
-    let mut current = read_json(
-        &paths.index_path,
-        StoredSshKeyIndex {
-            version: 1,
-            keys: Vec::new(),
-        },
-    )?;
-    let legacy = read_json(
-        &legacy_index_path,
-        StoredSshKeyIndex {
-            version: 1,
-            keys: Vec::new(),
-        },
-    )?;
-    let known: HashSet<String> = current.keys.iter().map(|key| key.id.clone()).collect();
-    let mut changed = false;
-    for key in legacy.keys {
-        if uuid::Uuid::parse_str(&key.id).is_err() || known.contains(&key.id) {
-            continue;
-        }
-        let source = legacy_dir.join("ssh-keys").join(format!("{}.key", key.id));
-        let target = paths.key_path(&key.id)?;
-        if source.is_file() && !target.exists() {
-            fs::copy(&source, &target).map_err(|error| AppError::Storage(error.to_string()))?;
-            lock_down_file(&target);
-        }
-        if target.is_file() {
-            current.keys.push(key);
-            changed = true;
-        }
-    }
-    if changed {
-        write_index(paths, &current)?;
-    }
-
-    let legacy_secrets_path = legacy_dir.join("ssh-key-secrets.json");
-    if legacy_secrets_path.exists() {
-        let mut current_secrets = read_secrets(paths)?;
-        let legacy_secrets = read_json(
-            &legacy_secrets_path,
-            StoredSshKeySecrets {
-                version: 1,
-                passphrases: HashMap::new(),
-            },
-        )?;
-        let before = current_secrets.passphrases.len();
-        for (id, passphrase) in legacy_secrets.passphrases {
-            current_secrets.passphrases.entry(id).or_insert(passphrase);
-        }
-        if current_secrets.passphrases.len() != before {
-            write_secrets(paths, &current_secrets)?;
-        }
-    }
-    Ok(())
 }
 
 fn read_index(paths: &KeyPaths) -> Result<StoredSshKeyIndex, AppError> {
@@ -363,6 +295,9 @@ fn write_index(paths: &KeyPaths, index: &StoredSshKeyIndex) -> Result<(), AppErr
 }
 
 fn read_secrets(paths: &KeyPaths) -> Result<StoredSshKeySecrets, AppError> {
+    if paths.secrets_path.exists() {
+        lock_down_file(&paths.secrets_path)?;
+    }
     read_json(
         &paths.secrets_path,
         StoredSshKeySecrets {
@@ -374,8 +309,7 @@ fn read_secrets(paths: &KeyPaths) -> Result<StoredSshKeySecrets, AppError> {
 
 fn write_secrets(paths: &KeyPaths, secrets: &StoredSshKeySecrets) -> Result<(), AppError> {
     write_json_atomic(&paths.secrets_path, secrets)?;
-    lock_down_file(&paths.secrets_path);
-    Ok(())
+    lock_down_file(&paths.secrets_path)
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path, fallback: T) -> Result<T, AppError> {
@@ -398,9 +332,13 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
         path.file_name().unwrap_or_default().to_string_lossy(),
         uuid::Uuid::new_v4()
     ));
-    fs::write(&temporary, bytes).map_err(|error| AppError::Storage(error.to_string()))?;
-    lock_down_file(&temporary);
-    fs::rename(&temporary, path).map_err(|error| AppError::Storage(error.to_string()))
+    crate::storage::write_restricted_file(&temporary, bytes)?;
+    if let Err(error) = lock_down_file(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    crate::storage::replace_file_atomically(&temporary, path)?;
+    lock_down_file(path)
 }
 
 fn key_usage_counts(app: &AppHandle) -> Result<HashMap<String, usize>, AppError> {
@@ -501,30 +439,59 @@ fn now_millis() -> u64 {
 }
 
 #[cfg(unix)]
-fn lock_down_file(path: &Path) {
+fn lock_down_file(path: &Path) -> Result<(), AppError> {
     use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| AppError::Storage(error.to_string()))
 }
 
 #[cfg(not(unix))]
-fn lock_down_file(_path: &Path) {}
+fn lock_down_file(_path: &Path) -> Result<(), AppError> {
+    Ok(())
+}
 
 #[cfg(unix)]
-fn lock_down_dir(path: &Path) {
+fn lock_down_dir(path: &Path) -> Result<(), AppError> {
     use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o700));
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+        .map_err(|error| AppError::Storage(error.to_string()))
 }
 
 #[cfg(not(unix))]
-fn lock_down_dir(_path: &Path) {}
+fn lock_down_dir(_path: &Path) -> Result<(), AppError> {
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
-    use super::probably_encrypted;
+    use super::{probably_encrypted, write_bytes_atomic};
 
     #[test]
     fn recognizes_private_key_headers_without_treating_public_keys_as_private() {
         assert!(!probably_encrypted("-----BEGIN RSA PRIVATE KEY-----"));
         assert!(probably_encrypted("-----BEGIN OPENSSH PRIVATE KEY-----"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_plaintext_key_files_replace_atomically_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "fileterm-managed-key-permissions-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("managed.key");
+
+        write_bytes_atomic(&path, b"first plaintext key").unwrap();
+        write_bytes_atomic(&path, b"replacement plaintext key").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement plaintext key");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777,
+            0o600
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

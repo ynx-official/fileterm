@@ -7,10 +7,10 @@
 //! - profile update / delete, folder update / delete, and entity order updates
 //!   follow the same cascade rules as the Electron side.
 
+use crate::storage::{new_id, read_json_array, workspace_file, write_json_array};
+use crate::AppError;
 use serde_json::{Map, Value};
 use tauri::AppHandle;
-use crate::AppError;
-use crate::storage::{read_json_array, write_json_array, new_id};
 
 const DEFAULT_GROUP: &str = "默认";
 
@@ -18,10 +18,7 @@ const DEFAULT_GROUP: &str = "默认";
 ///
 /// Returns `(healed_profiles, dirty)`. Callers should persist the result when
 /// `dirty` is true.
-pub fn heal_profiles(
-    profiles: &mut Vec<Value>,
-    folders: &[Value],
-) -> bool {
+pub fn heal_profiles(profiles: &mut [Value], folders: &[Value]) -> bool {
     let folder_by_name: std::collections::HashMap<String, String> = folders
         .iter()
         .filter_map(|f| {
@@ -61,10 +58,7 @@ pub fn heal_profiles(
             // group is authoritative
             if let Some(matching_id) = folder_by_name.get(&group) {
                 if parent_id.as_deref() != Some(matching_id.as_str()) {
-                    obj.insert(
-                        "parentId".to_string(),
-                        Value::String(matching_id.clone()),
-                    );
+                    obj.insert("parentId".to_string(), Value::String(matching_id.clone()));
                     dirty = true;
                 }
             } else {
@@ -83,10 +77,7 @@ pub fn heal_profiles(
             if let Some(pid) = &parent_id {
                 if let Some(matching_name) = folder_name_by_id.get(pid) {
                     if group != *matching_name {
-                        obj.insert(
-                            "group".to_string(),
-                            Value::String(matching_name.clone()),
-                        );
+                        obj.insert("group".to_string(), Value::String(matching_name.clone()));
                         dirty = true;
                     }
                 } else {
@@ -106,18 +97,21 @@ pub fn heal_profiles(
 
 /// Read profiles + folders, run healing, persist if dirty.
 pub fn read_and_heal_profiles(app: &AppHandle) -> Result<(Vec<Value>, Vec<Value>), AppError> {
+    let secrets_path = workspace_file(app, "profile-secrets.json")?;
+    if secrets_path.exists() {
+        lock_down_secret_file(&secrets_path)?;
+    }
+
     let mut profiles = read_json_array(app, "profiles.json")?;
-    let folders = read_json_array(app, "folders.json")?;
+    let folders = read_and_heal_connection_folders(app)?;
     let dirty = heal_profiles(&mut profiles, &folders);
     if dirty {
         // Strip secrets before writing back. Secrets live in
         // profile-secrets.json; profiles.json should never contain them.
-        let stripped: Vec<Value> = profiles
-            .iter()
-            .map(strip_secret_fields)
-            .collect();
+        let stripped: Vec<Value> = profiles.iter().map(strip_secret_fields).collect();
         write_json_array(app, "profiles.json", &stripped)?;
     }
+    reconcile_profile_secrets(app, &profiles)?;
     Ok((profiles, folders))
 }
 
@@ -141,10 +135,155 @@ pub fn strip_secret_fields_public(profile: &Value) -> Value {
 }
 
 fn ensure_object(value: &Value) -> Map<String, Value> {
-    value
-        .as_object()
-        .cloned()
-        .unwrap_or_else(|| Map::new())
+    value.as_object().cloned().unwrap_or_else(Map::new)
+}
+
+fn heal_typed_entities(entities: &mut [Value], expected_type: &str) -> bool {
+    let mut dirty = false;
+    let mut next_order = chrono_now_ms();
+    for entity in entities {
+        let Some(object) = entity.as_object_mut() else {
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) != Some(expected_type) {
+            object.insert(
+                "type".to_string(),
+                Value::String(expected_type.to_string()),
+            );
+            dirty = true;
+        }
+        if object.get("order").and_then(Value::as_f64).is_none() {
+            object.insert("order".to_string(), Value::Number(next_order.into()));
+            next_order = next_order.saturating_add(1);
+            dirty = true;
+        }
+    }
+    dirty
+}
+
+/// Repair legacy connection-folder rows that predate the core entity
+/// discriminant/order contract.
+pub fn heal_connection_folders(folders: &mut [Value]) -> bool {
+    heal_typed_entities(folders, "folder")
+}
+
+/// Repair legacy command-folder rows that were persisted without their
+/// discriminant/order fields.
+pub fn heal_command_folders(folders: &mut [Value]) -> bool {
+    heal_typed_entities(folders, "command-folder")
+}
+
+/// Repair legacy command rows and the defaults required by CommandTemplate.
+pub fn heal_command_templates(commands: &mut [Value]) -> bool {
+    let mut dirty = heal_typed_entities(commands, "command-template");
+    for command in commands {
+        let Some(object) = command.as_object_mut() else {
+            continue;
+        };
+        if object.get("command").and_then(Value::as_str).is_none() {
+            object.insert("command".to_string(), Value::String(String::new()));
+            dirty = true;
+        }
+        if object
+            .get("appendCarriageReturn")
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            object.insert("appendCarriageReturn".to_string(), Value::Bool(true));
+            dirty = true;
+        }
+    }
+    dirty
+}
+
+fn read_and_heal_connection_folders(app: &AppHandle) -> Result<Vec<Value>, AppError> {
+    let mut folders = read_json_array(app, "folders.json")?;
+    if heal_connection_folders(&mut folders) {
+        write_json_array(app, "folders.json", &folders)?;
+    }
+    Ok(folders)
+}
+
+/// Read command folders/templates and persist any legacy-shape repairs before
+/// exposing them to a renderer snapshot.
+pub fn read_and_heal_command_library(
+    app: &AppHandle,
+) -> Result<(Vec<Value>, Vec<Value>), AppError> {
+    let mut folders = read_json_array(app, "command-folders.json")?;
+    let mut commands = read_json_array(app, "commands.json")?;
+    if heal_command_folders(&mut folders) {
+        write_json_array(app, "command-folders.json", &folders)?;
+    }
+    if heal_command_templates(&mut commands) {
+        write_json_array(app, "commands.json", &commands)?;
+    }
+    Ok((folders, commands))
+}
+
+pub fn create_folder(
+    app: &AppHandle,
+    name: &str,
+    parent_id: Option<&str>,
+) -> Result<Value, AppError> {
+    let mut folders = read_and_heal_connection_folders(app)?;
+    let folder = serde_json::json!({
+        "id": new_id("folder"),
+        "type": "folder",
+        "name": name,
+        "parentId": parent_id,
+        "order": chrono_now_ms(),
+    });
+    folders.insert(0, folder.clone());
+    write_json_array(app, "folders.json", &folders)?;
+    Ok(folder)
+}
+
+pub fn create_command_folder(
+    app: &AppHandle,
+    name: &str,
+    parent_id: Option<&str>,
+) -> Result<Value, AppError> {
+    let (mut folders, _) = read_and_heal_command_library(app)?;
+    let folder = serde_json::json!({
+        "id": new_id("cmd-folder"),
+        "type": "command-folder",
+        "name": name,
+        "parentId": parent_id,
+        "order": chrono_now_ms(),
+    });
+    folders.insert(0, folder.clone());
+    write_json_array(app, "command-folders.json", &folders)?;
+    Ok(folder)
+}
+
+pub fn create_command_template(app: &AppHandle, input: Value) -> Result<Value, AppError> {
+    let (_, mut commands) = read_and_heal_command_library(app)?;
+    let mut command = ensure_object(&input);
+    command.insert("id".to_string(), Value::String(new_id("cmd")));
+    command.insert(
+        "type".to_string(),
+        Value::String("command-template".to_string()),
+    );
+    if command.get("order").and_then(Value::as_f64).is_none() {
+        command.insert(
+            "order".to_string(),
+            Value::Number(chrono_now_ms().into()),
+        );
+    }
+    if command.get("command").and_then(Value::as_str).is_none() {
+        command.insert("command".to_string(), Value::String(String::new()));
+    }
+    if command
+        .get("appendCarriageReturn")
+        .and_then(Value::as_bool)
+        .is_none()
+    {
+        command.insert("appendCarriageReturn".to_string(), Value::Bool(true));
+    }
+    let command = Value::Object(command);
+    commands.insert(0, command.clone());
+    write_json_array(app, "commands.json", &commands)?;
+    Ok(command)
 }
 
 /// Create a new profile. `input` is the raw profile payload from the renderer.
@@ -157,9 +296,7 @@ pub fn create_profile(app: &AppHandle, input: Value) -> Result<Value, AppError> 
         .to_string();
     let parent_id = folders
         .iter()
-        .find(|f| {
-            f.get("name").and_then(|v| v.as_str()) == Some(group.as_str())
-        })
+        .find(|f| f.get("name").and_then(|v| v.as_str()) == Some(group.as_str()))
         .and_then(|f| f.get("id").and_then(|v| v.as_str()))
         .map(|s| Value::String(s.to_string()))
         .unwrap_or(Value::Null);
@@ -176,10 +313,7 @@ pub fn create_profile(app: &AppHandle, input: Value) -> Result<Value, AppError> 
     let profile_value = Value::Object(profile);
     profiles.insert(0, profile_value.clone());
 
-    let stripped: Vec<Value> = profiles.iter().map(strip_secret_fields).collect();
-    write_json_array(app, "profiles.json", &stripped)?;
-    // Also persist secrets to profile-secrets.json (best-effort).
-    let _ = persist_profile_secrets(app, &profiles);
+    persist_profiles(app, &profiles)?;
     Ok(profile_value)
 }
 
@@ -199,9 +333,7 @@ pub fn update_profile(app: &AppHandle, profile_id: &str, input: Value) -> Result
         .to_string();
     let parent_id = folders
         .iter()
-        .find(|f| {
-            f.get("name").and_then(|v| v.as_str()) == Some(group.as_str())
-        })
+        .find(|f| f.get("name").and_then(|v| v.as_str()) == Some(group.as_str()))
         .and_then(|f| f.get("id").and_then(|v| v.as_str()))
         .map(|s| Value::String(s.to_string()))
         .unwrap_or(Value::Null);
@@ -221,9 +353,7 @@ pub fn update_profile(app: &AppHandle, profile_id: &str, input: Value) -> Result
     let profile_value = Value::Object(profile);
     profiles[previous_idx] = profile_value.clone();
 
-    let stripped: Vec<Value> = profiles.iter().map(strip_secret_fields).collect();
-    write_json_array(app, "profiles.json", &stripped)?;
-    let _ = persist_profile_secrets(app, &profiles);
+    persist_profiles(app, &profiles)?;
     Ok(profile_value)
 }
 
@@ -231,9 +361,7 @@ pub fn update_profile(app: &AppHandle, profile_id: &str, input: Value) -> Result
 pub fn delete_profile(app: &AppHandle, profile_id: &str) -> Result<(), AppError> {
     let (mut profiles, _) = read_and_heal_profiles(app)?;
     profiles.retain(|p| p.get("id").and_then(|v| v.as_str()) != Some(profile_id));
-    let stripped: Vec<Value> = profiles.iter().map(strip_secret_fields).collect();
-    write_json_array(app, "profiles.json", &stripped)?;
-    Ok(())
+    persist_profiles(app, &profiles)
 }
 
 /// Record a successful user-initiated open so renderer "recent connections"
@@ -244,7 +372,10 @@ pub fn touch_profile(app: &AppHandle, profile_id: &str) -> Result<(), AppError> 
     for profile in &mut profiles {
         if profile.get("id").and_then(Value::as_str) == Some(profile_id) {
             if let Some(object) = profile.as_object_mut() {
-                object.insert("lastUsedAt".to_string(), Value::Number(chrono_now_ms().into()));
+                object.insert(
+                    "lastUsedAt".to_string(),
+                    Value::Number(chrono_now_ms().into()),
+                );
                 found = true;
             }
             break;
@@ -290,10 +421,7 @@ pub async fn update_trusted_host_fingerprint(
             "profile",
             format!("trusted host fingerprint profile_found={found}"),
         );
-        let stripped: Vec<Value> = profiles.iter().map(strip_secret_fields).collect();
-        write_json_array(&app, "profiles.json", &stripped)?;
-        let _ = persist_profile_secrets(&app, &profiles);
-        Ok(())
+        persist_profiles(&app, &profiles)
     })
     .await
     .map_err(|e| AppError::Storage(format!("join error: {}", e)))?
@@ -323,7 +451,10 @@ pub fn update_folder(app: &AppHandle, folder_id: &str, updates: Value) -> Result
         let mut next_profiles = profiles;
         let mut changed = false;
         for p in next_profiles.iter_mut() {
-            let pid = p.get("parentId").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let pid = p
+                .get("parentId")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             if pid.as_deref() == Some(folder_id) {
                 if let Some(obj) = p.as_object_mut() {
                     obj.insert("group".to_string(), Value::String(new_name.to_string()));
@@ -377,7 +508,10 @@ pub fn delete_folder(app: &AppHandle, folder_id: &str) -> Result<(), AppError> {
     // Cascade: child profiles
     let mut profiles_changed = false;
     for p in profiles.iter_mut() {
-        let pid = p.get("parentId").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let pid = p
+            .get("parentId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         if pid.as_deref() == Some(folder_id) {
             if let Some(obj) = p.as_object_mut() {
                 obj.insert(
@@ -396,7 +530,10 @@ pub fn delete_folder(app: &AppHandle, folder_id: &str) -> Result<(), AppError> {
     // Cascade: child folders
     let mut folders_changed = false;
     for f in folders.iter_mut() {
-        let pid = f.get("parentId").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let pid = f
+            .get("parentId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         if pid.as_deref() == Some(folder_id) {
             if let Some(obj) = f.as_object_mut() {
                 obj.insert(
@@ -452,7 +589,10 @@ pub fn update_entity_order(
                     .unwrap_or(Value::Null),
             );
             obj.insert("group".to_string(), Value::String(group));
-            obj.insert("order".to_string(), Value::Number(serde_json::Number::from_f64(new_order).unwrap_or_else(|| 0.into())));
+            obj.insert(
+                "order".to_string(),
+                Value::Number(serde_json::Number::from_f64(new_order).unwrap_or_else(|| 0.into())),
+            );
         }
         let stripped: Vec<Value> = profiles.iter().map(strip_secret_fields).collect();
         write_json_array(app, "profiles.json", &stripped)?;
@@ -472,7 +612,10 @@ pub fn update_entity_order(
                     .map(Value::String)
                     .unwrap_or(Value::Null),
             );
-            obj.insert("order".to_string(), Value::Number(serde_json::Number::from_f64(new_order).unwrap_or_else(|| 0.into())));
+            obj.insert(
+                "order".to_string(),
+                Value::Number(serde_json::Number::from_f64(new_order).unwrap_or_else(|| 0.into())),
+            );
         }
         write_json_array(app, "folders.json", &folders)?;
     }
@@ -481,7 +624,11 @@ pub fn update_entity_order(
 
 // ── Command folder / template operations ────────────────────────────────────
 
-pub fn update_command_folder(app: &AppHandle, folder_id: &str, updates: Value) -> Result<Value, AppError> {
+pub fn update_command_folder(
+    app: &AppHandle,
+    folder_id: &str,
+    updates: Value,
+) -> Result<Value, AppError> {
     let mut folders = read_json_array(app, "command-folders.json")?;
     let idx = folders
         .iter()
@@ -520,7 +667,10 @@ pub fn delete_command_folder(app: &AppHandle, folder_id: &str) -> Result<(), App
     folders.retain(|f| f.get("id").and_then(|v| v.as_str()) != Some(folder_id));
 
     for f in folders.iter_mut() {
-        let pid = f.get("parentId").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let pid = f
+            .get("parentId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         if pid.as_deref() == Some(folder_id) {
             if let Some(obj) = f.as_object_mut() {
                 obj.insert(
@@ -534,7 +684,10 @@ pub fn delete_command_folder(app: &AppHandle, folder_id: &str) -> Result<(), App
         }
     }
     for c in commands.iter_mut() {
-        let pid = c.get("parentId").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let pid = c
+            .get("parentId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         if pid.as_deref() == Some(folder_id) {
             if let Some(obj) = c.as_object_mut() {
                 obj.insert(
@@ -574,7 +727,10 @@ pub fn update_command_order(
                     .map(Value::String)
                     .unwrap_or(Value::Null),
             );
-            obj.insert("order".to_string(), Value::Number(serde_json::Number::from_f64(new_order).unwrap_or_else(|| 0.into())));
+            obj.insert(
+                "order".to_string(),
+                Value::Number(serde_json::Number::from_f64(new_order).unwrap_or_else(|| 0.into())),
+            );
         }
         write_json_array(app, "commands.json", &commands)?;
         return Ok(());
@@ -592,14 +748,21 @@ pub fn update_command_order(
                     .map(Value::String)
                     .unwrap_or(Value::Null),
             );
-            obj.insert("order".to_string(), Value::Number(serde_json::Number::from_f64(new_order).unwrap_or_else(|| 0.into())));
+            obj.insert(
+                "order".to_string(),
+                Value::Number(serde_json::Number::from_f64(new_order).unwrap_or_else(|| 0.into())),
+            );
         }
         write_json_array(app, "command-folders.json", &folders)?;
     }
     Ok(())
 }
 
-pub fn update_command_template(app: &AppHandle, command_id: &str, input: Value) -> Result<Value, AppError> {
+pub fn update_command_template(
+    app: &AppHandle,
+    command_id: &str,
+    input: Value,
+) -> Result<Value, AppError> {
     let mut commands = read_json_array(app, "commands.json")?;
     let idx = commands
         .iter()
@@ -620,27 +783,13 @@ pub fn delete_command_template(app: &AppHandle, command_id: &str) -> Result<(), 
     Ok(())
 }
 
-// ── Secrets persistence (best-effort) ───────────────────────────────────────
+// ── Plain-text secrets persistence ──────────────────────────────────────────
 
-/// Persist sensitive profile fields to `profile-secrets.json`.
-/// Best-effort: failures are swallowed (returned as Ok).
-fn persist_profile_secrets(app: &AppHandle, profiles: &[Value]) -> Result<(), AppError> {
-    let path = crate::storage::workspace_file(app, "profile-secrets.json")?;
-    let mut existing: Value = if path.exists() {
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| AppError::Storage(e.to_string()))?;
-        serde_json::from_str(&content).unwrap_or_else(|_| {
-            serde_json::json!({ "version": 1, "profiles": {} })
-        })
-    } else {
-        serde_json::json!({ "version": 1, "profiles": {} })
-    };
-
-    let secrets_profiles = existing
-        .get_mut("profiles")
-        .and_then(|v| v.as_object_mut())
-        .ok_or_else(|| AppError::Storage("Invalid secrets file".to_string()))?;
-
+/// Build the complete secret store from the current profile set. Rebuilding
+/// instead of incrementally merging guarantees that deleted profiles cannot
+/// leave orphan credentials behind.
+fn build_profile_secrets(profiles: &[Value]) -> Value {
+    let mut secrets_profiles = Map::new();
     for profile in profiles {
         let id = match profile.get("id").and_then(|v| v.as_str()) {
             Some(s) => s.to_string(),
@@ -669,14 +818,195 @@ fn persist_profile_secrets(app: &AppHandle, profiles: &[Value]) -> Result<(), Ap
         }
         if !entry.is_empty() {
             secrets_profiles.insert(id, Value::Object(entry));
-        } else {
-            secrets_profiles.remove(&id);
         }
     }
 
-    let content = serde_json::to_string_pretty(&existing)
-        .map_err(|e| AppError::Serialization(e.to_string()))?;
-    std::fs::write(&path, content).map_err(|e| AppError::Storage(e.to_string()))?;
+    serde_json::json!({
+        "version": 1,
+        "profiles": secrets_profiles,
+    })
+}
+
+#[cfg(unix)]
+fn lock_down_secret_file(path: &std::path::Path) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| AppError::Storage(error.to_string()))
+}
+
+#[cfg(not(unix))]
+fn lock_down_secret_file(_path: &std::path::Path) -> Result<(), AppError> {
+    // Windows ACL semantics are inherited from the per-user app-data
+    // directory. Keep this best-effort behavior aligned with Electron.
+    Ok(())
+}
+
+fn remove_file_if_present(path: &std::path::Path) -> Result<(), AppError> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::Storage(error.to_string())),
+    }
+}
+
+fn write_secure_secret_file(path: &std::path::Path, content: &[u8]) -> Result<(), AppError> {
+    use std::io::Write;
+
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let nonce = uuid::Uuid::new_v4();
+    let temp_path = path.with_file_name(format!(".{file_name}.{nonce}.tmp"));
+    let backup_path = path.with_file_name(format!(".{file_name}.{nonce}.bak"));
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut temp_file = options
+        .open(&temp_path)
+        .map_err(|error| AppError::Storage(error.to_string()))?;
+    if let Err(error) = temp_file
+        .write_all(content)
+        .and_then(|_| temp_file.sync_all())
+    {
+        drop(temp_file);
+        let cleanup_error = remove_file_if_present(&temp_path).err();
+        return Err(AppError::Storage(match cleanup_error {
+            Some(cleanup_error) => format!("{error}; 清理凭据临时文件失败: {cleanup_error}"),
+            None => error.to_string(),
+        }));
+    }
+    drop(temp_file);
+    if let Err(error) = lock_down_secret_file(&temp_path) {
+        let cleanup_error = remove_file_if_present(&temp_path).err();
+        return Err(AppError::Storage(match cleanup_error {
+            Some(cleanup_error) => format!("{error}; 清理凭据临时文件失败: {cleanup_error}"),
+            None => error.to_string(),
+        }));
+    }
+
+    let had_previous = path.exists();
+    if had_previous {
+        if let Err(error) = std::fs::rename(path, &backup_path) {
+            let cleanup_error = remove_file_if_present(&temp_path).err();
+            return Err(AppError::Storage(match cleanup_error {
+                Some(cleanup_error) => {
+                    format!("{error}; 清理凭据临时文件失败: {cleanup_error}")
+                }
+                None => error.to_string(),
+            }));
+        }
+    }
+
+    if let Err(error) = std::fs::rename(&temp_path, path) {
+        let restore_error = if had_previous {
+            std::fs::rename(&backup_path, path).err()
+        } else {
+            None
+        };
+        let _ = remove_file_if_present(&temp_path);
+        return Err(AppError::Storage(match restore_error {
+            Some(restore_error) => format!("{error}; 恢复原凭据文件失败: {restore_error}"),
+            None => error.to_string(),
+        }));
+    }
+
+    if let Err(error) = lock_down_secret_file(path) {
+        let remove_error = remove_file_if_present(path).err();
+        let restore_error = if had_previous {
+            std::fs::rename(&backup_path, path).err()
+        } else {
+            None
+        };
+        return match (remove_error, restore_error) {
+            (None, None) => Err(error),
+            (remove_error, restore_error) => Err(AppError::Storage(format!(
+                "{error}; 清理失败: {}; 恢复失败: {}",
+                remove_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "无".to_string()),
+                restore_error
+                    .map(|error| error.to_string())
+                    .unwrap_or_else(|| "无".to_string())
+            ))),
+        };
+    }
+
+    remove_file_if_present(&backup_path)?;
+    Ok(())
+}
+
+fn persist_profile_secrets_at(path: &std::path::Path, profiles: &[Value]) -> Result<(), AppError> {
+    let content = serde_json::to_vec_pretty(&build_profile_secrets(profiles))
+        .map_err(|error| AppError::Serialization(error.to_string()))?;
+    write_secure_secret_file(path, &content)
+}
+
+fn persist_profile_secrets(app: &AppHandle, profiles: &[Value]) -> Result<(), AppError> {
+    let path = workspace_file(app, "profile-secrets.json")?;
+    persist_profile_secrets_at(&path, profiles)
+}
+
+fn read_optional_file(path: &std::path::Path) -> Result<Option<Vec<u8>>, AppError> {
+    match std::fs::read(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(AppError::Storage(error.to_string())),
+    }
+}
+
+fn restore_secret_file(path: &std::path::Path, content: Option<&[u8]>) -> Result<(), AppError> {
+    match content {
+        Some(content) => write_secure_secret_file(path, content),
+        None => remove_file_if_present(path),
+    }
+}
+
+/// Persist both halves of the profile store. Secrets are written first; if
+/// the public profile write fails, the previous secret file is restored so a
+/// failed operation cannot silently strand a profile without its credentials.
+fn persist_profiles(app: &AppHandle, profiles: &[Value]) -> Result<(), AppError> {
+    let secrets_path = workspace_file(app, "profile-secrets.json")?;
+    let previous_secrets = read_optional_file(&secrets_path)?;
+    persist_profile_secrets(app, profiles)?;
+
+    let public_profiles: Vec<Value> = profiles.iter().map(strip_secret_fields).collect();
+    if let Err(public_error) = write_json_array(app, "profiles.json", &public_profiles) {
+        return match restore_secret_file(&secrets_path, previous_secrets.as_deref()) {
+            Ok(()) => Err(public_error),
+            Err(rollback_error) => Err(AppError::Storage(format!(
+                "{public_error}; 恢复凭据文件失败: {rollback_error}"
+            ))),
+        };
+    }
+    Ok(())
+}
+
+/// Heal legacy modes and prune stale secret IDs on normal profile reads.
+fn reconcile_profile_secrets(app: &AppHandle, profiles: &[Value]) -> Result<(), AppError> {
+    let path = workspace_file(app, "profile-secrets.json")?;
+    let expected = build_profile_secrets(profiles);
+    let current = match std::fs::read_to_string(&path) {
+        Ok(content) => Some(
+            serde_json::from_str::<Value>(&content)
+                .map_err(|error| AppError::Serialization(error.to_string()))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(AppError::Storage(error.to_string())),
+    };
+
+    let expected_has_secrets = expected["profiles"]
+        .as_object()
+        .is_some_and(|profiles| !profiles.is_empty());
+    if current.as_ref() != Some(&expected) && (path.exists() || expected_has_secrets) {
+        persist_profile_secrets_at(&path, profiles)?;
+    }
+    if path.exists() {
+        lock_down_secret_file(&path)?;
+    }
     Ok(())
 }
 
@@ -705,7 +1035,9 @@ mod tests {
         obj.insert("group".to_string(), Value::String(group.to_string()));
         obj.insert(
             "parentId".to_string(),
-            parent_id.map(|s| Value::String(s.to_string())).unwrap_or(Value::Null),
+            parent_id
+                .map(|s| Value::String(s.to_string()))
+                .unwrap_or(Value::Null),
         );
         Value::Object(obj)
     }
@@ -716,7 +1048,10 @@ mod tests {
         let mut profiles = vec![profile("p1", "Alpha", Some("f2"))];
         let dirty = heal_profiles(&mut profiles, &folders);
         assert!(dirty);
-        assert_eq!(profiles[0].get("parentId").and_then(|v| v.as_str()), Some("f1"));
+        assert_eq!(
+            profiles[0].get("parentId").and_then(|v| v.as_str()),
+            Some("f1")
+        );
     }
 
     #[test]
@@ -725,7 +1060,10 @@ mod tests {
         let mut profiles = vec![profile("p1", "默认", Some("f2"))];
         let dirty = heal_profiles(&mut profiles, &folders);
         assert!(dirty);
-        assert_eq!(profiles[0].get("group").and_then(|v| v.as_str()), Some("Beta"));
+        assert_eq!(
+            profiles[0].get("group").and_then(|v| v.as_str()),
+            Some("Beta")
+        );
     }
 
     #[test]
@@ -734,7 +1072,10 @@ mod tests {
         let mut profiles = vec![profile("p1", "Ghost", Some("ghost-id"))];
         let dirty = heal_profiles(&mut profiles, &folders);
         assert!(dirty);
-        assert_eq!(profiles[0].get("group").and_then(|v| v.as_str()), Some("默认"));
+        assert_eq!(
+            profiles[0].get("group").and_then(|v| v.as_str()),
+            Some("默认")
+        );
         assert!(profiles[0].get("parentId").unwrap().is_null());
     }
 
@@ -752,5 +1093,74 @@ mod tests {
         let mut profiles = vec![profile("p1", "默认", None)];
         let dirty = heal_profiles(&mut profiles, &folders);
         assert!(!dirty);
+    }
+
+    #[test]
+    fn heals_legacy_folder_and_command_entity_shapes() {
+        let mut connection_folders = vec![json!({ "id": "f1", "name": "Legacy" })];
+        let mut command_folders = vec![json!({ "id": "cf1", "name": "Legacy commands" })];
+        let mut commands = vec![json!({ "id": "c1", "name": "Legacy command" })];
+
+        assert!(heal_connection_folders(&mut connection_folders));
+        assert!(heal_command_folders(&mut command_folders));
+        assert!(heal_command_templates(&mut commands));
+
+        assert_eq!(connection_folders[0]["type"], "folder");
+        assert!(connection_folders[0]["order"].is_number());
+        assert_eq!(command_folders[0]["type"], "command-folder");
+        assert!(command_folders[0]["order"].is_number());
+        assert_eq!(commands[0]["type"], "command-template");
+        assert!(commands[0]["order"].is_number());
+        assert_eq!(commands[0]["command"], "");
+        assert_eq!(commands[0]["appendCarriageReturn"], true);
+
+        assert!(!heal_connection_folders(&mut connection_folders));
+        assert!(!heal_command_folders(&mut command_folders));
+        assert!(!heal_command_templates(&mut commands));
+    }
+
+    #[test]
+    fn rebuilding_secrets_prunes_deleted_profile_ids() {
+        let profiles = vec![serde_json::json!({
+            "id": "profile-current",
+            "password": "plain-text-password",
+            "proxy": { "password": "plain-text-proxy-password" }
+        })];
+        let secrets = build_profile_secrets(&profiles);
+        let stored = secrets["profiles"].as_object().unwrap();
+
+        assert_eq!(stored.len(), 1);
+        assert!(stored.contains_key("profile-current"));
+        assert!(!stored.contains_key("profile-deleted"));
+        assert_eq!(
+            stored["profile-current"]["password"]["storage"].as_str(),
+            Some("plain-text-fallback")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn plaintext_secret_file_is_written_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory =
+            std::env::temp_dir().join(format!("fileterm-profile-secrets-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("profile-secrets.json");
+        let profiles = vec![serde_json::json!({
+            "id": "profile-1",
+            "password": "plain-text-password"
+        })];
+
+        persist_profile_secrets_at(&path, &profiles).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o600);
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        lock_down_secret_file(&path).unwrap();
+        let healed_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(healed_mode, 0o600);
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

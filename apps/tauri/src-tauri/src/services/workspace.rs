@@ -1,12 +1,39 @@
+use crate::services::transfers::TransferTask;
+use crate::sessions::WorkerCmd;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use serde::{Serialize, Deserialize};
 use tauri::ipc::Channel;
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{oneshot, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use crate::sessions::WorkerCmd;
-use crate::services::transfers::TransferTask;
+
+#[derive(Clone)]
+pub struct TransferRunHandle {
+    pub generation: u64,
+    pub cancel: CancellationToken,
+    pub settled: watch::Receiver<bool>,
+}
+
+impl TransferRunHandle {
+    pub async fn wait_until_settled(mut self) {
+        if *self.settled.borrow() {
+            return;
+        }
+        while self.settled.changed().await.is_ok() {
+            if *self.settled.borrow() {
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct TransferProgressSample {
+    pub bytes: u64,
+    pub sampled_at: std::time::Instant,
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -131,28 +158,38 @@ pub struct WorkspaceState {
     /// High-frequency SSH keystrokes bypass the general worker command queue.
     /// The SSH worker drains and coalesces this channel before writing to the
     /// PTY, so file commands cannot fill the bounded queue and reject input.
-    pub terminal_inputs:
-        Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
+    pub terminal_inputs: Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
     /// Tauri IPC channels are the ordered streaming boundary for terminal
     /// output. Ordinary app events remain appropriate for low-frequency state
     /// updates, but can fall behind sustained PTY traffic in WKWebView.
-    pub terminal_output_channels:
-        Arc<StdMutex<HashMap<u32, Channel<serde_json::Value>>>>,
+    pub terminal_output_channels: Arc<StdMutex<HashMap<u32, Channel<serde_json::Value>>>>,
     /// Cancels the runtime owned by each worker. Dropping the command sender
     /// alone cannot interrupt a worker that is currently parsing a large
     /// remote metrics payload or waiting on an SSH operation.
     pub worker_controls: Arc<RwLock<HashMap<String, CancellationToken>>>,
     /// Pending SSH interaction requests (host-key verification, MFA prompts).
     /// The renderer resolves each one via `app_resolve_ssh_interaction`.
-    pub pending_interactions:
-        Arc<RwLock<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
+    pub pending_interactions: Arc<RwLock<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
     pub remote_forwards: Arc<RwLock<HashMap<String, Vec<RemoteForwardTarget>>>>,
-    /// Transfer snapshots are durable domain state. Cancellation tokens are
-    /// runtime-only and never serialized to the renderer or journal.
+    /// Transfer snapshots are durable domain state. Run handles are
+    /// runtime-only and never serialized to the renderer or journal. A
+    /// generation prevents an older run from deleting a newer run's handle.
     pub transfers: Arc<RwLock<Vec<TransferTask>>>,
-    pub transfer_controls: Arc<RwLock<HashMap<String, CancellationToken>>>,
+    pub transfer_runs: Arc<RwLock<HashMap<String, TransferRunHandle>>>,
+    /// Serializes user-visible transfer lifecycle transitions. Commands can
+    /// arrive concurrently from the main window and transfer popovers; this
+    /// guard makes pause/resume/discard/clear/shutdown compare-and-set as one
+    /// operation instead of allowing a new run between cancel and persist.
+    pub transfer_lifecycle: Arc<Mutex<()>>,
+    pub next_transfer_generation: Arc<AtomicU64>,
     pub transfer_journal_loaded: Arc<Mutex<bool>>,
+    /// Serializes the complete journal snapshot write. Multiple independent
+    /// transfers can finish on different runtime threads; without this guard
+    /// their shared temp/backup files and stale snapshots can overwrite one
+    /// another.
+    pub transfer_journal_write: Arc<Mutex<()>>,
     pub transfer_last_event: Arc<Mutex<HashMap<String, std::time::Instant>>>,
+    pub transfer_progress_samples: Arc<Mutex<HashMap<String, TransferProgressSample>>>,
     /// Import plans retain sanitized source data in main process until the
     /// renderer confirms a selected subset and conflict strategy.
     pub connection_import_plans: Arc<RwLock<HashMap<String, Vec<ConnectionImportPlanEntry>>>>,
@@ -172,9 +209,13 @@ impl Default for WorkspaceState {
             pending_interactions: Arc::new(RwLock::new(HashMap::new())),
             remote_forwards: Arc::new(RwLock::new(HashMap::new())),
             transfers: Arc::new(RwLock::new(Vec::new())),
-            transfer_controls: Arc::new(RwLock::new(HashMap::new())),
+            transfer_runs: Arc::new(RwLock::new(HashMap::new())),
+            transfer_lifecycle: Arc::new(Mutex::new(())),
+            next_transfer_generation: Arc::new(AtomicU64::new(0)),
             transfer_journal_loaded: Arc::new(Mutex::new(false)),
+            transfer_journal_write: Arc::new(Mutex::new(())),
             transfer_last_event: Arc::new(Mutex::new(HashMap::new())),
+            transfer_progress_samples: Arc::new(Mutex::new(HashMap::new())),
             connection_import_plans: Arc::new(RwLock::new(HashMap::new())),
             update_status: Arc::new(RwLock::new(None)),
         }
@@ -198,7 +239,9 @@ impl WorkspaceState {
 
 #[cfg(test)]
 mod tests {
-    use super::{reconnect_mode_for_profile, ConnectionCapabilities, WorkspaceState};
+    use super::{
+        reconnect_mode_for_profile, ConnectionCapabilities, TransferRunHandle, WorkspaceState,
+    };
     use std::sync::{Arc, Mutex};
     use tauri::ipc::Channel;
 
@@ -234,7 +277,9 @@ mod tests {
             Some("none".to_string())
         );
         assert_eq!(
-            reconnect_mode_for_profile(&serde_json::json!({ "type": "ftp", "reconnectMode": "auto" })),
+            reconnect_mode_for_profile(
+                &serde_json::json!({ "type": "ftp", "reconnectMode": "auto" })
+            ),
             None
         );
     }
@@ -261,5 +306,30 @@ mod tests {
             assert_eq!(payload["tabId"], "tab-load");
             assert_eq!(payload["chunk"], format!("{index}\r\n"));
         }
+    }
+
+    #[tokio::test]
+    async fn transfer_run_handle_exposes_cancel_and_waits_for_settlement() {
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let (settled_tx, settled_rx) = tokio::sync::watch::channel(false);
+        let handle = TransferRunHandle {
+            generation: 7,
+            cancel: cancel.clone(),
+            settled: settled_rx,
+        };
+
+        handle.cancel.cancel();
+        assert!(cancel.is_cancelled());
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = settled_tx.send(true);
+        });
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle.wait_until_settled(),
+        )
+        .await
+        .expect("run settlement should wake all waiters");
     }
 }
