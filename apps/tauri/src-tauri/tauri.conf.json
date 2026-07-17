@@ -1,0 +1,40 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FileTerm",
+  "version": "1.1.1",
+  "identifier": "com.fileterm.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev:renderer",
+    "devUrl": "http://localhost:5188",
+    "frontendDist": "../dist",
+    "beforeBuildCommand": "npm run build:renderer"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "FileTerm",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 1150,
+        "minHeight": 790,
+        "dragDropEnabled": true,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 20,
+          "y": 26
+        }
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' asset: data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' ipc: http://ipc.localhost http://localhost:5188 ws://localhost:5188; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["../build/icon.icns", "../build/icon.ico", "../build/icon.png"]
+  }
+}

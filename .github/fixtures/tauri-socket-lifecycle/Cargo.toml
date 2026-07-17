@@ -1,0 +1,8 @@
+[package]
+name = "fileterm-tauri-socket-lifecycle"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }

@@ -3,14 +3,15 @@ node_modules/
 
 dist/
 dist-electron/
-apps/desktop/dist/
-apps/desktop/dist-electron/
+apps/tauri/dist/
+apps/electron/dist/
+apps/electron/dist-electron/
 release/
-apps/desktop/release/
-
-# Tauri generated artifacts
-apps/desktop/src-tauri/gen/
-apps/desktop/src-tauri/target/
+apps/tauri/release/
+apps/electron/release/
+apps/tauri/src-tauri/target/
+apps/tauri/src-tauri/gen/
+.github/fixtures/tauri-socket-lifecycle/target/
 
 .DS_Store
 npm-debug.log*

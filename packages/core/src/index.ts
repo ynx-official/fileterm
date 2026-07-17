@@ -496,9 +496,18 @@ export interface SessionSnapshot {
   followShellCwd?: boolean
   remoteFilesLoading?: boolean
   remoteFiles: RemoteFileItem[]
+  /**
+   * SSH shell sessions may be usable even when the server refuses the SFTP
+   * subsystem. Keep that distinction in the shared snapshot so the renderer
+   * can disable only file actions instead of presenting the whole session as
+   * disconnected.
+   */
+  sftpUnavailableReason?: string
   fileAccessMode?: 'user' | 'root'
   sudoUser?: string
   hasReusableSudoAuth?: boolean
+  /** 登录用户（首次 OSC 1337 RemoteUser= 观察值或 profile.username） */
+  loginUser?: string
   connected?: boolean
   systemMetrics?: SystemMetrics
   capabilities?: ConnectionCapabilities
@@ -608,6 +617,33 @@ export interface WebDavSyncResult {
   skipped?: number
 }
 
+export interface SshKeyMetadata {
+  id: string
+  name: string
+  note?: string
+  algorithm: string
+  fingerprint: string
+  encrypted: boolean
+  importedAt: number
+  usageCount: number
+}
+
+export interface ImportSshKeyInput {
+  sourcePath?: string
+  note?: string
+}
+
+export interface SshKeyFileSelection {
+  sourcePath: string
+  fileName: string
+  existingKey?: SshKeyMetadata
+}
+
+export interface SshKeyImportResult {
+  key: SshKeyMetadata
+  duplicate: boolean
+}
+
 export interface CreateProfileInput {
   type: SessionType
   name: string
@@ -692,6 +728,16 @@ export interface SshKeyboardInteractiveRequest {
   name: string
   instructions: string
   prompts: SshKeyboardInteractivePrompt[]
+}
+
+export interface SshKeyPassphrasePromptRequest {
+  requestId: string
+  tabId: string
+  kind: 'key-passphrase'
+  profileId: string
+  keyId: string
+  keyName: string
+  reason: 'required' | 'invalid-saved'
 }
 
 export type SshInteractionRequest =
@@ -855,6 +901,8 @@ export interface FileTermDesktopApi {
   arch: string
   appVersion: string
   appName: string
+  runtimeName: 'Electron' | 'Tauri'
+  runtimeVersion: string
   isDesktop: boolean
   getUpdateStatus(): Promise<AppUpdateStatus>
   checkForUpdates(): Promise<AppUpdateStatus>
@@ -879,6 +927,7 @@ export interface FileTermDesktopApi {
   openExternalUrl(url: string): Promise<void>
   openLogsDirectory(): Promise<void>
   minimizeCurrentWindow(): Promise<void>
+  showCurrentWindow(): Promise<void>
   isCurrentWindowMaximized(): Promise<boolean>
   toggleMaximizeCurrentWindow(): Promise<void>
   closeCurrentWindow(): Promise<void>
@@ -910,7 +959,7 @@ export interface FileTermDesktopApi {
   updateSshKeyNote(keyId: string, note: string): Promise<SshKeyMetadata>
   deleteSshKey(keyId: string): Promise<void>
   onSshKeysChanged(listener: (keys: SshKeyMetadata[]) => void): () => void
-  previewConnectionImport(): Promise<ConnectionImportPlan | null>
+  previewConnectionImport(source?: 'files' | 'folder'): Promise<ConnectionImportPlan | null>
   commitConnectionJsonImport(planId: string, options: ConnectionImportOptions): Promise<ConnectionImportResult>
   exportConnections(format: ConnectionExportFormat): Promise<boolean>
   exportConnectionsAsFiles(format: ConnectionExportFormat): Promise<boolean>

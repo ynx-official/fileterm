@@ -9,20 +9,28 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev -w @fileterm/desktop",
-    "dev:update-test": "npm run dev:update-test -w @fileterm/desktop",
+    "dev": "npm run dev:electron",
+    "dev:tauri": "npm run dev -w @fileterm/tauri",
+    "dev:electron": "npm run dev -w @fileterm/electron",
+    "dev:update-test": "npm run dev:update-test -w @fileterm/electron",
     "lint": "eslint . --max-warnings=0",
     "lint:fix": "eslint . --fix --max-warnings=0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "sync:version": "node ./scripts/sync-version-from-root.mjs",
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build:electron",
+    "build:electron": "npm run build -w @fileterm/electron",
+    "build:tauri": "npm run build -w @fileterm/tauri",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run test -w @fileterm/desktop",
+    "test": "npm run test:electron",
+    "test:electron": "npm run test -w @fileterm/electron",
+    "test:tauri": "npm run test -w @fileterm/tauri",
     "prepare": "husky",
     "version:bump": "node ./scripts/bump-version.mjs",
-    "release:mac": "npm run release:mac -w @fileterm/desktop",
-    "release:win": "npm run release:win -w @fileterm/desktop",
+    "release:mac": "npm run release:mac -w @fileterm/electron",
+    "release:win": "npm run release:win -w @fileterm/electron",
+    "release:tauri:mac": "npm run release:mac -w @fileterm/tauri",
+    "release:tauri:win": "npm run release:win -w @fileterm/tauri",
     "postinstall": "node ./vendor/cpu-features-shim/apply-shim.mjs"
   },
   "engines": {
@@ -35,9 +43,7 @@
     ],
     "*.{json,md,css,yml,yaml}": "prettier --write"
   },
-  "dependencies": {
-    "electron": "^42.4.0"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "@typescript-eslint/eslint-plugin": "^8.63.0",

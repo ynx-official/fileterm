@@ -4,6 +4,19 @@
 
 路线图目标不是一次把所有协议做全，而是尽快形成一个可工作的桌面端 MVP，然后逐步打磨成可发布版本。
 
+## 当前重构进度（2026-07-15）
+
+仓库当前处于 **双运行时并行：Tauri 功能实现接近收口，真实协议与发行候选验收进行中；Electron 作为独立兼容基线保留**。
+
+- 运行时核对：Tauri 位于 `apps/tauri`（`@fileterm/tauri`），Electron `42.4.0` 位于 `apps/electron`（`@fileterm/electron`）。两者各有独立 renderer、构建和本地数据目录，均是可运行入口。
+- Phase 0–2 的主体代码已落地：Tauri bridge/contract test、桌面壳、Rust JSON 存储、Workspace snapshot 与旧 Electron 用户数据兼容已经落地；Phase 0 已补原生 metadata 回填和拖放路径 bridge，Phase 1 已补原生 File/View/Window 菜单与文件编辑器关闭取消状态；两者仍需实际 Tauri UI 手测，不能按“发行验收完成”表述。
+- Phase 3 的 russh SSH 主链路已实现：受管 SSH 私钥库与口令交互、shell、SFTP、MFA、host verification、系统指标、CWD/远端用户跟随、重连水化、自动重连、远程编码、递归 chmod、单级 Jump Host、SOCKS5/HTTP CONNECT 出站代理及运行时 SSH `-L/-R/-D` 隧道均已接入 `apps/tauri/src-tauri`。
+- Phase 3 已有本地 OpenSSH 的认证、exec、SFTP、HTTP/SOCKS5 代理、local 与 dynamic direct-tcpip 回归；MFA 使用真实 SSH 协议夹具验证。真实 sshd 的跳板、远程转发、sudo/root、CWD 事件和完整指标流仍是发行候选手测门禁。
+- Phase 4 的 Transfer journal/断点、FTP/FTPS、Telnet、Serial、WebDAV、连接导入导出、偏好/窗口事件、CSP 和本地日志均已接入 Rust backend。显式/隐式 FTPS、WebDAV HEAD/PUT/GET + ETag/hash、Telnet HTTP CONNECT/SOCKS5 已有本地真实协议夹具；实体/虚拟串口、真实 Telnet 设备、真实 WebDAV 服务和三平台结果仍未全部取得。
+- Phase 5 进行中：macOS Tauri 生产 DMG 已可打包并已有本机性能基线；签名 in-app updater、公证、Windows/Linux 包与 CI 结果、迁移工具和正式切换仍是发行前置。
+
+更细的差距和里程碑以 [`docs/plans/active/tauri-migration-progress.md`](plans/active/tauri-migration-progress.md) 为准；Rust 后端的模块级拆分以 [`rust-backend-migration-plan.md`](plans/active/rust-backend-migration-plan.md) 为准。
+
 ## Phase 0: 仓库初始化
 
 目标：建立不会返工的工程基础。
@@ -161,13 +174,9 @@
 
 ## 近期待办
 
-当前仓库已经完成基础初始化，下一步建议围绕“核心链路稳定 + 结构边界整理”推进：
+当前优先级已经从 Electron 结构拆分转为 Tauri/Rust 功能对齐：
 
-1. 拆分 `apps/desktop/src/main/ipc.ts`，按领域建立 IPC 模块。
-2. 拆分 `workspace-service.ts` 中的 tabs、sessions、transfers 职责。
-3. 拆分 `session-controllers.ts`，让 SSH/SFTP 与 FTP controller 独立演进。
-4. 拆分 `renderer/App.tsx`，把连接管理、文件面板、传输面板、顶部标签沉到 feature 组件。
-5. 继续收敛 `packages/core` 中的共享领域类型。
-6. 稳定主题系统，让 token、theme vars、组件皮肤和终端配色保持一致。
-7. 规划并分阶段推进多平台系统信息采集能力，先覆盖标准 Linux、BusyBox/OpenWrt，再评估 Windows。
-8. 继续把已经稳定的桌面壳 UI 状态从 `App.tsx` 下沉到 feature hooks 或更小的 workspace 组件。
+1. 触发并确认 Windows/Linux Tauri socket lifecycle CI。
+2. 配置 Tauri updater 的签名公钥、更新清单与 Windows/macOS 公证资产。
+3. 在真实 SSH/代理与实体/虚拟串口设备上执行发行候选手测。
+4. 完成三平台包签名、公证、数据迁移工具与回滚演练。

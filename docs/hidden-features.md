@@ -6,7 +6,7 @@
 
 ### 1. 快速连接（Quick Connect）侧边栏入口
 
-- **隐藏位置**：`apps/desktop/src/renderer/features/workspace/HomeWorkspace.tsx` 侧边栏导航
+- **隐藏位置**：`apps/tauri/src/renderer/features/workspace/HomeWorkspace.tsx` 侧边栏导航
 - **保留代码**：
   - `QuickLinksPage.tsx` 组件完整保留
   - `activeTab === 'quick-links'` 的路由和渲染逻辑完整保留
