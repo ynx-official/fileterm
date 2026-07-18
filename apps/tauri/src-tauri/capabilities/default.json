@@ -4,10 +4,10 @@
   "description": "FileTerm desktop capabilities",
   "windows": ["*"],
   "permissions": [
-    "core:default",
+    "core:app:allow-name",
+    "core:app:allow-version",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
-    "core:event:allow-emit",
     "core:window:allow-start-dragging"
   ]
 }

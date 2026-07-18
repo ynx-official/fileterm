@@ -6,6 +6,7 @@ import { CommandEditorModal, emptyCommandForm, toCommandTemplateInput } from './
 import { AppIcon } from '../common/AppIcon'
 import { CloseButton } from '../common/CloseButton'
 import { ManagerInlineFolderRow } from '../common/ManagerInlineFolderRow'
+import { targetsNestedManagerControl } from '../common/manager-interactions'
 import { managerDropClass, resolveManagerDropPosition } from '../common/manager-drag'
 import { usePointerSortFallback, type PointerSortTarget } from '../../hooks/usePointerSortFallback'
 
@@ -29,13 +30,13 @@ export function CommandManagerModal({
   commandFolders: CommandFolder[]
   commandTemplates: CommandTemplate[]
   onClose(): void
-  onCreateFolder(name: string): void
-  onDeleteFolder(folderId: string): Promise<unknown> | void
-  onUpdateFolder(folderId: string, updates: Partial<CommandFolder>): void
-  onUpdateOrder(id: string, newParentId: string | undefined, newOrder: number): void
-  onCreateCommand(input: CommandTemplateInput): void
-  onUpdateCommand(commandId: string, input: CommandTemplateInput): void
-  onDeleteCommand(commandId: string): Promise<unknown> | void
+  onCreateFolder(name: string): Promise<boolean> | boolean | void
+  onDeleteFolder(folderId: string): Promise<unknown> | boolean | void
+  onUpdateFolder(folderId: string, updates: Partial<CommandFolder>): Promise<boolean> | boolean | void
+  onUpdateOrder(id: string, newParentId: string | undefined, newOrder: number): Promise<boolean> | boolean | void
+  onCreateCommand(input: CommandTemplateInput): Promise<boolean> | boolean | void
+  onUpdateCommand(commandId: string, input: CommandTemplateInput): Promise<boolean> | boolean | void
+  onDeleteCommand(commandId: string): Promise<unknown> | boolean | void
   standalone?: boolean
   inline?: boolean
   onActiveFolderChange?(name: string): void
@@ -56,6 +57,9 @@ export function CommandManagerModal({
   >(null)
   const [isDeleting, setIsDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  const deleteInFlightRef = useRef(false)
+  const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null)
+  const folderRenameInFlightRef = useRef(false)
   const suppressRowClickRef = useRef(false)
   const dragStateRef = useRef<{
     draggingId: string | null
@@ -79,14 +83,25 @@ export function CommandManagerModal({
     })
   }
 
-  const saveFolderRename = () => {
-    if (!editingFolder) return
-    const name = editingFolder.name.trim()
-    const current = commandFolders.find((folder) => folder.id === editingFolder.id)
-    if (name && name !== current?.name) {
-      onUpdateFolder(editingFolder.id, { name })
+  const saveFolderRename = async () => {
+    if (!editingFolder || folderRenameInFlightRef.current) return
+    const target = editingFolder
+    const name = target.name.trim()
+    const current = commandFolders.find((folder) => folder.id === target.id)
+    if (!name || name === current?.name) {
+      setEditingFolder(null)
+      return
     }
-    setEditingFolder(null)
+
+    folderRenameInFlightRef.current = true
+    setRenamingFolderId(target.id)
+    try {
+      const result = await onUpdateFolder(target.id, { name })
+      if (result !== false) setEditingFolder(null)
+    } finally {
+      folderRenameInFlightRef.current = false
+      setRenamingFolderId(null)
+    }
   }
 
   const tree = useMemo(() => {
@@ -386,14 +401,18 @@ export function CommandManagerModal({
           data-fileterm-sort-id={node.id}
           data-fileterm-sort-kind={isFolder ? 'folder' : 'command'}
           draggable={false}
-          onPointerDown={(event) => handlePointerDown(event, node.id)}
+          onPointerDown={(event) => {
+            if (!targetsNestedManagerControl(event)) {
+              handlePointerDown(event, node.id)
+            }
+          }}
           onDragStart={(e) => handleDragStart(e, node.id)}
           onDragOver={(e) => handleDragOver(e, node.id)}
           onDragLeave={handleDragLeave}
           onDrop={(e) => handleDrop(e, node.id)}
           onDragEnd={handleDragEnd}
-          onDoubleClick={() => {
-            if (suppressRowClickRef.current) {
+          onDoubleClick={(event) => {
+            if (targetsNestedManagerControl(event) || suppressRowClickRef.current) {
               return
             }
             if (isFolder) {
@@ -402,8 +421,8 @@ export function CommandManagerModal({
             }
             openEditorWindow('edit', node.id)
           }}
-          onClick={() => {
-            if (suppressRowClickRef.current) {
+          onClick={(event) => {
+            if (targetsNestedManagerControl(event) || suppressRowClickRef.current) {
               return
             }
             if (isFolder) {
@@ -411,7 +430,7 @@ export function CommandManagerModal({
             }
           }}
           onKeyDown={(event) => {
-            if (event.key !== 'Enter') {
+            if (targetsNestedManagerControl(event) || event.key !== 'Enter') {
               return
             }
             event.preventDefault()
@@ -442,14 +461,15 @@ export function CommandManagerModal({
               <input
                 autoFocus
                 className="manager-inline-input"
+                disabled={renamingFolderId === node.id}
                 value={editingFolder.name}
-                onBlur={saveFolderRename}
+                onBlur={() => void saveFolderRename()}
                 onChange={(event) => setEditingFolder({ id: node.id, name: event.target.value })}
                 onClick={stopInteractiveEvent}
                 onKeyDown={(event) => {
                   event.stopPropagation()
-                  if (event.key === 'Enter') saveFolderRename()
-                  if (event.key === 'Escape') setEditingFolder(null)
+                  if (event.key === 'Enter') void saveFolderRename()
+                  if (event.key === 'Escape' && !folderRenameInFlightRef.current) setEditingFolder(null)
                 }}
               />
             ) : (
@@ -691,13 +711,15 @@ export function CommandManagerModal({
           mode={editorState.mode}
           initialValue={editorInitialValue}
           onClose={() => setEditorState(null)}
-          onSubmit={(input) => {
-            if (editorState.mode === 'edit' && editorState.commandId) {
-              onUpdateCommand(editorState.commandId, input)
-            } else {
-              onCreateCommand(input)
+          onSubmit={async (input) => {
+            const result =
+              editorState.mode === 'edit' && editorState.commandId
+                ? await onUpdateCommand(editorState.commandId, input)
+                : await onCreateCommand(input)
+            if (result !== false) {
+              setEditorState(null)
             }
-            setEditorState(null)
+            return result
           }}
         />
       ) : null}
@@ -708,22 +730,31 @@ export function CommandManagerModal({
           errorMessage={deleteError}
           isSubmitting={isDeleting}
           onClose={() => {
-            if (!isDeleting) {
+            if (!deleteInFlightRef.current) {
               setPendingDelete(null)
               setDeleteError(null)
             }
           }}
           onConfirm={() => {
+            if (deleteInFlightRef.current) return
             const target = pendingDelete
+            deleteInFlightRef.current = true
             setIsDeleting(true)
             setDeleteError(null)
             void Promise.resolve()
               .then(() => (target.kind === 'folder' ? onDeleteFolder(target.id) : onDeleteCommand(target.id)))
-              .then(() => setPendingDelete(null))
+              .then((result) => {
+                if (result !== false) {
+                  setPendingDelete(null)
+                }
+              })
               .catch((error: unknown) => {
                 setDeleteError(error instanceof Error ? error.message : String(error))
               })
-              .finally(() => setIsDeleting(false))
+              .finally(() => {
+                deleteInFlightRef.current = false
+                setIsDeleting(false)
+              })
           }}
           title={t.delete}
         />

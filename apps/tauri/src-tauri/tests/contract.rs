@@ -21,10 +21,13 @@
 //! 4. **Event naming contract** — every event emitted via `app.emit(...)`
 //!    uses the `namespace:name` form (`terminal:data`, `workspace:snapshot`,
 //!    `app:window-close-request`, ...). No bare names.
+//!
+//! 5. **Renderer style CSP contract** — xterm and Monaco generate runtime
+//!    styles, so Tauri must not add a nonce to `style-src` that disables the
+//!    configured `unsafe-inline`; script CSP modification remains enabled.
 
-use fileterm_lib::services::profile_ops::{
-    heal_profiles, strip_secret_fields_public,
-};
+use fileterm_lib::commands::OpenWindowInput;
+use fileterm_lib::services::profile_ops::{heal_profiles, strip_secret_fields_public};
 use serde_json::{json, Value};
 
 fn folder(id: &str, name: &str) -> Value {
@@ -39,9 +42,24 @@ fn profile(id: &str, group: &str, parent_id: Option<&str>) -> Value {
     obj.insert("group".to_string(), Value::String(group.to_string()));
     obj.insert(
         "parentId".to_string(),
-        parent_id.map(|s| Value::String(s.to_string())).unwrap_or(Value::Null),
+        parent_id
+            .map(|s| Value::String(s.to_string()))
+            .unwrap_or(Value::Null),
     );
     Value::Object(obj)
+}
+
+fn command_body<'a>(source: &'a str, name: &str) -> &'a str {
+    let marker = format!("pub async fn {name}");
+    let start = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("command `{name}` must exist"));
+    let remainder = &source[start..];
+    let end = remainder[1..]
+        .find("#[tauri::command]")
+        .map(|index| index + 1)
+        .unwrap_or(remainder.len());
+    &remainder[..end]
 }
 
 // ── Secret stripping contract ────────────────────────────────────────────
@@ -55,18 +73,32 @@ fn strip_removes_top_level_secret_fields() {
         "password": "hunter2",
         "passphrase": "secret-pass",
         "privateKeyPath": "/home/user/.ssh/id_rsa",
+        "proxyPassword": "legacy-form-proxy-secret",
         "host": "example.com",
         "port": 22,
     });
     let stripped = strip_secret_fields_public(&profile);
-    assert!(stripped.get("password").is_none(), "password must be stripped");
-    assert!(stripped.get("passphrase").is_none(), "passphrase must be stripped");
+    assert!(
+        stripped.get("password").is_none(),
+        "password must be stripped"
+    );
+    assert!(
+        stripped.get("passphrase").is_none(),
+        "passphrase must be stripped"
+    );
     assert!(
         stripped.get("privateKeyPath").is_none(),
         "privateKeyPath must be stripped"
     );
+    assert!(
+        stripped.get("proxyPassword").is_none(),
+        "legacy top-level proxyPassword must be stripped"
+    );
     // Non-secret fields stay intact.
-    assert_eq!(stripped.get("host").and_then(|v| v.as_str()), Some("example.com"));
+    assert_eq!(
+        stripped.get("host").and_then(|v| v.as_str()),
+        Some("example.com")
+    );
     assert_eq!(stripped.get("port").and_then(|v| v.as_i64()), Some(22));
 }
 
@@ -89,8 +121,14 @@ fn strip_removes_nested_proxy_password() {
         .get("proxy")
         .and_then(|v| v.as_object())
         .expect("proxy object should survive stripping");
-    assert!(proxy.get("password").is_none(), "proxy.password must be stripped");
-    assert_eq!(proxy.get("host").and_then(|v| v.as_str()), Some("127.0.0.1"));
+    assert!(
+        proxy.get("password").is_none(),
+        "proxy.password must be stripped"
+    );
+    assert_eq!(
+        proxy.get("host").and_then(|v| v.as_str()),
+        Some("127.0.0.1")
+    );
     assert_eq!(proxy.get("port").and_then(|v| v.as_i64()), Some(1080));
 }
 
@@ -252,4 +290,223 @@ fn contract_events_use_namespace_colon_name() {
             "event `{name}` must not have an empty namespace or name"
         );
     }
+}
+
+#[test]
+fn renderer_csp_allows_runtime_styles_without_relaxing_scripts() {
+    let config: Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+        .expect("tauri.conf.json must remain valid JSON");
+    let security = config
+        .pointer("/app/security")
+        .and_then(Value::as_object)
+        .expect("Tauri security configuration must exist");
+    let csp = security
+        .get("csp")
+        .and_then(Value::as_str)
+        .expect("production CSP must be configured");
+
+    assert!(
+        csp.contains("style-src 'self' 'unsafe-inline'"),
+        "xterm and Monaco runtime style elements must be allowed"
+    );
+    assert!(
+        !csp.contains("script-src 'self' 'unsafe-inline'"),
+        "runtime styles must not weaken the script policy"
+    );
+
+    let disabled_directives = security
+        .get("dangerousDisableAssetCspModification")
+        .and_then(Value::as_array)
+        .expect("Tauri CSP modification exceptions must be directive-scoped");
+    assert_eq!(
+        disabled_directives,
+        &[Value::String("style-src".to_string())],
+        "only style-src nonce injection may be disabled"
+    );
+}
+
+#[test]
+fn ui_preference_setter_returns_the_shared_contract_shape() {
+    let source = include_str!("../src/commands/mod.rs");
+    assert!(
+        source.contains("Result<UiPreferences, AppError>"),
+        "app_set_ui_preferences must return the updated preferences like Electron and FileTermDesktopApi"
+    );
+    assert!(
+        source.contains("Ok(preferences)"),
+        "app_set_ui_preferences must not resolve with an empty IPC payload"
+    );
+    assert!(
+        source.contains("install_localized_application_menu")
+            && source.contains("install_localized_tray_menu"),
+        "locale changes must refresh both the application and tray menus"
+    );
+}
+
+#[test]
+fn connection_library_never_returns_profile_secrets() {
+    let source = include_str!("../src/commands/mod.rs");
+    let start = source
+        .find("pub async fn app_get_connection_library")
+        .expect("connection library command must exist");
+    let remainder = &source[start..];
+    let end = remainder[1..]
+        .find("#[tauri::command]")
+        .map(|index| index + 1)
+        .expect("another command should follow the connection library");
+    let command = &remainder[..end];
+    assert!(
+        command.contains("strip_secret_fields_public"),
+        "standalone connection windows must receive the same scrubbed profiles as workspace snapshots"
+    );
+}
+
+#[test]
+fn profile_and_command_mutations_are_serialized_and_broadcast() {
+    let source = include_str!("../src/commands/mod.rs");
+    let mutations = [
+        "app_workspace_mutation",
+        "app_create_profile",
+        "app_update_profile",
+        "app_delete_profile",
+        "app_update_folder",
+        "app_delete_folder",
+        "app_update_entity_order",
+        "app_update_command_folder",
+        "app_delete_command_folder",
+        "app_update_command_order",
+        "app_update_command_template",
+        "app_delete_command_template",
+    ];
+    for name in mutations {
+        let body = command_body(source, name);
+        assert!(
+            body.contains("lock_library_after_transfer_hydration"),
+            "`{name}` must share the multi-window library mutation lock"
+        );
+        assert!(
+            body.contains("get_workspace_snapshot_and_emit"),
+            "`{name}` must broadcast the persisted snapshot to every window"
+        );
+    }
+
+    let open_profile = command_body(source, "app_open_profile");
+    assert!(
+        open_profile.contains("lock_library_after_transfer_hydration"),
+        "opening a profile mutates recency and must use the library lock"
+    );
+    assert!(
+        open_profile.contains("get_workspace_snapshot_and_emit"),
+        "opening a profile must immediately publish its connecting tab"
+    );
+}
+
+#[test]
+fn protocol_workers_publish_connected_closed_and_error_states() {
+    let protocols = [
+        ("SSH", include_str!("../src/sessions/ssh.rs")),
+        ("FTP", include_str!("../src/sessions/ftp.rs")),
+        ("Telnet", include_str!("../src/sessions/telnet.rs")),
+        ("Serial", include_str!("../src/sessions/serial.rs")),
+    ];
+    for (name, source) in protocols {
+        for status in ["Connected", "Closed", "Error"] {
+            assert!(
+                source.contains(&format!("WorkspaceTabStatus::{status}")),
+                "{name} worker must map its lifecycle to WorkspaceTabStatus::{status}"
+            );
+        }
+    }
+}
+
+// ── Nested payload contracts ─────────────────────────────────────────────
+
+#[test]
+fn file_editor_window_payload_uses_camel_case_tab_id() {
+    let input: OpenWindowInput = serde_json::from_value(json!({
+        "kind": "file-editor",
+        "source": "remote",
+        "path": "/etc/hosts",
+        "name": "hosts",
+        "tabId": "tab-ssh-1",
+        "encoding": "utf-8"
+    }))
+    .expect("camelCase file editor input should deserialize");
+    assert_eq!(input.tab_id.as_deref(), Some("tab-ssh-1"));
+
+    let snake_case = serde_json::from_value::<OpenWindowInput>(json!({
+        "kind": "file-editor",
+        "source": "remote",
+        "path": "/etc/hosts",
+        "name": "hosts",
+        "tab_id": "tab-ssh-1"
+    }));
+    assert!(
+        snake_case.is_err(),
+        "snake_case payloads must fail instead of silently dropping tabId"
+    );
+}
+
+#[test]
+fn tauri_bridge_forwards_file_editor_tab_id_in_camel_case() {
+    let bridge = include_str!("../../src/bridge/tauri-api.ts");
+    assert!(
+        bridge.contains("tabId: input.tabId"),
+        "bridge must forward the remote editor session as tabId"
+    );
+    assert!(
+        !bridge.contains("tab_id: input.tabId"),
+        "bridge must not emit Rust field spellings"
+    );
+}
+
+#[test]
+fn tauri_bridge_is_structurally_checked_without_runtime_proxy_fallback() {
+    let bridge = include_str!("../../src/bridge/tauri-api.ts");
+    assert!(
+        bridge.contains("satisfies FileTermDesktopApi"),
+        "bridge object must be checked against the shared API at compile time"
+    );
+    assert!(
+        !bridge.contains("as unknown as FileTermDesktopApi"),
+        "bridge must not bypass the shared API type"
+    );
+    assert!(
+        !bridge.contains("new Proxy("),
+        "missing bridge methods must fail typecheck instead of becoming runtime stubs"
+    );
+}
+
+#[test]
+fn tauri_renderer_mounts_only_after_native_metadata_is_ready() {
+    let bridge = include_str!("../../src/bridge/tauri-api.ts");
+    assert!(bridge.contains("export async function createTauriApi"));
+    assert!(!bridge.contains("appVersion: '0.0.0'"));
+    assert!(!bridge.contains("arch = 'unknown'"));
+
+    let bootstrap = include_str!("../../src/renderer/main.tsx");
+    let assign = bootstrap
+        .find("window.fileterm = api")
+        .expect("bootstrap must expose the resolved API");
+    let render = bootstrap
+        .find("root.render(")
+        .expect("bootstrap must mount React");
+    assert!(
+        assign < render,
+        "native metadata must resolve before React mounts"
+    );
+}
+
+#[test]
+fn native_drop_fallback_is_cleared_only_after_renderer_consumption() {
+    let bridge = include_str!("../../src/bridge/tauri-api.ts");
+    assert!(
+        bridge.contains("consume: clearNativeDropFallback"),
+        "native drop events must expose an explicit acknowledgement"
+    );
+    let renderer = include_str!("../../src/renderer/hooks/useFileOperations.ts");
+    assert!(
+        renderer.contains("detail.consume()"),
+        "the accepted remote-pane drop must acknowledge native path consumption"
+    );
 }

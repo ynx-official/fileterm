@@ -2880,19 +2880,21 @@
   background: var(--bg-hover) !important;
   color: var(--text-main) !important;
   border: 1px solid var(--border-light) !important;
-  border-radius: 10px !important;
+  border-radius: 8px !important;
   height: 40px !important;
-  padding: 0 20px !important;
-  font-weight: 500 !important;
+  min-width: 92px !important;
+  padding: 0 16px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
   cursor: pointer !important;
   transition:
     background 0.18s,
     transform 0.18s !important;
 }
 
-:root:not([data-theme]) .command-dialog-actions .flat-button:hover,
-:root[data-theme='default-dark'] .command-dialog-actions .flat-button:hover,
-:root[data-theme='default'] .command-dialog-actions .flat-button:hover {
+:root:not([data-theme]) .command-dialog-actions .flat-button:hover:not(:disabled),
+:root[data-theme='default-dark'] .command-dialog-actions .flat-button:hover:not(:disabled),
+:root[data-theme='default'] .command-dialog-actions .flat-button:hover:not(:disabled) {
   background: var(--bg-active) !important;
 }
 
@@ -2903,19 +2905,21 @@
   background: var(--button-primary-bg) !important;
   color: var(--button-primary-text) !important;
   border: 1px solid var(--button-primary-border) !important;
-  border-radius: 10px !important;
+  border-radius: 8px !important;
   height: 40px !important;
-  padding: 0 20px !important;
-  font-weight: 500 !important;
+  min-width: 92px !important;
+  padding: 0 16px !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
   cursor: pointer !important;
   transition:
     background 0.18s,
     transform 0.18s !important;
 }
 
-:root:not([data-theme]) .command-dialog-actions .primary-button:hover,
-:root[data-theme='default-dark'] .command-dialog-actions .primary-button:hover,
-:root[data-theme='default'] .command-dialog-actions .primary-button:hover {
+:root:not([data-theme]) .command-dialog-actions .primary-button:hover:not(:disabled),
+:root[data-theme='default-dark'] .command-dialog-actions .primary-button:hover:not(:disabled),
+:root[data-theme='default'] .command-dialog-actions .primary-button:hover:not(:disabled) {
   background: var(--button-primary-hover) !important;
 }
 
@@ -3160,6 +3164,12 @@
 :root[data-theme='default-dark'] .confirm-action-dialog.ssh-key-import-dialog,
 :root[data-theme='default'] .confirm-action-dialog.ssh-key-import-dialog {
   background: #1b1b1b !important;
+}
+
+:root:not([data-theme]) .ssh-key-import-dialog .confirm-action-dialog__title,
+:root[data-theme='default-dark'] .ssh-key-import-dialog .confirm-action-dialog__title,
+:root[data-theme='default'] .ssh-key-import-dialog .confirm-action-dialog__title {
+  background: #242424 !important;
 }
 
 :root:not([data-theme]) .ssh-key-import-dialog .ssh-key-note-dialog__field input,

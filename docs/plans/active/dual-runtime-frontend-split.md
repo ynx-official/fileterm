@@ -2,7 +2,7 @@
 
 ## 目标
 
-让 Electron 与 Tauri 可并行开发、运行和发布，且不共享 renderer 代码。
+完成 Electron 与 Tauri 的 renderer 物理拆分后，冻结 Electron 为历史参考；仅维护、构建和发布 Tauri。
 
 ## 已完成
 
@@ -15,15 +15,16 @@
 ## 待完成
 
 - [x] 重新生成根 `package-lock.json`，将两个 workspace 的依赖写入锁文件。
-- [x] 更新根命令、CI 与 Electron 发布工作流，使两个 runtime 可单独构建和测试。
+- [x] 根命令、CI 与发布工作流已收敛至 Tauri；Electron 不再参与自动构建或测试。
 - [x] 将 Tauri 的真实协议夹具测试串行化，避免并发启动本地 OpenSSH fixture 时互相干扰。
-- [ ] 分别验证 Tauri 和 Electron 的完整质量门禁与开发启动。
+- [ ] 验证 Tauri 的完整质量门禁与发布前真机启动；Electron 仅作为人工代码参考。
 - [ ] 清理剩余历史文档的旧 `apps/desktop` 路径，或明确标记为历史快照。
 - [x] 定义跨端功能节奏：新功能默认只进指定 runtime；双端需求在两个 app 分别实现并用 `packages/*` 稳定契约校验。
 
 ## 运行命令
 
 ```bash
+npm run dev # 默认启动 Tauri/Rust
 npm run dev:tauri
 npm run dev:electron
 npm run build:tauri
@@ -34,5 +35,8 @@ npm run test:electron
 
 ## 数据边界
 
-Tauri 与 Electron 不共享可写 userData。迁移/比较数据通过导入导出或后续专门
-的同步协议完成，避免 JSON repository、secret 文件和 transfer journal 并发写入。
+Tauri 与 Electron 不共享可写 userData。Tauri 首次启动时可从旧 Electron userData
+执行一次带版本 marker 的导入：Tauri 已有记录优先，legacy 只补缺失 ID，整批写入失败
+则回滚且不落 marker。迁移成功后禁止 live merge；后续比较或交换数据只能通过显式
+导入导出或专门同步协议完成，避免 JSON repository、secret 文件和 transfer journal
+并发写入。

@@ -1,4 +1,4 @@
-name: ci
+name: Tauri CI
 
 on:
   push:
@@ -14,7 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  validate:
+  tauri-renderer-and-shared-quality:
+    name: Tauri renderer and shared packages
     runs-on: ubuntu-latest
 
     steps:
@@ -30,29 +31,27 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build packages (core → shared → storage)
+      - name: Audit npm dependencies
+        run: npm audit --audit-level=low
+
+      - name: Build shared packages
         run: |
           npm run build -w @fileterm/core
           npm run build -w @fileterm/shared
           npm run build -w @fileterm/storage
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Typecheck Tauri renderer and shared packages
+        run: |
+          npm run typecheck -w @fileterm/core
+          npm run typecheck -w @fileterm/shared
+          npm run typecheck -w @fileterm/storage
+          npm run typecheck -w @fileterm/tauri
 
-      - name: Lint
-        run: npm run lint
+      - name: Lint Tauri and shared source
+        run: npx eslint apps/tauri packages/core packages/shared packages/storage --max-warnings=0
 
-      - name: Check formatting
-        run: npm run format:check
-
-      - name: Run unit tests
-        run: npm test
-
-      - name: Build
-        run: npm run build
-
-      - name: Run transfer protocol tests
-        run: npm run test:transfers:protocol -w @fileterm/electron
+      - name: Check Tauri and shared formatting
+        run: npx prettier --check apps/tauri packages/core packages/shared packages/storage package.json package-lock.json .github/workflows/ci.yml .github/workflows/release.yml
 
   tauri-socket-lifecycle:
     name: Tauri socket lifecycle (${{ matrix.os }})
@@ -69,11 +68,28 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Windows native build dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nasm --no-progress --yes
+          $nasmDir = Join-Path $env:ProgramFiles 'NASM'
+          $nasmExe = Join-Path $nasmDir 'nasm.exe'
+          if (-not (Test-Path $nasmExe)) {
+            throw "NASM was installed but $nasmExe was not found"
+          }
+          $nasmDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          & $nasmExe -v
+
       - name: Install Linux Tauri link dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Check the full Tauri Rust application
+        working-directory: apps/tauri/src-tauri
+        run: cargo check --locked --all-targets
 
       - name: Verify direct Telnet socket release
         if: runner.os != 'Windows'
@@ -82,9 +98,6 @@ jobs:
 
       - name: Verify direct Telnet socket release without desktop runtime DLLs
         if: runner.os == 'Windows'
-        # The full Tauri lib test binary loads unrelated desktop runtime DLLs
-        # before this socket test starts. Compile the extracted production
-        # transport module in a minimal fixture to keep this check deterministic.
         run: cargo test --manifest-path .github/fixtures/tauri-socket-lifecycle/Cargo.toml --locked
 
   tauri-serial-virtual:
@@ -108,7 +121,7 @@ jobs:
         run: cargo test sessions::serial::tests::virtual_pty_round_trip_exercises_the_real_serial_stack
 
   tauri-real-protocols:
-    name: Tauri real protocol fixtures (ubuntu-latest)
+    name: Tauri quality and real protocol fixtures (ubuntu-latest)
     runs-on: ubuntu-latest
 
     steps:
@@ -117,12 +130,63 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build shared packages for Tauri renderer
+        run: |
+          npm run build -w @fileterm/core
+          npm run build -w @fileterm/shared
+          npm run build -w @fileterm/storage
 
       - name: Install protocol fixtures and Linux Tauri dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y openssh-server openssl python3 libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
+      - name: Typecheck Tauri renderer
+        run: npm run typecheck -w @fileterm/tauri
+
+      - name: Check Rust formatting
+        working-directory: apps/tauri/src-tauri
+        run: cargo fmt --all -- --check
+
+      - name: Run strict Clippy
+        working-directory: apps/tauri/src-tauri
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
       - name: Exercise Tauri protocol services
         working-directory: apps/tauri/src-tauri
-        run: cargo test --lib -- --test-threads=1
+        run: cargo test --locked -- --test-threads=1
+
+      - name: Build Tauri production binary
+        run: npm run build -w @fileterm/tauri -- --no-bundle
+
+  rust-security-audit:
+    name: RustSec dependency audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Audit Tauri Cargo.lock
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: apps/tauri/src-tauri
+          # Scoped, time-bounded exceptions are reviewed in:
+          # docs/quality/rustsec-advisory-exceptions.md
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2026-0194,RUSTSEC-2026-0195

@@ -107,7 +107,6 @@ export function ModalPortalManager({
       {sshHostVerification ? <SshHostVerificationModal {...sshHostVerification} /> : null}
       {sshKeyboardInteractive ? <SshKeyboardInteractiveModal {...sshKeyboardInteractive} /> : null}
       {sshKeyPassphrase ? <SshKeyPassphraseModal {...sshKeyPassphrase} /> : null}
-      {sshKeyboardInteractive ? <SshKeyboardInteractiveModal {...sshKeyboardInteractive} /> : null}
       {shortcutCloseConfirm ? <ConfirmActionDialog {...shortcutCloseConfirm} /> : null}
       {windowCloseConfirm ? <ConfirmActionDialog {...windowCloseConfirm} /> : null}
     </>

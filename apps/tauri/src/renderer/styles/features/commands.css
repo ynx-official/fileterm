@@ -1598,6 +1598,15 @@
   padding-top: 4px;
 }
 
+.command-dialog-actions > button {
+  min-width: 92px;
+  height: 40px;
+  padding: 0 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .command-preview span {
   font-size: 10px;
   font-weight: 600;

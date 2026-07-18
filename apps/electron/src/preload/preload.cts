@@ -34,13 +34,6 @@ import type {
   TransferTask,
   TransferTargetOptions,
   FileTermDesktopApi,
-  DetachWorkspaceTabInput,
-  DropWorkspaceTabInput,
-  FinishWorkspaceTabDragInput,
-  MoveWorkspaceTabInput,
-  WorkspaceTabDragInput,
-  WorkspaceTabPlacement,
-  WorkspaceWindowContext,
   TerminalDataPayload,
   TerminalStatePayload,
   WorkspaceSnapshot
@@ -112,28 +105,6 @@ const api: FileTermDesktopApi = {
   },
 
   requestQuitApp: (): Promise<void> => ipcRenderer.invoke('app:requestQuitApp'),
-  getWorkspaceWindowContext: (): Promise<WorkspaceWindowContext> => ipcRenderer.invoke('workspaceWindow:getContext'),
-  getWorkspaceTabPlacements: (): Promise<WorkspaceTabPlacement[]> =>
-    ipcRenderer.invoke('workspaceWindow:getPlacements'),
-  detachWorkspaceTab: (input: DetachWorkspaceTabInput): Promise<void> =>
-    ipcRenderer.invoke('workspaceWindow:detachTab', input),
-  attachWorkspaceTab: (tabId: string): Promise<void> => ipcRenderer.invoke('workspaceWindow:attachTab', tabId),
-  moveWorkspaceTab: (input: MoveWorkspaceTabInput): Promise<void> =>
-    ipcRenderer.invoke('workspaceWindow:moveTab', input),
-  startWorkspaceTabDrag: (input: WorkspaceTabDragInput): Promise<void> =>
-    ipcRenderer.invoke('workspaceWindow:startTabDrag', input),
-  setWorkspaceTabDragTarget: (active: boolean): Promise<void> =>
-    ipcRenderer.invoke('workspaceWindow:setTabDragTarget', active),
-  dropWorkspaceTab: (input: DropWorkspaceTabInput): Promise<void> =>
-    ipcRenderer.invoke('workspaceWindow:dropTab', input),
-  finishWorkspaceTabDrag: (input: FinishWorkspaceTabDragInput): Promise<void> =>
-    ipcRenderer.invoke('workspaceWindow:finishTabDrag', input),
-  claimWorkspaceTab: (tabId: string): Promise<void> => ipcRenderer.invoke('workspaceWindow:claimTab', tabId),
-  onWorkspaceTabPlacementChanged: (listener: (placements: WorkspaceTabPlacement[]) => void) => {
-    const wrapped = (_event: unknown, placements: WorkspaceTabPlacement[]) => listener(placements)
-    ipcRenderer.on('workspaceWindow:placementsChanged', wrapped)
-    return () => ipcRenderer.off('workspaceWindow:placementsChanged', wrapped)
-  },
   getSnapshot: (): Promise<WorkspaceSnapshot> => ipcRenderer.invoke('workspace:getSnapshot'),
   getConnectionLibrary: (): Promise<ConnectionLibrarySnapshot> => ipcRenderer.invoke('workspace:getConnectionLibrary'),
   listSshKeys: (): Promise<SshKeyMetadata[]> => ipcRenderer.invoke('sshKeys:list'),
@@ -364,7 +335,7 @@ const api: FileTermDesktopApi = {
     ipcRenderer.on('app:close-active-workspace-item-request', wrapped)
     return () => ipcRenderer.off('app:close-active-workspace-item-request', wrapped)
   },
-  confirmCloseWindow: (action: 'quit' | 'hide' | 'close-workspace' | 'cancel'): Promise<void> =>
+  confirmCloseWindow: (action: 'quit' | 'hide' | 'cancel'): Promise<void> =>
     ipcRenderer.invoke('app:confirmCloseWindow', action)
 }
 

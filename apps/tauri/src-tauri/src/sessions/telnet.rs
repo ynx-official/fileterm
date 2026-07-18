@@ -9,6 +9,7 @@ use tokio_socks::tcp::Socks5Stream;
 use super::telnet_direct::connect_direct_telnet;
 use super::terminal::{decode_terminal, emit_terminal_data, encode_terminal, set_terminal_state};
 use super::WorkerCmd;
+use crate::services::WorkspaceTabStatus;
 
 const IAC: u8 = 255;
 const DONT: u8 = 254;
@@ -147,7 +148,13 @@ pub fn start_telnet_worker(
         if let Err(error) = run_telnet_worker(&tab_id, &profile, command_rx, &app).await {
             crate::services::logging::session(&app, "ERROR", "telnet", &tab_id, &error);
             emit_terminal_data(&app, &tab_id, &format!("\r\n[Telnet] {error}\r\n")).await;
-            set_terminal_state(&app, &tab_id, format!("Telnet error: {error}"), false).await;
+            set_terminal_state(
+                &app,
+                &tab_id,
+                format!("Telnet error: {error}"),
+                WorkspaceTabStatus::Error,
+            )
+            .await;
         }
     });
 }
@@ -178,7 +185,13 @@ async fn run_telnet_worker(
     );
     let (mut reader, mut writer) = tokio::io::split(stream);
     let mut parser = TelnetParser::new();
-    set_terminal_state(app, tab_id, format!("Telnet {host}:{port}"), true).await;
+    set_terminal_state(
+        app,
+        tab_id,
+        format!("Telnet {host}:{port}"),
+        WorkspaceTabStatus::Connected,
+    )
+    .await;
     emit_terminal_data(app, tab_id, "连接主机成功\r\n").await;
     let mut buffer = vec![0_u8; 32 * 1024];
 
@@ -201,7 +214,7 @@ async fn run_telnet_worker(
                     Some(WorkerCmd::Disconnect) | None => {
                         crate::services::logging::session(app, "INFO", "telnet", tab_id, "disconnecting");
                         let _ = writer.shutdown().await;
-                        set_terminal_state(app, tab_id, "Telnet disconnected".to_string(), false).await;
+                        set_terminal_state(app, tab_id, "Telnet disconnected".to_string(), WorkspaceTabStatus::Closed).await;
                         return Ok(());
                     }
                     Some(command) => reject_unsupported(command, "Telnet 不支持此文件或隧道操作"),
@@ -211,7 +224,7 @@ async fn run_telnet_worker(
                 let count = read.map_err(|error| error.to_string())?;
                 if count == 0 {
                     crate::services::logging::session(app, "WARN", "telnet", tab_id, "remote closed connection");
-                    set_terminal_state(app, tab_id, "Telnet disconnected".to_string(), false).await;
+                    set_terminal_state(app, tab_id, "Telnet disconnected".to_string(), WorkspaceTabStatus::Closed).await;
                     return Ok(());
                 }
                 let (visible, writes) = parser.feed(&buffer[..count]);
@@ -494,7 +507,9 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
                 .await
                 .unwrap();
-            let mut target = tokio::net::TcpStream::connect(target_address).await.unwrap();
+            let mut target = tokio::net::TcpStream::connect(target_address)
+                .await
+                .unwrap();
             tokio::io::copy_bidirectional(&mut client, &mut target)
                 .await
                 .unwrap();
@@ -545,7 +560,9 @@ mod tests {
                 .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
                 .await
                 .unwrap();
-            let mut target = tokio::net::TcpStream::connect(target_address).await.unwrap();
+            let mut target = tokio::net::TcpStream::connect(target_address)
+                .await
+                .unwrap();
             tokio::io::copy_bidirectional(&mut client, &mut target)
                 .await
                 .unwrap();

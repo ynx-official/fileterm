@@ -228,9 +228,7 @@ export function FileManager({
   const isRemoteConnected = activeSession.connected === true
   const isSshSession = activeTab?.sessionType === 'ssh'
   const canManageTunnels = activeSession.capabilities?.tunnels === true
-  const showRemoteDirectoryLoading =
-    isRemoteConnected &&
-    (isRemoteDirectoryLoading || (activeSession.remoteFilesLoading === true && activeSession.remoteFiles.length === 0))
+  const showRemoteDirectoryLoading = isRemoteDirectoryLoading || activeSession.remoteFilesLoading === true
   const [activeView, setActiveView] = useState<'file' | 'command' | 'tunnel'>('file')
   const [localPaneWidth, setLocalPaneWidth] = useState(214)
   const [localPathInput, setLocalPathInput] = useState(localPath)
@@ -305,7 +303,7 @@ export function FileManager({
   }, [activeSession.remoteFiles, isRemoteConnected, remoteSort])
 
   const selectedRemoteItems = activeSession.remoteFiles.filter((item) => selectedRemotePaths.includes(item.path))
-  const selectedRemoteFileItems = selectedRemoteItems.filter((item) => item.type === 'file')
+  const selectedRemoteDownloadItems = selectedRemoteItems.filter((item) => item.name !== '..')
   const contextLocalItem =
     contextMenu?.pane === 'local' ? (localItems.find((item) => item.path === contextMenu.path) ?? null) : null
   const contextRemoteItem =
@@ -339,7 +337,7 @@ export function FileManager({
   const canCopyContextItems = contextSelectionCount > 0
   const canCopyContextPath = Boolean(singleContextItem && !isMultiContextSelection)
   const canCutContextItems = contextSelectionCount > 0
-  const canDownloadContextItems = isRemoteConnected && contextRemoteSelection.some((item) => item.type === 'file')
+  const canDownloadContextItems = isRemoteConnected && contextRemoteSelection.length > 0
   const canPasteIntoContextPane =
     contextMenu?.pane === 'local' ? canPasteToLocal : isRemoteConnected && canPasteToRemote
   const canUploadContextItems =
@@ -414,7 +412,7 @@ export function FileManager({
     }
 
     const draggedPaths = parseDraggedPaths(draggedRemotePayload)
-    const items = activeSession.remoteFiles.filter((row) => draggedPaths.includes(row.path) && row.type === 'file')
+    const items = activeSession.remoteFiles.filter((row) => draggedPaths.includes(row.path) && row.name !== '..')
     if (items.length) {
       onDownloadFiles(items, localPath)
     }
@@ -658,8 +656,8 @@ export function FileManager({
             <button
               title={t.downloadTo}
               type="button"
-              disabled={!isRemoteConnected || !selectedRemoteFileItems.length}
-              onClick={() => onDownloadFiles(selectedRemoteFileItems)}
+              disabled={!isRemoteConnected || !selectedRemoteDownloadItems.length}
+              onClick={() => onDownloadFiles(selectedRemoteDownloadItems)}
             >
               <AppIcon name="download" />
             </button>

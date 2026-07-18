@@ -3,18 +3,23 @@ pub mod services;
 pub mod sessions;
 pub mod storage;
 
-#[cfg(target_os = "macos")]
+use crate::commands::OpenWindowInput;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{atomic::AtomicBool, atomic::Ordering, Mutex},
+};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::image::Image;
 use tauri::{
-    menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
+    menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    window::Color, AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder, WindowEvent, Wry,
+    window::Color,
+    AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    WindowEvent, Wry,
 };
 use thiserror::Error;
+use tokio::sync::oneshot;
 use url::form_urlencoded::Serializer;
-use crate::commands::OpenWindowInput;
-use std::{collections::{HashMap, HashSet}, sync::Mutex};
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -46,8 +51,19 @@ impl serde::Serialize for AppError {
 /// lifecycle transition instead of a renderer-only no-op, and prevents two
 /// close dialogs from being emitted for the same editor window.
 #[derive(Default)]
+struct FileEditorCloseState {
+    pending_labels: HashSet<String>,
+    waiters: HashMap<String, Vec<oneshot::Sender<bool>>>,
+}
+
+#[derive(Default)]
 pub(crate) struct FileEditorCloseRegistry {
-    pending_labels: Mutex<HashSet<String>>,
+    state: Mutex<FileEditorCloseState>,
+}
+
+#[derive(Default)]
+pub(crate) struct QuitPreparationRegistry {
+    in_progress: AtomicBool,
 }
 
 /// Windows hidden together with the main window must be restored together as
@@ -60,26 +76,108 @@ struct HiddenWithMainRegistry {
 
 impl FileEditorCloseRegistry {
     fn request(&self, label: &str) -> bool {
-        self.pending_labels
+        self.state
             .lock()
             .expect("file editor close registry lock poisoned")
+            .pending_labels
             .insert(label.to_string())
     }
 
-    fn resolve(&self, label: &str) {
-        self.pending_labels
+    fn request_and_wait(&self, label: &str) -> (bool, oneshot::Receiver<bool>) {
+        let (sender, receiver) = oneshot::channel();
+        let mut state = self
+            .state
             .lock()
-            .expect("file editor close registry lock poisoned")
-            .remove(label);
+            .expect("file editor close registry lock poisoned");
+        let should_emit = state.pending_labels.insert(label.to_string());
+        state
+            .waiters
+            .entry(label.to_string())
+            .or_default()
+            .push(sender);
+        (should_emit, receiver)
+    }
+
+    fn resolve(&self, label: &str, approved: bool) {
+        let waiters = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("file editor close registry lock poisoned");
+            state.pending_labels.remove(label);
+            state.waiters.remove(label).unwrap_or_default()
+        };
+        for waiter in waiters {
+            let _ = waiter.send(approved);
+        }
+    }
+}
+
+impl QuitPreparationRegistry {
+    pub(crate) fn try_begin(&self) -> bool {
+        self.in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.in_progress.store(false, Ordering::Release);
     }
 }
 
 pub(crate) fn request_file_editor_close(app: &AppHandle<Wry>, window: &WebviewWindow<Wry>) -> bool {
-    app.state::<FileEditorCloseRegistry>().request(window.label())
+    app.state::<FileEditorCloseRegistry>()
+        .request(window.label())
 }
 
 pub(crate) fn resolve_file_editor_close(app: &AppHandle<Wry>, window: &WebviewWindow<Wry>) {
-    app.state::<FileEditorCloseRegistry>().resolve(window.label());
+    app.state::<FileEditorCloseRegistry>()
+        .resolve(window.label(), true);
+}
+
+pub(crate) fn cancel_file_editor_close(app: &AppHandle<Wry>, window: &WebviewWindow<Wry>) {
+    app.state::<FileEditorCloseRegistry>()
+        .resolve(window.label(), false);
+}
+
+/// Ask every standalone editor to resolve its dirty state before the app tears
+/// down transfers or sessions. A cancel from any editor aborts the whole quit.
+pub(crate) async fn request_file_editors_for_quit(app: &AppHandle<Wry>) -> Result<bool, AppError> {
+    let mut labels = app
+        .webview_windows()
+        .into_keys()
+        .filter(|label| label.starts_with("file-editor-"))
+        .collect::<Vec<_>>();
+    labels.sort();
+
+    for label in labels {
+        let Some(window) = app.get_webview_window(&label) else {
+            continue;
+        };
+        let (should_emit, resolution) = app
+            .state::<FileEditorCloseRegistry>()
+            .request_and_wait(&label);
+        if should_emit {
+            if let Err(error) = window.emit("app:file-editor-close-request", ()) {
+                // Do not leave a stale pending label/waiter behind. A later
+                // quit request must be able to ask this editor again.
+                app.state::<FileEditorCloseRegistry>()
+                    .resolve(&label, false);
+                return Err(AppError::Window(error.to_string()));
+            }
+        }
+        match resolution.await {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(_) if app.get_webview_window(&label).is_none() => {}
+            Err(_) => {
+                return Err(AppError::Window(format!(
+                    "File editor close request ended without a decision: {label}"
+                )))
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Per-window zoom is not exposed by Wry as a getter. Store the scale we last
@@ -106,13 +204,232 @@ impl TryFrom<&str> for WindowMenuKind {
             "file" => Ok(Self::File),
             "view" => Ok(Self::View),
             "window" => Ok(Self::Window),
-            _ => Err(AppError::Command(format!("Unsupported window menu: {value}"))),
+            _ => Err(AppError::Command(format!(
+                "Unsupported window menu: {value}"
+            ))),
         }
     }
 }
 
 fn localized<'a>(is_english: bool, english: &'a str, chinese: &'a str) -> &'a str {
-    if is_english { english } else { chinese }
+    if is_english {
+        english
+    } else {
+        chinese
+    }
+}
+
+fn tray_menu_labels(is_english: bool) -> [&'static str; 4] {
+    [
+        localized(is_english, "Show Main Window", "显示主窗口"),
+        localized(is_english, "Connection Manager", "连接管理器"),
+        localized(is_english, "Command Manager", "命令管理器"),
+        localized(is_english, "Quit FileTerm", "退出 FileTerm"),
+    ]
+}
+
+fn build_tray_menu(app: &AppHandle<Wry>, is_english: bool) -> Result<Menu<Wry>, AppError> {
+    let [show_main_label, connection_manager_label, command_manager_label, quit_label] =
+        tray_menu_labels(is_english);
+    let show_main = MenuItemBuilder::with_id("tray-show-main", show_main_label)
+        .build(app)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    let connection_manager =
+        MenuItemBuilder::with_id("tray-connection-manager", connection_manager_label)
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
+    let command_manager = MenuItemBuilder::with_id("tray-command-manager", command_manager_label)
+        .build(app)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    let quit = MenuItemBuilder::with_id("tray-quit", quit_label)
+        .build(app)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+
+    MenuBuilder::new(app)
+        .item(&show_main)
+        .separator()
+        .item(&connection_manager)
+        .item(&command_manager)
+        .separator()
+        .item(&quit)
+        .build()
+        .map_err(|error| AppError::Window(error.to_string()))
+}
+
+pub(crate) fn install_localized_tray_menu(
+    app: &AppHandle<Wry>,
+    is_english: bool,
+) -> Result<(), AppError> {
+    let Some(tray) = app.tray_by_id("main") else {
+        return Ok(());
+    };
+    tray.set_menu(Some(build_tray_menu(app, is_english)?))
+        .map_err(|error| AppError::Window(error.to_string()))
+}
+
+fn build_application_menu(app: &AppHandle<Wry>, is_english: bool) -> Result<Menu<Wry>, AppError> {
+    let (quit_accelerator, close_accelerator) = application_menu_accelerators(std::env::consts::OS);
+    let new_connection_menu = MenuItemBuilder::with_id(
+        "new-connection",
+        localized(is_english, "New Connection", "新建连接"),
+    )
+    .accelerator("CmdOrCtrl+N")
+    .build(app)
+    .map_err(|error| AppError::Window(error.to_string()))?;
+    let connection_manager_menu = MenuItemBuilder::with_id(
+        "connection-manager",
+        localized(is_english, "Connection Manager", "连接管理器"),
+    )
+    .accelerator("CmdOrCtrl+Shift+C")
+    .build(app)
+    .map_err(|error| AppError::Window(error.to_string()))?;
+    let command_manager_menu = MenuItemBuilder::with_id(
+        "command-manager",
+        localized(is_english, "Command Manager", "命令管理器"),
+    )
+    .accelerator("CmdOrCtrl+Shift+M")
+    .build(app)
+    .map_err(|error| AppError::Window(error.to_string()))?;
+
+    let file_submenu_builder = SubmenuBuilder::new(app, localized(is_english, "File", "文件"))
+        .item(&new_connection_menu)
+        .item(&connection_manager_menu)
+        .item(&command_manager_menu);
+    #[cfg(not(target_os = "macos"))]
+    let file_submenu_builder = file_submenu_builder.separator().item(
+        &MenuItemBuilder::with_id(
+            "quit",
+            localized(is_english, "Exit FileTerm", "退出 FileTerm"),
+        )
+        .accelerator(quit_accelerator)
+        .build(app)
+        .map_err(|error| AppError::Window(error.to_string()))?,
+    );
+    let file_submenu = file_submenu_builder
+        .build()
+        .map_err(|error| AppError::Window(error.to_string()))?;
+
+    // WebKit routes the standard Cmd/Ctrl editing accelerators through native
+    // predefined items. Explicit labels make these items follow FileTerm's
+    // locale instead of the host process locale.
+    let edit_undo = PredefinedMenuItem::undo(app, Some(localized(is_english, "Undo", "撤销")))
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    let edit_redo = PredefinedMenuItem::redo(app, Some(localized(is_english, "Redo", "重做")))
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    let edit_cut = PredefinedMenuItem::cut(app, Some(localized(is_english, "Cut", "剪切")))
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    let edit_copy = PredefinedMenuItem::copy(app, Some(localized(is_english, "Copy", "复制")))
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    let edit_paste = PredefinedMenuItem::paste(app, Some(localized(is_english, "Paste", "粘贴")))
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    let edit_select_all =
+        PredefinedMenuItem::select_all(app, Some(localized(is_english, "Select All", "全选")))
+            .map_err(|error| AppError::Window(error.to_string()))?;
+    let edit_submenu = SubmenuBuilder::new(app, localized(is_english, "Edit", "编辑"))
+        .item(&edit_undo)
+        .item(&edit_redo)
+        .separator()
+        .item(&edit_cut)
+        .item(&edit_copy)
+        .item(&edit_paste)
+        .separator()
+        .item(&edit_select_all)
+        .build()
+        .map_err(|error| AppError::Window(error.to_string()))?;
+
+    let window_minimize_menu = MenuItemBuilder::with_id(
+        "window-minimize",
+        localized(is_english, "Minimize", "最小化"),
+    )
+    .build(app)
+    .map_err(|error| AppError::Window(error.to_string()))?;
+    let window_close_menu = MenuItemBuilder::with_id(
+        "window-request-close",
+        localized(is_english, "Close Window", "关闭窗口"),
+    )
+    .accelerator(close_accelerator)
+    .build(app)
+    .map_err(|error| AppError::Window(error.to_string()))?;
+    let window_submenu_builder = SubmenuBuilder::new(app, localized(is_english, "Window", "窗口"))
+        .item(&window_minimize_menu)
+        .separator()
+        .item(&window_close_menu);
+    #[cfg(target_os = "macos")]
+    let window_submenu_builder = window_submenu_builder.separator().item(
+        &PredefinedMenuItem::bring_all_to_front(
+            app,
+            Some(localized(is_english, "Bring All to Front", "全部置于顶层")),
+        )
+        .map_err(|error| AppError::Window(error.to_string()))?,
+    );
+    let window_submenu = window_submenu_builder
+        .build()
+        .map_err(|error| AppError::Window(error.to_string()))?;
+
+    let menu_builder = MenuBuilder::new(app);
+    #[cfg(target_os = "macos")]
+    let menu_builder = {
+        let about = PredefinedMenuItem::about(
+            app,
+            Some(localized(is_english, "About FileTerm", "关于 FileTerm")),
+            None,
+        )
+        .map_err(|error| AppError::Window(error.to_string()))?;
+        let services =
+            PredefinedMenuItem::services(app, Some(localized(is_english, "Services", "服务")))
+                .map_err(|error| AppError::Window(error.to_string()))?;
+        let hide = PredefinedMenuItem::hide(
+            app,
+            Some(localized(is_english, "Hide FileTerm", "隐藏 FileTerm")),
+        )
+        .map_err(|error| AppError::Window(error.to_string()))?;
+        let hide_others = PredefinedMenuItem::hide_others(
+            app,
+            Some(localized(is_english, "Hide Others", "隐藏其他")),
+        )
+        .map_err(|error| AppError::Window(error.to_string()))?;
+        let show_all =
+            PredefinedMenuItem::show_all(app, Some(localized(is_english, "Show All", "全部显示")))
+                .map_err(|error| AppError::Window(error.to_string()))?;
+        // Keep quit on FileTerm's confirmation/transfer-cleanup path instead
+        // of using the predefined item, which would terminate immediately.
+        let quit = MenuItemBuilder::with_id(
+            "quit",
+            localized(is_english, "Quit FileTerm", "退出 FileTerm"),
+        )
+        .accelerator(quit_accelerator)
+        .build(app)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+        let app_submenu = SubmenuBuilder::new(app, "FileTerm")
+            .item(&about)
+            .separator()
+            .item(&services)
+            .separator()
+            .item(&hide)
+            .item(&hide_others)
+            .item(&show_all)
+            .separator()
+            .item(&quit)
+            .build()
+            .map_err(|error| AppError::Window(error.to_string()))?;
+        menu_builder.item(&app_submenu)
+    };
+    menu_builder
+        .item(&file_submenu)
+        .item(&edit_submenu)
+        .item(&window_submenu)
+        .build()
+        .map_err(|error| AppError::Window(error.to_string()))
+}
+
+pub(crate) fn install_localized_application_menu(
+    app: &AppHandle<Wry>,
+    is_english: bool,
+) -> Result<(), AppError> {
+    let menu = build_application_menu(app, is_english)?;
+    app.set_menu(menu)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    Ok(())
 }
 
 /// Match Electron's platform-native window shortcuts. macOS owns Cmd+Q/W;
@@ -185,7 +502,9 @@ pub(crate) fn show_window_context_menu(
     y: f64,
 ) -> Result<(), AppError> {
     if !x.is_finite() || !y.is_finite() || x < 0.0 || y < 0.0 {
-        return Err(AppError::Command("Window menu position is invalid".to_string()));
+        return Err(AppError::Command(
+            "Window menu position is invalid".to_string(),
+        ));
     }
     let is_english = crate::commands::app_get_ui_preferences(app.clone())
         .map(|preferences| preferences.locale == "enUS")
@@ -196,7 +515,11 @@ pub(crate) fn show_window_context_menu(
         WindowMenuKind::App => {
             let version = MenuItemBuilder::with_id(
                 "app-version",
-                format!("Version {}", app.package_info().version),
+                format!(
+                    "{} {}",
+                    localized(is_english, "Version", "版本"),
+                    app.package_info().version
+                ),
             )
             .enabled(false)
             .build(app)
@@ -250,10 +573,13 @@ pub(crate) fn show_window_context_menu(
                 .map_err(|error| AppError::Window(error.to_string()))?
         }
         WindowMenuKind::View => {
-            let reload = MenuItemBuilder::with_id("view-reload", localized(is_english, "Reload", "重新加载"))
-                .accelerator("F5")
-                .build(app)
-                .map_err(|error| AppError::Window(error.to_string()))?;
+            let reload = MenuItemBuilder::with_id(
+                "view-reload",
+                localized(is_english, "Reload", "重新加载"),
+            )
+            .accelerator("F5")
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
             let reset_zoom = MenuItemBuilder::with_id(
                 "view-reset-zoom",
                 localized(is_english, "Actual Size", "实际大小"),
@@ -261,14 +587,18 @@ pub(crate) fn show_window_context_menu(
             .accelerator("CmdOrCtrl+0")
             .build(app)
             .map_err(|error| AppError::Window(error.to_string()))?;
-            let zoom_in = MenuItemBuilder::with_id("view-zoom-in", localized(is_english, "Zoom In", "放大"))
-                .accelerator("CmdOrCtrl+Plus")
-                .build(app)
-                .map_err(|error| AppError::Window(error.to_string()))?;
-            let zoom_out = MenuItemBuilder::with_id("view-zoom-out", localized(is_english, "Zoom Out", "缩小"))
-                .accelerator("CmdOrCtrl+-")
-                .build(app)
-                .map_err(|error| AppError::Window(error.to_string()))?;
+            let zoom_in =
+                MenuItemBuilder::with_id("view-zoom-in", localized(is_english, "Zoom In", "放大"))
+                    .accelerator("CmdOrCtrl+Plus")
+                    .build(app)
+                    .map_err(|error| AppError::Window(error.to_string()))?;
+            let zoom_out = MenuItemBuilder::with_id(
+                "view-zoom-out",
+                localized(is_english, "Zoom Out", "缩小"),
+            )
+            .accelerator("CmdOrCtrl+-")
+            .build(app)
+            .map_err(|error| AppError::Window(error.to_string()))?;
 
             let builder = MenuBuilder::new(app).item(&reload);
             #[cfg(debug_assertions)]
@@ -389,7 +719,117 @@ fn child_window_should_be_transparent(platform: &str, decorations: bool) -> bool
     platform == "macos" && !decorations
 }
 
+#[cfg(target_os = "windows")]
+fn prepare_windows_icon(size: u32, content_size: u32) -> Result<Image<'static>, AppError> {
+    use image::{imageops, imageops::FilterType, RgbaImage};
+
+    let source = image::load_from_memory(include_bytes!("../../build/icon.png"))
+        .map_err(|error| AppError::Window(error.to_string()))?
+        .into_rgba8();
+    let (mut min_x, mut min_y) = (source.width(), source.height());
+    let (mut max_x, mut max_y) = (0, 0);
+    let mut has_visible_pixel = false;
+
+    for (x, y, pixel) in source.enumerate_pixels() {
+        if pixel[3] > 8 {
+            has_visible_pixel = true;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+
+    if !has_visible_pixel {
+        return Err(AppError::Window(
+            "Windows icon has no visible pixels".to_string(),
+        ));
+    }
+
+    let cropped =
+        imageops::crop_imm(&source, min_x, min_y, max_x - min_x + 1, max_y - min_y + 1).to_image();
+    let scale = content_size as f64 / cropped.width().max(cropped.height()) as f64;
+    let resized_width = (cropped.width() as f64 * scale).round().max(1.0) as u32;
+    let resized_height = (cropped.height() as f64 * scale).round().max(1.0) as u32;
+    let resized = imageops::resize(
+        &cropped,
+        resized_width,
+        resized_height,
+        FilterType::Lanczos3,
+    );
+    let mut canvas = RgbaImage::new(size, size);
+    imageops::overlay(
+        &mut canvas,
+        &resized,
+        ((size - resized_width) / 2) as i64,
+        ((size - resized_height) / 2) as i64,
+    );
+
+    Ok(Image::new_owned(canvas.into_raw(), size, size))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_app_icon(scale_factor: f64) -> Result<Image<'static>, AppError> {
+    // Windows uses a 32px large icon at 100% scaling. Supplying the matching
+    // physical size avoids a second taskbar resample at 125%/150%/200% DPI.
+    let size = (32.0 * scale_factor).round().clamp(32.0, 128.0) as u32;
+    let content_size = (size as f64 * 0.96).round() as u32;
+    prepare_windows_icon(size, content_size)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_tray_icon(scale_factor: f64) -> Result<Image<'static>, AppError> {
+    // Electron feeds Tray a 16x16 logical icon on Windows. Tauri accepts raw
+    // physical pixels, so account for Windows DPI here to avoid the shell
+    // upscaling a fixed 16px bitmap on 125%/150%/200% displays.
+    let size = (16.0 * scale_factor).round().clamp(16.0, 64.0) as u32;
+    let content_size = (size as f64 * 0.94).round() as u32;
+    prepare_windows_icon(size, content_size)
+}
+
+#[cfg(target_os = "windows")]
+fn prefer_windows_native_rounded_corners(window: &WebviewWindow<Wry>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::{
+        Foundation::HWND,
+        Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+            DWM_WINDOW_CORNER_PREFERENCE,
+        },
+    };
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let hwnd = match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => handle.hwnd.get() as HWND,
+        _ => return,
+    };
+
+    // SetWindowRgn uses a 1-bit GDI mask, which makes a large custom radius
+    // visibly jagged. Let DWM own the outline instead: it is anti-aliased,
+    // adapts to DPI, and automatically becomes square while maximized.
+    let preference: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+            &preference as *const _ as *const std::ffi::c_void,
+            std::mem::size_of_val(&preference) as u32,
+        );
+    }
+}
+
 pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), AppError> {
+    if input.kind == "file-editor"
+        && input.source.as_deref() == Some("remote")
+        && input.tab_id.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(AppError::Window(
+            "远程文件编辑器缺少会话标识，已阻止打开".to_string(),
+        ));
+    }
+
     let label = window_label(&input);
     if let Some(window) = app.get_webview_window(&label) {
         // Match Electron's form lifecycle: opening a form always reloads it
@@ -427,10 +867,10 @@ pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), 
         _ => return Ok(()),
     };
 
-    // Frameless macOS windows need a transparent native surface so the
+    // Frameless macOS windows use a transparent native surface so the
     // renderer's rounded standalone frame can clip the four corners. Keep
-    // Windows/Linux opaque: transparent Wry windows there can flash during
-    // startup and have different shadow/compositor behaviour.
+    // Windows opaque: WebView2 otherwise exposes the desktop through those
+    // corners when the renderer applies its rounded frame.
     let transparent = child_window_should_be_transparent(std::env::consts::OS, decorations);
     let background_color = if transparent {
         Color(0, 0, 0, 0)
@@ -456,10 +896,19 @@ pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), 
             crate::services::logging::error(
                 app,
                 "window",
-                format!("create failed label={label} kind={} error={error}", input.kind),
+                format!(
+                    "create failed label={label} kind={} error={error}",
+                    input.kind
+                ),
             );
             AppError::Window(error.to_string())
         })?;
+    #[cfg(target_os = "windows")]
+    window
+        .set_icon(windows_app_icon(window.scale_factor().unwrap_or(1.0))?)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    #[cfg(target_os = "windows")]
+    prefer_windows_native_rounded_corners(&window);
     crate::services::logging::info(
         app,
         "window",
@@ -477,6 +926,23 @@ pub fn open_child_window(app: &AppHandle, input: OpenWindowInput) -> Result<(), 
         });
     }
     Ok(())
+}
+
+fn open_child_window_from_native_event(app: &AppHandle, input: OpenWindowInput) {
+    // Tauri/WebView2 documents the same Windows deadlock for synchronous
+    // event handlers as for synchronous commands. Tray and native menu
+    // callbacks therefore hand the blocking builder work to a worker thread.
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let kind = input.kind.clone();
+        if let Err(error) = open_child_window(&app, input) {
+            crate::services::logging::error(
+                &app,
+                "window",
+                format!("native request failed kind={kind} error={error}"),
+            );
+        }
+    });
 }
 
 fn show_main_window(app: &AppHandle<Wry>) {
@@ -520,11 +986,9 @@ pub(crate) fn hide_main_window_and_children(app: &AppHandle<Wry>) {
 }
 
 fn toggle_main_window_visibility(app: &AppHandle<Wry>) {
-    let should_hide = app
-        .get_webview_window("main")
-        .is_some_and(|window| {
-            window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
-        });
+    let should_hide = app.get_webview_window("main").is_some_and(|window| {
+        window.is_visible().unwrap_or(false) && window.is_focused().unwrap_or(false)
+    });
     if should_hide {
         hide_main_window_and_children(app);
     } else {
@@ -543,8 +1007,15 @@ pub(crate) fn request_main_window_close(app: &AppHandle<Wry>, is_quit: bool) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // Windows packages use Tauri's signed updater. macOS deliberately keeps
+    // the Release-page flow so users choose the GitHub download themselves.
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+
+    builder
         .setup(|app| {
+            crate::storage::migrate_legacy_data_once(app.handle())?;
             crate::services::logging::init(app.handle());
             crate::services::logging::info(
                 app.handle(),
@@ -558,10 +1029,12 @@ pub fn run() {
             );
             app.manage(crate::services::WorkspaceState::default());
             app.manage(FileEditorCloseRegistry::default());
+            app.manage(QuitPreparationRegistry::default());
             app.manage(HiddenWithMainRegistry::default());
             app.manage(WindowMenuState::default());
 
-            let main_window = app.get_webview_window("main")
+            let main_window = app
+                .get_webview_window("main")
                 .ok_or_else(|| "Failed to find main window".to_string())?;
 
             // ── Platform-specific window chrome ────────────────────────────
@@ -574,131 +1047,46 @@ pub fn run() {
             #[cfg(target_os = "windows")]
             {
                 let _ = main_window.set_decorations(false);
+                prefer_windows_native_rounded_corners(&main_window);
+                main_window
+                    .set_icon(
+                        windows_app_icon(main_window.scale_factor().unwrap_or(1.0))
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
             }
 
             let app_handle = app.handle().clone();
-            main_window.on_window_event(move |event| {
-                match event {
-                    WindowEvent::CloseRequested { api, .. } => {
-                        crate::services::logging::info(
-                            &app_handle,
-                            "window",
-                            "main close requested",
-                        );
-                        api.prevent_close();
-                        request_main_window_close(&app_handle, false);
-                    }
-                    WindowEvent::Resized(_) => {
-                        if let Some(window) = app_handle.get_webview_window("main") {
-                            let _ = app_handle.emit(
-                                "app:window-maximized-change",
-                                window.is_maximized().unwrap_or(false),
-                            );
-                        }
-                    }
-                    _ => {}
+            main_window.on_window_event(move |event| match event {
+                WindowEvent::CloseRequested { api, .. } => {
+                    crate::services::logging::info(&app_handle, "window", "main close requested");
+                    api.prevent_close();
+                    request_main_window_close(&app_handle, false);
                 }
+                WindowEvent::Resized(_) => {
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = app_handle.emit(
+                            "app:window-maximized-change",
+                            window.is_maximized().unwrap_or(false),
+                        );
+                    }
+                }
+                _ => {}
             });
 
-            // Native menu building. Keep the shortcuts on the same main-side
-            // lifecycle paths as Electron: Cmd+Q / Alt+F4 asks the renderer
-            // to confirm application exit, while Cmd/Ctrl+W closes the active
-            // workspace item (or a focused child window).
-            let (quit_accelerator, close_accelerator) = application_menu_accelerators(std::env::consts::OS);
-            let new_connection_menu = MenuItemBuilder::with_id("new-connection", "新建连接")
-                .accelerator("CmdOrCtrl+N")
-                .build(app)
-                .map_err(|error| error.to_string())?;
-            let connection_manager_menu = MenuItemBuilder::with_id("connection-manager", "连接管理器")
-                .accelerator("CmdOrCtrl+Shift+C")
-                .build(app)
-                .map_err(|error| error.to_string())?;
-            let command_manager_menu = MenuItemBuilder::with_id("command-manager", "命令管理器")
-                .accelerator("CmdOrCtrl+Shift+P")
-                .build(app)
+            // Native menu building. Keep shortcuts on the same main-side
+            // lifecycle paths as Electron and build labels from persisted UI
+            // preferences so the native chrome matches the renderer locale.
+            let is_english = crate::commands::app_get_ui_preferences(app.handle().clone())
+                .map(|preferences| preferences.locale == "enUS")
+                .unwrap_or(false);
+            install_localized_application_menu(app.handle(), is_english)
                 .map_err(|error| error.to_string())?;
 
-            let file_submenu = SubmenuBuilder::new(app, "文件")
-                .item(&new_connection_menu)
-                .item(&connection_manager_menu)
-                .item(&command_manager_menu)
-                .separator()
-                .item(
-                    &MenuItemBuilder::with_id("quit", "退出 FileTerm")
-                        .accelerator(quit_accelerator)
-                        .build(app)
-                        .map_err(|error| error.to_string())?,
-                )
-                .build()
-                .map_err(|error| error.to_string())?;
-
-            // WebKit routes the standard Cmd/Ctrl editing accelerators through
-            // native predefined items. Electron gets these from its Edit menu;
-            // without the equivalent Tauri menu, inputs in standalone child
-            // windows ignore Cmd+A/C/V even though their DOM handlers are fine.
-            let edit_undo = PredefinedMenuItem::undo(app, None).map_err(|error| error.to_string())?;
-            let edit_redo = PredefinedMenuItem::redo(app, None).map_err(|error| error.to_string())?;
-            let edit_cut = PredefinedMenuItem::cut(app, None).map_err(|error| error.to_string())?;
-            let edit_copy = PredefinedMenuItem::copy(app, None).map_err(|error| error.to_string())?;
-            let edit_paste = PredefinedMenuItem::paste(app, None).map_err(|error| error.to_string())?;
-            let edit_select_all = PredefinedMenuItem::select_all(app, None).map_err(|error| error.to_string())?;
-            let edit_submenu = SubmenuBuilder::new(app, "编辑")
-                .item(&edit_undo)
-                .item(&edit_redo)
-                .separator()
-                .item(&edit_cut)
-                .item(&edit_copy)
-                .item(&edit_paste)
-                .separator()
-                .item(&edit_select_all)
-                .build()
-                .map_err(|error| error.to_string())?;
-
-            let window_minimize_menu = MenuItemBuilder::with_id("window-minimize", "最小化")
-                .build(app)
-                .map_err(|error| error.to_string())?;
-            let window_close_menu = MenuItemBuilder::with_id("window-request-close", "关闭窗口")
-                .accelerator(close_accelerator)
-                .build(app)
-                .map_err(|error| error.to_string())?;
-            let window_submenu = SubmenuBuilder::new(app, "窗口")
-                .item(&window_minimize_menu)
-                .separator()
-                .item(&window_close_menu)
-                .build()
-                .map_err(|error| error.to_string())?;
-
-            let menu = MenuBuilder::new(app)
-                .item(&file_submenu)
-                .item(&edit_submenu)
-                .item(&window_submenu)
-                .build()
-                .map_err(|error| error.to_string())?;
-            app.set_menu(menu).map_err(|error| error.to_string())?;
-
-            // Tray configuration
-            let tray_connection_manager = MenuItemBuilder::with_id("tray-connection-manager", "连接管理器")
-                .build(app)
-                .map_err(|error| error.to_string())?;
-            let tray_command_manager = MenuItemBuilder::with_id("tray-command-manager", "命令管理器")
-                .build(app)
-                .map_err(|error| error.to_string())?;
-            let tray_show_main = MenuItemBuilder::with_id("tray-show-main", "显示主窗口")
-                .build(app)
-                .map_err(|error| error.to_string())?;
-            let tray_quit = MenuItemBuilder::with_id("tray-quit", "退出 FileTerm")
-                .build(app)
-                .map_err(|error| error.to_string())?;
-
-            let tray_menu = MenuBuilder::new(app)
-                .item(&tray_show_main)
-                .separator()
-                .item(&tray_connection_manager)
-                .item(&tray_command_manager)
-                .separator()
-                .item(&tray_quit)
-                .build()
-                .map_err(|error| error.to_string())?;
+            // Tray labels use the same persisted locale as the application
+            // menu and are rebuilt when preferences change.
+            let tray_menu =
+                build_tray_menu(app.handle(), is_english).map_err(|error| error.to_string())?;
 
             #[cfg(target_os = "macos")]
             // tray-icon renders the source at 18 logical points on macOS.
@@ -706,7 +1094,10 @@ pub fn run() {
             // one physical source pixel per output pixel on @2x displays.
             let tray_icon = Image::from_bytes(include_bytes!("../../build/trayTemplate@2x.png"))
                 .map_err(|error| error.to_string())?;
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(target_os = "windows")]
+            let tray_icon = windows_tray_icon(main_window.scale_factor().unwrap_or(1.0))
+                .map_err(|error| error.to_string())?;
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let tray_icon = app
                 .default_window_icon()
                 .cloned()
@@ -720,7 +1111,7 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "tray-connection-manager" => {
-                        let _ = open_child_window(
+                        open_child_window_from_native_event(
                             app,
                             OpenWindowInput {
                                 kind: "connection-manager".to_string(),
@@ -737,7 +1128,7 @@ pub fn run() {
                         );
                     }
                     "tray-command-manager" => {
-                        let _ = open_child_window(
+                        open_child_window_from_native_event(
                             app,
                             OpenWindowInput {
                                 kind: "command-manager".to_string(),
@@ -776,7 +1167,7 @@ pub fn run() {
         })
         .on_menu_event(|app, event| match event.id().as_ref() {
             "new-connection" => {
-                let _ = open_child_window(
+                open_child_window_from_native_event(
                     app,
                     OpenWindowInput {
                         kind: "connection-form".to_string(),
@@ -793,7 +1184,7 @@ pub fn run() {
                 );
             }
             "connection-manager" => {
-                let _ = open_child_window(
+                open_child_window_from_native_event(
                     app,
                     OpenWindowInput {
                         kind: "connection-manager".to_string(),
@@ -810,7 +1201,7 @@ pub fn run() {
                 );
             }
             "command-manager" => {
-                let _ = open_child_window(
+                open_child_window_from_native_event(
                     app,
                     OpenWindowInput {
                         kind: "command-manager".to_string(),
@@ -837,7 +1228,8 @@ pub fn run() {
             "view-reset-zoom" => update_focused_window_zoom(app, ZoomOperation::Reset),
             "view-zoom-in" => update_focused_window_zoom(app, ZoomOperation::In),
             "view-zoom-out" => update_focused_window_zoom(app, ZoomOperation::Out),
-            "view-toggle-devtools" => {
+            "view-toggle-devtools" =>
+            {
                 #[cfg(debug_assertions)]
                 if let Some(window) = focused_webview_window(app) {
                     if window.is_devtools_open() {
@@ -912,7 +1304,6 @@ pub fn run() {
             crate::commands::app_is_window_maximized,
             crate::commands::app_cancel_file_editor_close,
             crate::commands::app_show_window_menu,
-            
             // Phase 3 commands
             crate::commands::app_open_profile,
             crate::commands::app_activate_tab,
@@ -949,7 +1340,6 @@ pub fn run() {
             crate::commands::app_start_ssh_tunnel,
             crate::commands::app_stop_ssh_tunnel,
             crate::commands::app_delete_ssh_tunnel,
-
             // Phase 2: profile / folder / command CRUD
             crate::commands::app_create_profile,
             crate::commands::app_update_profile,
@@ -963,7 +1353,6 @@ pub fn run() {
             crate::commands::app_update_command_template,
             crate::commands::app_delete_command_template,
             crate::commands::app_execute_command_template,
-
             // Local files
             crate::sessions::local_files::app_list_local_directory,
             crate::sessions::local_files::app_read_local_file,
@@ -995,14 +1384,21 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        application_menu_accelerators, child_window_should_be_transparent, FileEditorCloseRegistry,
-        tray_icon_should_be_template, WindowMenuKind,
+        application_menu_accelerators, child_window_should_be_transparent,
+        tray_icon_should_be_template, tray_menu_labels, FileEditorCloseRegistry,
+        QuitPreparationRegistry, WindowMenuKind,
     };
+
+    #[cfg(target_os = "windows")]
+    use super::{windows_app_icon, windows_tray_icon};
 
     #[test]
     fn keeps_mac_and_non_mac_window_shortcuts_distinct() {
         assert_eq!(application_menu_accelerators("macos"), ("Cmd+Q", "Cmd+W"));
-        assert_eq!(application_menu_accelerators("windows"), ("Alt+F4", "Ctrl+W"));
+        assert_eq!(
+            application_menu_accelerators("windows"),
+            ("Alt+F4", "Ctrl+W")
+        );
         assert_eq!(application_menu_accelerators("linux"), ("Alt+F4", "Ctrl+W"));
     }
 
@@ -1013,20 +1409,60 @@ mod tests {
         assert!(!tray_icon_should_be_template("linux"));
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn prepares_windows_icons_like_the_electron_runtime() {
+        let app_icon = windows_app_icon(1.5).unwrap();
+        let tray_icon = windows_tray_icon(1.5).unwrap();
+
+        assert_eq!((app_icon.width(), app_icon.height()), (48, 48));
+        assert_eq!((tray_icon.width(), tray_icon.height()), (24, 24));
+    }
+
+    #[test]
+    fn localizes_every_tray_menu_entry() {
+        assert_eq!(
+            tray_menu_labels(false),
+            ["显示主窗口", "连接管理器", "命令管理器", "退出 FileTerm"]
+        );
+        assert_eq!(
+            tray_menu_labels(true),
+            [
+                "Show Main Window",
+                "Connection Manager",
+                "Command Manager",
+                "Quit FileTerm"
+            ]
+        );
+    }
+
     #[test]
     fn only_frameless_macos_child_windows_use_transparency() {
         assert!(child_window_should_be_transparent("macos", false));
         assert!(!child_window_should_be_transparent("macos", true));
         assert!(!child_window_should_be_transparent("windows", false));
+        assert!(!child_window_should_be_transparent("windows", true));
         assert!(!child_window_should_be_transparent("linux", false));
     }
 
     #[test]
     fn window_menu_kind_accepts_the_public_bridge_values_only() {
-        assert_eq!(WindowMenuKind::try_from("app").unwrap(), WindowMenuKind::App);
-        assert_eq!(WindowMenuKind::try_from("file").unwrap(), WindowMenuKind::File);
-        assert_eq!(WindowMenuKind::try_from("view").unwrap(), WindowMenuKind::View);
-        assert_eq!(WindowMenuKind::try_from("window").unwrap(), WindowMenuKind::Window);
+        assert_eq!(
+            WindowMenuKind::try_from("app").unwrap(),
+            WindowMenuKind::App
+        );
+        assert_eq!(
+            WindowMenuKind::try_from("file").unwrap(),
+            WindowMenuKind::File
+        );
+        assert_eq!(
+            WindowMenuKind::try_from("view").unwrap(),
+            WindowMenuKind::View
+        );
+        assert_eq!(
+            WindowMenuKind::try_from("window").unwrap(),
+            WindowMenuKind::Window
+        );
         assert!(WindowMenuKind::try_from("developer").is_err());
     }
 
@@ -1035,7 +1471,30 @@ mod tests {
         let registry = FileEditorCloseRegistry::default();
         assert!(registry.request("file-editor-a"));
         assert!(!registry.request("file-editor-a"));
-        registry.resolve("file-editor-a");
+        registry.resolve("file-editor-a", true);
         assert!(registry.request("file-editor-a"));
+    }
+
+    #[tokio::test]
+    async fn file_editor_close_registry_notifies_all_quit_waiters() {
+        let registry = FileEditorCloseRegistry::default();
+        let (should_emit, first) = registry.request_and_wait("file-editor-a");
+        let (should_emit_again, second) = registry.request_and_wait("file-editor-a");
+        assert!(should_emit);
+        assert!(!should_emit_again);
+
+        registry.resolve("file-editor-a", false);
+        assert!(!first.await.unwrap());
+        assert!(!second.await.unwrap());
+        assert!(registry.request("file-editor-a"));
+    }
+
+    #[test]
+    fn quit_preparation_registry_prevents_duplicate_runs_and_can_reset() {
+        let registry = QuitPreparationRegistry::default();
+        assert!(registry.try_begin());
+        assert!(!registry.try_begin());
+        registry.cancel();
+        assert!(registry.try_begin());
     }
 }

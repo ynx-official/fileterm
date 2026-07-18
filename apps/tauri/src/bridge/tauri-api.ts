@@ -1,4 +1,4 @@
-import { Channel, invoke } from '@tauri-apps/api/core'
+import { Channel, invoke, transformCallback } from '@tauri-apps/api/core'
 import { getName, getVersion } from '@tauri-apps/api/app'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import type {
@@ -25,17 +25,22 @@ import type {
   SshKeyImportResult,
   SshKeyMetadata,
   ImportSshKeyInput,
-  LocalFileItem
+  LocalFileItem,
+  SshForwardRule,
+  SshTunnelSnapshot,
+  CommandExecutionResult
 } from '@fileterm/core'
-
-const unsupported = (name: string, ..._args: unknown[]) =>
-  Promise.reject(new Error(`Tauri command not implemented yet: ${name}`))
 
 let latestNativeDropPaths: string[] = []
 let latestNativeDropAt = 0
 const terminalDataListeners = new Set<(payload: TerminalDataPayload) => void>()
 let terminalDataChannel: Channel<TerminalDataPayload> | null = null
 let terminalDataRegistration: Promise<void> | null = null
+
+function clearNativeDropFallback() {
+  latestNativeDropPaths = []
+  latestNativeDropAt = 0
+}
 
 function ensureTerminalDataChannel() {
   if (terminalDataChannel || terminalDataRegistration) {
@@ -94,6 +99,7 @@ void getCurrentWindow()
         new CustomEvent('fileterm:tauri-native-drop', {
           detail: {
             paths,
+            consume: clearNativeDropFallback,
             position: {
               x: event.payload.position.x,
               y: event.payload.position.y
@@ -102,10 +108,10 @@ void getCurrentWindow()
         })
       )
 
-      // The custom event is the primary path. Clear the fallback immediately
-      // so a second DOM drop callback cannot enqueue the same files twice.
-      latestNativeDropPaths = []
-      latestNativeDropAt = 0
+      // Keep the fallback until the renderer confirms that the native drop
+      // hit its remote-pane target. If coordinate probing or listener setup
+      // rejects this custom event, the following DOM drop can still consume
+      // the same absolute paths instead of silently doing nothing.
     }
   })
   .catch(() => undefined)
@@ -117,8 +123,7 @@ function takeNativeDropPaths(files: File[]) {
   // requiring equal counts made external macOS Finder drops look like no-op.
   if (isFresh && (files.length === 0 || latestNativeDropPaths.length === files.length)) {
     const paths = latestNativeDropPaths
-    latestNativeDropPaths = []
-    latestNativeDropAt = 0
+    clearNativeDropFallback()
     return paths
   }
   // 拿不到原生路径时返回空数组，而不是返回 file.name（仅文件名非完整路径，
@@ -135,55 +140,43 @@ function normalizePlatform(value: string) {
 }
 
 function subscribe<T>(eventName: string, listener: (payload: T) => void) {
-  // Tauri's `listen()` is async — under React strict mode (dev double-mount)
-  // the first listener's `listen()` promise may still be pending when the
-  // second mount registers another listener. If the first promise resolves
-  // after the cleanup, the underlying Tauri callback stays registered until
-  // `unlisten` IPC completes, and in that window the same event can be
-  // delivered to both the stale and the live listener — surfacing as
-  // duplicated terminal echo ("clear" → "clearclear") and double newlines.
-  //
-  // To close that window we register the callback id synchronously via
-  // `transformCallback`, so the cleanup path can revoke it immediately
-  // (without waiting on IPC), then drive `plugin:event|listen` /
-  // `plugin:event|unlisten` in the background.
-  const internals = (
-    window as unknown as {
-      __TAURI_INTERNALS__?: {
-        transformCallback?: (cb: (payload: unknown) => void) => number
-        unregisterCallback?: (id: number) => void
-      }
-    }
-  ).__TAURI_INTERNALS__
-
-  let revoked = false
-  let eventId: number | undefined
-  let pendingUnlisten = false
-
-  const cleanup = () => {
-    revoked = true
-    // Revoke the JS-side callback first so any in-flight event delivery
-    // (between `listen` resolving and `unlisten` completing) becomes a
-    // no-op even if the backend still has the listener registered.
-    if (callbackId !== undefined && internals?.unregisterCallback) {
-      internals.unregisterCallback(callbackId)
-    }
-    if (eventId !== undefined && !pendingUnlisten) {
-      pendingUnlisten = true
-      void invoke('plugin:event|unlisten', { event: eventName, eventId }).catch(() => undefined)
-    }
+  // React strict mode can clean up the first mount before Tauri's asynchronous
+  // listen registration resolves. Keep the callback inert immediately, ask
+  // the backend to remove the event id, and only then release the JS callback.
+  // Tauri's public unlisten helper currently performs those last two steps in
+  // the opposite order, leaving a race where an in-flight event tries to call
+  // an id that no longer exists during Windows hot reloads and child-window
+  // teardown.
+  const internals = window as unknown as {
+    __TAURI_INTERNALS__?: { unregisterCallback?: (id: number) => void }
+    __TAURI_EVENT_PLUGIN_INTERNALS__?: { unregisterListener?: (event: string, eventId: number) => void }
   }
+  let active = true
+  let eventId: number | null = null
+  let unlistenStarted = false
 
-  if (!internals?.transformCallback) {
-    // Fallback: no Tauri internals available yet — no-op subscription.
-    return () => undefined
-  }
-
-  const callbackId = internals.transformCallback((event) => {
-    if (revoked) return
+  const callbackId = transformCallback((event: unknown) => {
+    if (!active) return
     const payload = (event as { payload?: T })?.payload
     if (payload !== undefined) listener(payload)
   })
+
+  const unregisterFrontend = (id: number) => {
+    internals.__TAURI_EVENT_PLUGIN_INTERNALS__?.unregisterListener?.(eventName, id)
+    internals.__TAURI_INTERNALS__?.unregisterCallback?.(callbackId)
+  }
+
+  const stopListening = () => {
+    if (eventId === null || unlistenStarted) return
+    unlistenStarted = true
+    const registeredEventId = eventId
+    void invoke<void>('plugin:event|unlisten', { event: eventName, eventId: registeredEventId })
+      .then(() => unregisterFrontend(registeredEventId))
+      .catch(() => {
+        // Keep the inert callback registered if the backend did not confirm
+        // removal. This is preferable to an event targeting a missing id.
+      })
+  }
 
   void invoke<number>('plugin:event|listen', {
     event: eventName,
@@ -191,36 +184,32 @@ function subscribe<T>(eventName: string, listener: (payload: T) => void) {
     handler: callbackId
   })
     .then((id) => {
-      if (revoked) {
-        // Already cleaned up — tell the backend to drop the listener.
-        eventId = id
-        pendingUnlisten = true
-        void invoke('plugin:event|unlisten', { event: eventName, eventId: id }).catch(() => undefined)
-      } else {
-        eventId = id
-      }
+      eventId = id
+      if (!active) stopListening()
     })
-    .catch(() => {
-      // If listen failed, revoke the callback so it doesn't leak.
-      if (callbackId !== undefined && internals.unregisterCallback) {
-        internals.unregisterCallback(callbackId)
-      }
-    })
+    .catch(() => internals.__TAURI_INTERNALS__?.unregisterCallback?.(callbackId))
 
-  return cleanup
+  return () => {
+    active = false
+    stopListening()
+  }
 }
 
-export function createTauriApi(): FileTermDesktopApi {
-  const userAgent = navigator.userAgent.toLowerCase()
-  const platform = userAgent.includes('mac') ? 'darwin' : userAgent.includes('win') ? 'win32' : 'linux'
-  const arch = 'unknown'
+export async function createTauriApi(): Promise<FileTermDesktopApi> {
+  const [nativePlatform, arch, runtimeVersion, appVersion, appName] = await Promise.all([
+    invoke<string>('app_get_platform'),
+    invoke<string>('app_get_arch'),
+    invoke<string>('app_get_runtime_version'),
+    getVersion(),
+    getName()
+  ])
   const api = {
-    platform,
+    platform: normalizePlatform(nativePlatform),
     arch,
-    appVersion: '0.0.0',
-    appName: 'FileTerm',
+    appVersion,
+    appName,
     runtimeName: 'Tauri',
-    runtimeVersion: '0.0.0',
+    runtimeVersion,
     isDesktop: true,
     getUpdateStatus: () => invoke<AppUpdateStatus>('app_get_update_status'),
     checkForUpdates: () => invoke<AppUpdateStatus>('app_check_for_updates'),
@@ -261,7 +250,7 @@ export function createTauriApi(): FileTermDesktopApi {
           source: input.source,
           path: input.path,
           name: input.name,
-          tab_id: input.tabId,
+          tabId: input.tabId,
           encoding: input.encoding
         }
       }),
@@ -401,7 +390,13 @@ export function createTauriApi(): FileTermDesktopApi {
       commandId: string,
       args: string[] = [],
       options?: { appendCarriageReturn?: boolean }
-    ) => invoke('app_execute_command_template', { tabId, commandId, args, options: options ?? null }),
+    ) =>
+      invoke<CommandExecutionResult>('app_execute_command_template', {
+        tabId,
+        commandId,
+        args,
+        options: options ?? null
+      }),
     openProfile: (profileId: string) => invoke<WorkspaceSnapshot>('app_open_profile', { profileId }),
     openProfileFromManager: (profileId: string) => invoke<WorkspaceSnapshot>('app_open_profile', { profileId }),
     activateTab: (tabId: string) => invoke<WorkspaceSnapshot>('app_activate_tab', { tabId }),
@@ -438,11 +433,15 @@ export function createTauriApi(): FileTermDesktopApi {
       invoke<void>('app_resolve_ssh_interaction', { requestId, response }),
     setRemoteFileAccessMode: (tabId: string, mode: 'user' | 'root', options?: RemoteFileAccessOptions) =>
       invoke<WorkspaceSnapshot>('app_set_remote_file_access_mode', { tabId, mode, options }),
-    listSshTunnels: (tabId: string) => invoke('app_list_ssh_tunnels', { tabId }),
-    createSshTunnel: (tabId: string, rule: unknown) => invoke('app_create_ssh_tunnel', { tabId, rule }),
-    startSshTunnel: (tabId: string, ruleId: string) => invoke('app_start_ssh_tunnel', { tabId, ruleId }),
-    stopSshTunnel: (tabId: string, ruleId: string) => invoke('app_stop_ssh_tunnel', { tabId, ruleId }),
-    deleteSshTunnel: (tabId: string, ruleId: string) => invoke('app_delete_ssh_tunnel', { tabId, ruleId }),
+    listSshTunnels: (tabId: string) => invoke<SshTunnelSnapshot[]>('app_list_ssh_tunnels', { tabId }),
+    createSshTunnel: (tabId: string, rule: SshForwardRule) =>
+      invoke<SshTunnelSnapshot[]>('app_create_ssh_tunnel', { tabId, rule }),
+    startSshTunnel: (tabId: string, ruleId: string) =>
+      invoke<SshTunnelSnapshot[]>('app_start_ssh_tunnel', { tabId, ruleId }),
+    stopSshTunnel: (tabId: string, ruleId: string) =>
+      invoke<SshTunnelSnapshot[]>('app_stop_ssh_tunnel', { tabId, ruleId }),
+    deleteSshTunnel: (tabId: string, ruleId: string) =>
+      invoke<SshTunnelSnapshot[]>('app_delete_ssh_tunnel', { tabId, ruleId }),
 
     getDroppedFilePaths: (files: File[]) => takeNativeDropPaths(files),
     onUiPreferencesChanged: (
@@ -473,34 +472,7 @@ export function createTauriApi(): FileTermDesktopApi {
       }
       return invoke<void>('app_window_action', { action: 'hide' })
     }
-  } as unknown as FileTermDesktopApi
+  } satisfies FileTermDesktopApi
 
-  // The core API exposes these as synchronous fields for Electron parity.
-  // Tauri resolves app metadata asynchronously, so start with safe values and
-  // hydrate them from the Rust runtime as soon as IPC is available.
-  void Promise.all([
-    invoke<string>('app_get_platform'),
-    invoke<string>('app_get_arch'),
-    invoke<string>('app_get_runtime_version'),
-    getVersion(),
-    getName()
-  ])
-    .then(([nativePlatform, nativeArch, runtimeVersion, appVersion, appName]) => {
-      Object.assign(api, {
-        platform: normalizePlatform(nativePlatform),
-        arch: nativeArch,
-        runtimeVersion,
-        appVersion,
-        appName
-      })
-    })
-    .catch(() => undefined)
-
-  return new Proxy(api as FileTermDesktopApi, {
-    get(target, property, receiver) {
-      if (property in target) return Reflect.get(target, property, receiver)
-      if (typeof property !== 'string') return undefined
-      return (...args: unknown[]) => unsupported(property, ...args)
-    }
-  })
+  return api
 }

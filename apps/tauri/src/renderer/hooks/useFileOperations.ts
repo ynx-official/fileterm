@@ -254,12 +254,16 @@ export function useFileOperations({
   const [fileActionDialog, setFileActionDialog] = useState<FileActionDialog | null>(null)
   const [fileActionError, setFileActionError] = useState<string | null>(null)
   const [isFileActionSubmitting, setIsFileActionSubmitting] = useState(false)
+  const fileActionSubmittingRef = useRef(false)
   const [fileClipboard, setFileClipboard] = useState<FileClipboardState | null>(null)
   const [permissionDialog, setPermissionDialog] = useState<PermissionDialogState | null>(null)
   const [permissionDialogError, setPermissionDialogError] = useState<string | null>(null)
+  const [isPermissionSubmitting, setIsPermissionSubmitting] = useState(false)
+  const permissionSubmittingRef = useRef(false)
   const [rootAccessDialog, setRootAccessDialog] = useState<RootAccessDialogState | null>(null)
   const [rootAccessDialogError, setRootAccessDialogError] = useState<string | null>(null)
   const [isRootAccessSubmitting, setIsRootAccessSubmitting] = useState(false)
+  const rootAccessSubmittingRef = useRef(false)
   const nativeRemoteDropTargetAtRef = useRef(0)
   const nativeDropConsumedAtRef = useRef(0)
 
@@ -627,6 +631,8 @@ export function useFileOperations({
   }
 
   const runFileAction = async (action: () => Promise<void>) => {
+    if (fileActionSubmittingRef.current) return
+    fileActionSubmittingRef.current = true
     try {
       onBusyChange(true)
       setIsFileActionSubmitting(true)
@@ -636,13 +642,14 @@ export function useFileOperations({
     } catch (error) {
       reportOperationError(setFileActionError, '文件操作', error)
     } finally {
+      fileActionSubmittingRef.current = false
       setIsFileActionSubmitting(false)
       onBusyChange(false)
     }
   }
 
   const handleSubmitFileAction = async (rawValue: string) => {
-    if (!desktopApi || !fileActionDialog) {
+    if (!desktopApi || !fileActionDialog || fileActionSubmittingRef.current) {
       return
     }
 
@@ -724,18 +731,21 @@ export function useFileOperations({
   }
 
   const requestNewFolder = (pane: FilePane, directoryPath: string) => {
+    if (fileActionSubmittingRef.current) return
     setFileActionError(null)
     setIsFileActionSubmitting(false)
     setFileActionDialog({ kind: 'new-folder', pane, directoryPath })
   }
 
   const requestNewFile = (pane: FilePane, directoryPath: string) => {
+    if (fileActionSubmittingRef.current) return
     setFileActionError(null)
     setIsFileActionSubmitting(false)
     setFileActionDialog({ kind: 'new-file', pane, directoryPath })
   }
 
   const requestRename = (pane: FilePane, item: LocalFileItem | RemoteFileItem) => {
+    if (fileActionSubmittingRef.current) return
     setFileActionError(null)
     setIsFileActionSubmitting(false)
     setFileActionDialog({
@@ -745,6 +755,7 @@ export function useFileOperations({
   }
 
   const requestDelete = (pane: FilePane, items: Array<LocalFileItem | RemoteFileItem>) => {
+    if (fileActionSubmittingRef.current) return
     setFileActionError(null)
     setIsFileActionSubmitting(false)
     setFileActionDialog({
@@ -754,6 +765,7 @@ export function useFileOperations({
   }
 
   const dismissFileActionDialog = () => {
+    if (fileActionSubmittingRef.current) return
     setFileActionDialog(null)
     setFileActionError(null)
     setIsFileActionSubmitting(false)
@@ -775,7 +787,7 @@ export function useFileOperations({
   }
 
   const handleSubmitPermissions = async (options: PermissionChangeOptions) => {
-    if (!desktopApi || !permissionDialog) {
+    if (!desktopApi || !permissionDialog || permissionSubmittingRef.current) {
       return
     }
 
@@ -784,6 +796,8 @@ export function useFileOperations({
     }
 
     try {
+      permissionSubmittingRef.current = true
+      setIsPermissionSubmitting(true)
       onBusyChange(true)
       const { target } = permissionDialog
       if (target.pane === 'local') {
@@ -798,11 +812,16 @@ export function useFileOperations({
     } catch (error) {
       reportOperationError(setPermissionDialogError, '修改文件权限', error)
     } finally {
+      permissionSubmittingRef.current = false
+      setIsPermissionSubmitting(false)
       onBusyChange(false)
     }
   }
 
   const dismissPermissionDialog = () => {
+    if (permissionSubmittingRef.current) {
+      return
+    }
     setPermissionDialog(null)
     setPermissionDialogError(null)
   }
@@ -854,6 +873,7 @@ export function useFileOperations({
     const handleNativeDrop = (event: Event) => {
       const detail = (event as CustomEvent).detail as {
         paths?: unknown
+        consume?: unknown
         position?: { x?: unknown; y?: unknown } | null
       }
       const paths = Array.isArray(detail?.paths)
@@ -875,6 +895,9 @@ export function useFileOperations({
       ]
       if (!targetMarkedByDragOver && !targets.some((target) => target?.closest('.remote-pane'))) {
         return
+      }
+      if (typeof detail.consume === 'function') {
+        detail.consume()
       }
       nativeRemoteDropTargetAtRef.current = 0
       nativeDropConsumedAtRef.current = Date.now()
@@ -973,8 +996,8 @@ export function useFileOperations({
     }
 
     void (async () => {
-      const files = items.filter((row) => row.type === 'file')
-      if (!files.length) {
+      const downloadableItems = items.filter((row) => row.name !== '..')
+      if (!downloadableItems.length) {
         return
       }
 
@@ -988,13 +1011,13 @@ export function useFileOperations({
 
         onBusyChange(true)
         markedBusy = true
-        for (const item of files) {
-          const snapshot = await desktopApi.downloadFile(activeTab.id, item.path, downloadDirectory)
+        for (const item of downloadableItems) {
+          const snapshot = await desktopApi.downloadRemotePath(activeTab.id, item.path, item.type, downloadDirectory)
           onApplySnapshot(snapshot)
         }
         await openLocalDirectory(downloadDirectory)
       } catch (error) {
-        reportStatusError('下载文件', error, { targetPath: downloadDirectory ?? undefined })
+        reportStatusError('下载文件或目录', error, { targetPath: downloadDirectory ?? undefined })
       } finally {
         if (markedBusy) {
           onBusyChange(false)
@@ -1034,6 +1057,7 @@ export function useFileOperations({
     const nextMode = activeSession.fileAccessMode === 'root' ? 'user' : 'root'
     if (nextMode === 'root') {
       if (!activeSession.hasReusableSudoAuth) {
+        rootAccessSubmittingRef.current = false
         setRootAccessDialogError(null)
         // 打开弹窗前重置 submitting，避免上一次提交卡死后残留的 loading
         // 状态污染新弹窗（用户报告"关闭重开连接还是卡 loading"正是此因）。
@@ -1105,7 +1129,7 @@ export function useFileOperations({
   }
 
   const handleConfirmRootAccess = ({ sudoUser, sudoPassword }: RootAccessCredentials) => {
-    if (!desktopApi || !rootAccessDialog) {
+    if (!desktopApi || !rootAccessDialog || rootAccessSubmittingRef.current) {
       return
     }
 
@@ -1114,6 +1138,7 @@ export function useFileOperations({
       return
     }
 
+    rootAccessSubmittingRef.current = true
     void (async () => {
       try {
         setIsRootAccessSubmitting(true)
@@ -1128,18 +1153,21 @@ export function useFileOperations({
       } catch (error) {
         reportOperationError(setRootAccessDialogError, '切换到 root 视角', error)
       } finally {
+        rootAccessSubmittingRef.current = false
         setIsRootAccessSubmitting(false)
       }
     })()
   }
 
   const dismissRootAccessDialog = () => {
+    if (rootAccessSubmittingRef.current) return
     setRootAccessDialog(null)
     setRootAccessDialogError(null)
     // 必须重置 submitting：后端 sudo 验证可能因网络/超时未 reject
     // Promise，finally 不执行，loading 残留导致重开弹窗仍卡 spinner。
     // 即便后端已修复超时，dismiss 时也应主动清理，保证状态自愈。
     setIsRootAccessSubmitting(false)
+    rootAccessSubmittingRef.current = false
   }
 
   return {
@@ -1156,6 +1184,7 @@ export function useFileOperations({
     isFileActionSubmitting,
     permissionDialog,
     permissionDialogError,
+    isPermissionSubmitting,
     rootAccessDialog,
     rootAccessDialogError,
     isRootAccessSubmitting,

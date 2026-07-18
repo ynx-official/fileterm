@@ -1,5 +1,4 @@
-import { app, BrowserWindow, nativeTheme, Tray, Menu, nativeImage, shell, session, screen } from 'electron'
-import type { DetachWorkspaceTabInput, WorkspaceWindowContext } from '@fileterm/core'
+import { app, BrowserWindow, nativeTheme, Tray, Menu, nativeImage, shell, session } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -27,7 +26,6 @@ let connectionFormWindow: BrowserWindow | null = null
 let commandManagerWindow: BrowserWindow | null = null
 let commandFormWindow: BrowserWindow | null = null
 const fileEditorWindows = new Set<BrowserWindow>()
-const approvedWorkspaceWindowCloses = new WeakSet<BrowserWindow>()
 const approvedFileEditorCloses = new Set<BrowserWindow>()
 const fileEditorWindowsByKey = new Map<string, BrowserWindow>()
 const pendingFileEditorCloseRequests = new Map<
@@ -94,12 +92,6 @@ const DEFAULT_WINDOW_BOUNDS = {
     height: 780,
     minWidth: 1040,
     minHeight: 640
-  },
-  detachedSession: {
-    width: 1180,
-    height: 760,
-    minWidth: 900,
-    minHeight: 620
   }
 } as const
 const DEFAULT_UI_PREFERENCES = {
@@ -340,20 +332,9 @@ function requestQuitConfirmation() {
     return
   }
 
-  const detachedWorkspaceWindows = ipcServices?.workspaceWindowRegistry.getDetachedWindows() ?? []
-  const confirmationWindow =
-    mainWindow && !mainWindow.isDestroyed()
-      ? mainWindow
-      : (detachedWorkspaceWindows.find((window) => window.isFocused()) ?? detachedWorkspaceWindows[0] ?? null)
-
-  if (confirmationWindow && !confirmationWindow.isDestroyed()) {
-    if (confirmationWindow === mainWindow) {
-      showMainWindowAndChildren()
-    } else {
-      confirmationWindow.show()
-      confirmationWindow.focus()
-    }
-    confirmationWindow.webContents.send('app:window-close-request', { isQuit: true })
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    showMainWindowAndChildren()
+    mainWindow.webContents.send('app:window-close-request', { isQuit: true })
     return
   }
 
@@ -366,8 +347,7 @@ function getOpenChildWindows() {
     connectionFormWindow,
     commandManagerWindow,
     commandFormWindow,
-    ...fileEditorWindows,
-    ...(ipcServices?.workspaceWindowRegistry.getDetachedWindows() ?? [])
+    ...fileEditorWindows
   ].filter((window): window is BrowserWindow => Boolean(window && !window.isDestroyed()))
 }
 
@@ -398,21 +378,6 @@ function hideMainWindowAndChildren() {
   }
 }
 
-function closeMainWorkspaceWindow(): Promise<void> {
-  const win = mainWindow
-  if (!win || win.isDestroyed()) {
-    return Promise.resolve()
-  }
-
-  return Promise.resolve(ipcServices?.workspaceWindowRegistry.closeMainWindowTabs() ?? false).then((closed) => {
-    if (!closed || win.isDestroyed()) {
-      return
-    }
-    approvedWorkspaceWindowCloses.add(win)
-    win.close()
-  })
-}
-
 function shutdownWorkspace() {
   return Promise.resolve(ipcServices?.workspaceService.shutdown()).catch((error) => {
     safeConsoleError('[FileTerm] failed to shut down workspace cleanly', error)
@@ -436,7 +401,6 @@ function quitApplication(applyUpdate = false): Promise<void> {
 
     await shutdownWorkspace()
     isQuitting = true
-    ipcServices?.workspaceWindowRegistry.closeAll()
 
     for (const child of getOpenChildWindows()) {
       if (!child.isDestroyed()) {
@@ -565,22 +529,6 @@ function loadAppWindow(
   })
 }
 
-function registerWorkspaceCloseShortcut(win: BrowserWindow) {
-  win.webContents.on('before-input-event', (event, input) => {
-    if (input.type !== 'keyDown') {
-      return
-    }
-
-    const isCloseShortcut = input.key.toLowerCase() === 'w' && (input.meta || input.control)
-    if (!isCloseShortcut) {
-      return
-    }
-
-    event.preventDefault()
-    win.webContents.send('app:close-active-workspace-item-request')
-  })
-}
-
 function createTray() {
   const iconPath = isMac ? (getTrayTemplateIconPath() ?? getAppIconPath()) : getAppIconPath()
   if (!iconPath) {
@@ -660,14 +608,13 @@ function createMainWindow() {
   })
 
   mainWindow = win
-  ipcServices?.workspaceWindowRegistry.registerMainWindow(win)
   attachWindowDiagnostics(win, 'main')
   registerWindowStateListeners(win)
   if (isWindows) {
     win.setMenuBarVisibility(false)
   }
   win.on('close', (event) => {
-    if (isQuitting || approvedWorkspaceWindowCloses.has(win)) {
+    if (isQuitting) {
       return
     }
     event.preventDefault()
@@ -676,7 +623,19 @@ function createMainWindow() {
     }
     win.webContents.send('app:window-close-request', { isQuit: false })
   })
-  registerWorkspaceCloseShortcut(win)
+  win.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') {
+      return
+    }
+
+    const isCloseShortcut = input.key.toLowerCase() === 'w' && (input.meta || input.control)
+    if (!isCloseShortcut) {
+      return
+    }
+
+    event.preventDefault()
+    win.webContents.send('app:close-active-workspace-item-request')
+  })
 
   win.on('closed', () => {
     if (mainWindow === win) {
@@ -688,7 +647,7 @@ function createMainWindow() {
         ...fileEditorWindows
       ]
       for (const child of childWindows) {
-        if (child && !child.isDestroyed() && child.getParentWindow() === win) {
+        if (child && !child.isDestroyed()) {
           child.close()
         }
       }
@@ -711,62 +670,6 @@ function createMainWindow() {
   }
 
   loadAppWindow(win, undefined, uiPreferences)
-  return win
-}
-
-function createDetachedWorkspaceWindow(context: WorkspaceWindowContext, input: DetachWorkspaceTabInput) {
-  const bounds = DEFAULT_WINDOW_BOUNDS.detachedSession
-  const display = input.screenPoint ? screen.getDisplayNearestPoint(input.screenPoint) : screen.getPrimaryDisplay()
-  const x = input.screenPoint
-    ? Math.min(
-        Math.max(Math.round(input.screenPoint.x - bounds.width / 2), display.workArea.x),
-        display.workArea.x + display.workArea.width - bounds.width
-      )
-    : undefined
-  const y = input.screenPoint
-    ? Math.min(
-        Math.max(Math.round(input.screenPoint.y - 28), display.workArea.y),
-        display.workArea.y + display.workArea.height - bounds.height
-      )
-    : undefined
-  const win = new BrowserWindow({
-    width: bounds.width,
-    height: bounds.height,
-    minWidth: bounds.minWidth,
-    minHeight: bounds.minHeight,
-    ...(x === undefined || y === undefined ? { center: true } : { x, y }),
-    title: 'FileTerm',
-    autoHideMenuBar: true,
-    frame: isWindows ? false : isMac ? undefined : true,
-    titleBarStyle: isMac ? 'hiddenInset' : 'default',
-    trafficLightPosition: isMac ? { x: 20, y: 18 } : undefined,
-    backgroundColor: getWindowBackgroundColor(uiPreferences.theme),
-    ...getWindowIconOptions(),
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      partition: APP_SESSION_PARTITION
-    }
-  })
-
-  attachWindowDiagnostics(win, `detached-session:${context.windowId}`)
-  registerWindowStateListeners(win)
-  registerWorkspaceCloseShortcut(win)
-  if (isWindows) {
-    win.setMenuBarVisibility(false)
-  }
-  win.once('ready-to-show', () => win.show())
-  loadAppWindow(
-    win,
-    {
-      window: 'detached-session',
-      windowId: context.windowId,
-      initialTabId: context.initialTabId ?? input.tabId
-    },
-    uiPreferences
-  )
   return win
 }
 
@@ -1138,12 +1041,6 @@ app.whenReady().then(() => {
   }
   ipcServices = registerIpcHandlers(app.getPath('userData'), {
     getMainWindow: () => mainWindow,
-    ensureMainWindow: () => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        return mainWindow
-      }
-      return createMainWindow()
-    },
     getUiPreferences: () => uiPreferences,
     setUiPreferences: (input) => {
       const next = updateUiPreferences(input)
@@ -1162,8 +1059,6 @@ app.whenReady().then(() => {
     removeUiStateItem: async (key) => {
       await getUiStateStore().removeItem(key)
     },
-    createDetachedWorkspaceWindow,
-    isQuitting: () => isQuitting,
     openConnectionManagerWindow,
     openCommandManagerWindow,
     openConnectionFormWindow,
@@ -1181,8 +1076,6 @@ app.whenReady().then(() => {
         await quitApplication()
       } else if (action === 'hide') {
         hideMainWindowAndChildren()
-      } else if (action === 'close-workspace') {
-        await closeMainWorkspaceWindow()
       }
     }
   })
@@ -1195,14 +1088,9 @@ app.whenReady().then(() => {
       return
     }
 
-    const workspaceWindow = ipcServices?.workspaceWindowRegistry.getDetachedWindows()[0]
-    if (workspaceWindow && !workspaceWindow.isDestroyed()) {
-      workspaceWindow.show()
-      workspaceWindow.focus()
-      return
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createMainWindow()
     }
-
-    createMainWindow()
   })
 })
 

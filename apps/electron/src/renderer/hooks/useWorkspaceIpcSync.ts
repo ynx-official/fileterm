@@ -19,7 +19,7 @@ export type WorkspaceWindowCloseRequest = {
 
 export type UseWorkspaceIpcSyncOptions = {
   desktopApi?: FileTermDesktopApi
-  isWorkspaceWindow: boolean
+  isMainWorkspaceWindow: boolean
   isConnectionManagerWindow: boolean
   themeMode: ThemeMode
   locale: AppLocale
@@ -54,7 +54,7 @@ function useLatestRef<T>(value: T) {
 
 export function useWorkspaceIpcSync({
   desktopApi,
-  isWorkspaceWindow,
+  isMainWorkspaceWindow,
   isConnectionManagerWindow,
   themeMode,
   locale,
@@ -178,7 +178,7 @@ export function useWorkspaceIpcSync({
   }, [desktopApi, locale, themeMode])
 
   useEffect(() => {
-    if (!desktopApi || !isWorkspaceWindow) {
+    if (!desktopApi || !isMainWorkspaceWindow) {
       setIsMaximized(false)
       return
     }
@@ -210,10 +210,10 @@ export function useWorkspaceIpcSync({
       canceled = true
       unsubscribe()
     }
-  }, [desktopApi, isWorkspaceWindow])
+  }, [desktopApi, isMainWorkspaceWindow])
 
   useEffect(() => {
-    if (!desktopApi || !isWorkspaceWindow) {
+    if (!desktopApi || !isMainWorkspaceWindow) {
       return
     }
 
@@ -232,7 +232,7 @@ export function useWorkspaceIpcSync({
       unsubscribeWindowClose()
       unsubscribeCloseActive()
     }
-  }, [desktopApi, isWorkspaceWindow])
+  }, [desktopApi, isMainWorkspaceWindow])
 
   useEffect(() => {
     let canceled = false
@@ -243,7 +243,7 @@ export function useWorkspaceIpcSync({
       setLocalPath(previewLocalPath)
       setLocalItems(localPreviewFiles)
       setHasLoadedInitialSnapshot(true)
-      if (isWorkspaceWindow) {
+      if (isMainWorkspaceWindow) {
         onStatusMessageRef.current(t.browserPreview)
       }
       return () => {
@@ -333,7 +333,7 @@ export function useWorkspaceIpcSync({
 
     void hydrateWorkspace()
 
-    if (isWorkspaceWindow) {
+    if (isMainWorkspaceWindow) {
       void desktopApi
         .listLocalDirectory()
         .then(({ path, items }) => {
@@ -364,7 +364,7 @@ export function useWorkspaceIpcSync({
     applyTransferUpdate,
     desktopApi,
     isConnectionManagerWindow,
-    isWorkspaceWindow
+    isMainWorkspaceWindow
   ])
 
   const clearWindowCloseRequest = useCallback(() => {

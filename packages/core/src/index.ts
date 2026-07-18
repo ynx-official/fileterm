@@ -38,6 +38,8 @@ export interface BaseProfile extends BaseEntity {
   remotePath: string
   group: string
   lastUsedAt?: number
+  /** Non-secret indicator for redacted desktop snapshots. */
+  hasSavedPassword?: boolean
 }
 
 export type NetworkProfile = BaseProfile
@@ -614,6 +616,7 @@ export interface WebDavSyncResult {
   action: 'upload' | 'download'
   message: string
   imported?: number
+  updated?: number
   skipped?: number
 }
 
@@ -801,64 +804,7 @@ export interface CommandTemplateInput {
 
 export type ConnectionFormMode = 'create' | 'edit'
 
-export type WorkspaceWindowKind = 'main' | 'detached-session'
-
-export interface WorkspaceWindowContext {
-  windowId: string
-  kind: WorkspaceWindowKind
-  initialTabId?: string
-}
-
-export interface WorkspaceTabPlacement {
-  tabId: string
-  ownerWindowId: string
-  ownerKind: WorkspaceWindowKind
-  order: number
-}
-
-export interface DetachWorkspaceTabInput {
-  tabId: string
-  screenPoint?: {
-    x: number
-    y: number
-  }
-}
-
-export interface MoveWorkspaceTabInput {
-  tabId: string
-  targetWindowId: string
-  targetIndex?: number
-}
-
-export interface WorkspaceTabDragInput {
-  dragId: string
-  tabId: string
-  sourceWindowId: string
-}
-
-export interface DropWorkspaceTabInput extends MoveWorkspaceTabInput {
-  dragId: string
-  sourceWindowId: string
-  dropZone: 'precise' | 'workspace'
-}
-
-export interface FinishWorkspaceTabDragInput {
-  dragId: string
-  detachIfUnhandled: boolean
-  screenPoint?: {
-    x: number
-    y: number
-  }
-}
-
-export type AppWindowMode =
-  | 'main'
-  | 'detached-session'
-  | 'connection-manager'
-  | 'connection-form'
-  | 'command-manager'
-  | 'command-form'
-  | 'file-editor'
+export type AppWindowMode = 'main' | 'connection-manager' | 'connection-form' | 'command-manager' | 'command-form'
 
 export interface CommandExecutionResult {
   renderedCommand: string
@@ -940,17 +886,6 @@ export interface FileTermDesktopApi {
   ): () => void
   onFileEditorCloseRequest(listener: () => void): () => void
   requestQuitApp(): Promise<void>
-  getWorkspaceWindowContext(): Promise<WorkspaceWindowContext>
-  getWorkspaceTabPlacements(): Promise<WorkspaceTabPlacement[]>
-  detachWorkspaceTab(input: DetachWorkspaceTabInput): Promise<void>
-  attachWorkspaceTab(tabId: string): Promise<void>
-  moveWorkspaceTab(input: MoveWorkspaceTabInput): Promise<void>
-  startWorkspaceTabDrag(input: WorkspaceTabDragInput): Promise<void>
-  setWorkspaceTabDragTarget(active: boolean): Promise<void>
-  dropWorkspaceTab(input: DropWorkspaceTabInput): Promise<void>
-  finishWorkspaceTabDrag(input: FinishWorkspaceTabDragInput): Promise<void>
-  claimWorkspaceTab(tabId: string): Promise<void>
-  onWorkspaceTabPlacementChanged(listener: (placements: WorkspaceTabPlacement[]) => void): () => void
   getSnapshot(): Promise<WorkspaceSnapshot>
   getConnectionLibrary(): Promise<ConnectionLibrarySnapshot>
   listSshKeys(): Promise<SshKeyMetadata[]>
@@ -1076,7 +1011,7 @@ export interface FileTermDesktopApi {
   onSshInteraction(listener: (request: SshInteractionRequest) => void): () => void
   onWindowCloseRequest(listener: (event: { isQuit: boolean }) => void): () => void
   onRequestCloseActiveWorkspaceItem(listener: () => void): () => void
-  confirmCloseWindow(action: 'quit' | 'hide' | 'close-workspace' | 'cancel'): Promise<void>
+  confirmCloseWindow(action: 'quit' | 'hide' | 'cancel'): Promise<void>
 }
 
 export type AppUpdateState =

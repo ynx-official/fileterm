@@ -17,6 +17,7 @@ export function FilePermissionModal({
   fileName,
   fileType,
   initialPermission,
+  isSubmitting = false,
   onClose,
   onSubmit,
   ownerGroup,
@@ -27,6 +28,7 @@ export function FilePermissionModal({
   fileName: string
   fileType: 'file' | 'folder'
   initialPermission?: string
+  isSubmitting?: boolean
   onClose(): void
   onSubmit(options: PermissionChangeOptions): void
   ownerGroup?: string
@@ -53,158 +55,174 @@ export function FilePermissionModal({
     <div className="modal-backdrop">
       <div className="modal-card file-permission-dialog">
         <div className="file-permission-dialog__header">
-          <span className="file-permission-dialog__eyebrow">{t.permissionDialogTitle}</span>
-          <CloseButton className="file-permission-dialog__close" onClick={onClose} />
+          <span className="file-permission-dialog__title">
+            <span aria-hidden="true" className="material-symbols-outlined">
+              lock
+            </span>
+            <span>{t.permissionDialogTitle}</span>
+          </span>
+          <CloseButton className="file-permission-dialog__close" disabled={isSubmitting} onClick={onClose} />
         </div>
 
-        <div className="file-permission-dialog__scroll">
-          <div className="file-permission-dialog__hero">
-            <div className="file-permission-dialog__hero-icon" aria-hidden="true">
-              <AppIcon name={fileType === 'folder' ? 'folder' : 'file'} size={24} />
+        <fieldset disabled={isSubmitting} style={{ border: 0, display: 'contents', margin: 0, padding: 0 }}>
+          <div className="file-permission-dialog__scroll">
+            <div className="file-permission-dialog__hero">
+              <div className="file-permission-dialog__hero-icon" aria-hidden="true">
+                <AppIcon name={fileType === 'folder' ? 'folder' : 'file'} size={24} />
+              </div>
+              <div className="file-permission-dialog__hero-copy">
+                <div className="file-permission-dialog__file-name">{fileName}</div>
+                <div className="file-permission-dialog__file-path">{fileDirectory}</div>
+              </div>
             </div>
-            <div className="file-permission-dialog__hero-copy">
-              <div className="file-permission-dialog__file-name">{fileName}</div>
-              <div className="file-permission-dialog__file-path">{fileDirectory}</div>
-            </div>
+
+            <section className="file-permission-dialog__section">
+              <div className="file-permission-dialog__section-title">{t.permissionMatrixTitle}</div>
+              <div className="file-permission-dialog__matrix-card">
+                <div className="file-permission-dialog__matrix-head">
+                  <span />
+                  <span>{t.permissionRead}</span>
+                  <span>{t.permissionWrite}</span>
+                  <span>{t.permissionExecute}</span>
+                </div>
+                <PermissionRow
+                  label={t.permissionOwner}
+                  value={matrix.owner}
+                  onChange={(nextValue) => {
+                    const nextMatrix = { ...matrix, owner: nextValue }
+                    setMatrix(nextMatrix)
+                    setModeValue(mergeMatrixIntoMode(modeValue, nextMatrix))
+                  }}
+                />
+                <PermissionRow
+                  label={t.permissionGroup}
+                  value={matrix.group}
+                  onChange={(nextValue) => {
+                    const nextMatrix = { ...matrix, group: nextValue }
+                    setMatrix(nextMatrix)
+                    setModeValue(mergeMatrixIntoMode(modeValue, nextMatrix))
+                  }}
+                />
+                <PermissionRow
+                  label={t.permissionOther}
+                  value={matrix.other}
+                  onChange={(nextValue) => {
+                    const nextMatrix = { ...matrix, other: nextValue }
+                    setMatrix(nextMatrix)
+                    setModeValue(mergeMatrixIntoMode(modeValue, nextMatrix))
+                  }}
+                />
+              </div>
+            </section>
+
+            <section className="file-permission-dialog__section">
+              <div className="file-permission-dialog__section-title">{t.permissionAdvancedTitle}</div>
+              <div className="file-permission-dialog__advanced-grid">
+                <div className="file-permission-dialog__info-card">
+                  <div className="file-permission-dialog__info-copy">
+                    <span className="file-permission-dialog__info-title">{t.permissionOctalTitle}</span>
+                    <span className="file-permission-dialog__info-subtitle">{t.permissionOctalSubtitle}</span>
+                    <div className="file-permission-dialog__mode-inline">
+                      <span>{t.permissionModeLabel}</span>
+                      <strong>{modeValue.trim() || '---'}</strong>
+                    </div>
+                    <span className="file-permission-dialog__info-hint">{t.permissionOctalHint}</span>
+                  </div>
+                  <label className="file-permission-dialog__mode-input">
+                    <input
+                      aria-label={t.permissionMode}
+                      inputMode="numeric"
+                      maxLength={4}
+                      onChange={(event) => {
+                        const nextValue = event.target.value.replace(/[^\d]/g, '').slice(0, 4)
+                        setModeValue(nextValue)
+                        if (isPermissionMode(nextValue)) {
+                          setMatrix(modeToMatrix(nextValue))
+                        }
+                      }}
+                      type="text"
+                      value={modeValue}
+                    />
+                  </label>
+                </div>
+
+                <div className="file-permission-dialog__info-card">
+                  <div className="file-permission-dialog__info-copy">
+                    <span className="file-permission-dialog__info-title">{t.ownerGroup}</span>
+                    <span className="file-permission-dialog__info-value">{ownerGroup || '-'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {supportsRecursive ? (
+                <div className="file-permission-dialog__recursive-card">
+                  <div className="file-permission-dialog__recursive-copy">
+                    <span className="file-permission-dialog__info-title">{t.permissionRecursiveTitle}</span>
+                    <span className="file-permission-dialog__info-subtitle">
+                      {recursive ? t.permissionRecursiveEnabledHint : t.permissionRecursiveDisabledHint}
+                    </span>
+                  </div>
+                  <label className="file-permission-dialog__switch">
+                    <input
+                      checked={recursive}
+                      type="checkbox"
+                      onChange={(event) => setRecursive(event.target.checked)}
+                    />
+                    <span className="file-permission-dialog__switch-track" />
+                  </label>
+                </div>
+              ) : null}
+
+              {supportsRecursive && recursive ? (
+                <div className="file-permission-dialog__apply-grid">
+                  <label className="file-permission-dialog__apply-option">
+                    <input checked={applyTo === 'all'} type="radio" onChange={() => setApplyTo('all')} />
+                    <span>{t.permissionApplyAll}</span>
+                  </label>
+                  <label className="file-permission-dialog__apply-option">
+                    <input checked={applyTo === 'files'} type="radio" onChange={() => setApplyTo('files')} />
+                    <span>{t.permissionApplyFiles}</span>
+                  </label>
+                  <label className="file-permission-dialog__apply-option">
+                    <input
+                      checked={applyTo === 'directories'}
+                      type="radio"
+                      onChange={() => setApplyTo('directories')}
+                    />
+                    <span>{t.permissionApplyDirectories}</span>
+                  </label>
+                </div>
+              ) : null}
+            </section>
+
+            {effectiveError ? <div className="modal-error">{effectiveError}</div> : null}
           </div>
 
-          <section className="file-permission-dialog__section">
-            <div className="file-permission-dialog__section-title">{t.permissionMatrixTitle}</div>
-            <div className="file-permission-dialog__matrix-card">
-              <div className="file-permission-dialog__matrix-head">
-                <span />
-                <span>{t.permissionRead}</span>
-                <span>{t.permissionWrite}</span>
-                <span>{t.permissionExecute}</span>
-              </div>
-              <PermissionRow
-                label={t.permissionOwner}
-                value={matrix.owner}
-                onChange={(nextValue) => {
-                  const nextMatrix = { ...matrix, owner: nextValue }
-                  setMatrix(nextMatrix)
-                  setModeValue(mergeMatrixIntoMode(modeValue, nextMatrix))
-                }}
-              />
-              <PermissionRow
-                label={t.permissionGroup}
-                value={matrix.group}
-                onChange={(nextValue) => {
-                  const nextMatrix = { ...matrix, group: nextValue }
-                  setMatrix(nextMatrix)
-                  setModeValue(mergeMatrixIntoMode(modeValue, nextMatrix))
-                }}
-              />
-              <PermissionRow
-                label={t.permissionOther}
-                value={matrix.other}
-                onChange={(nextValue) => {
-                  const nextMatrix = { ...matrix, other: nextValue }
-                  setMatrix(nextMatrix)
-                  setModeValue(mergeMatrixIntoMode(modeValue, nextMatrix))
-                }}
-              />
-            </div>
-          </section>
+          <div className="form-actions file-permission-dialog__actions">
+            <button className="flat-button compact" disabled={isSubmitting} onClick={onClose} type="button">
+              {t.cancel}
+            </button>
+            <button
+              className="primary-button compact"
+              disabled={!isModeValid || isSubmitting}
+              onClick={() => {
+                if (!isModeValid) {
+                  return
+                }
 
-          <section className="file-permission-dialog__section">
-            <div className="file-permission-dialog__section-title">{t.permissionAdvancedTitle}</div>
-            <div className="file-permission-dialog__advanced-grid">
-              <div className="file-permission-dialog__info-card">
-                <div className="file-permission-dialog__info-copy">
-                  <span className="file-permission-dialog__info-title">{t.permissionOctalTitle}</span>
-                  <span className="file-permission-dialog__info-subtitle">{t.permissionOctalSubtitle}</span>
-                  <div className="file-permission-dialog__mode-inline">
-                    <span>{t.permissionModeLabel}</span>
-                    <strong>{modeValue.trim() || '---'}</strong>
-                  </div>
-                  <span className="file-permission-dialog__info-hint">{t.permissionOctalHint}</span>
-                </div>
-                <label className="file-permission-dialog__mode-input">
-                  <input
-                    aria-label={t.permissionMode}
-                    inputMode="numeric"
-                    maxLength={4}
-                    onChange={(event) => {
-                      const nextValue = event.target.value.replace(/[^\d]/g, '').slice(0, 4)
-                      setModeValue(nextValue)
-                      if (isPermissionMode(nextValue)) {
-                        setMatrix(modeToMatrix(nextValue))
-                      }
-                    }}
-                    type="text"
-                    value={modeValue}
-                  />
-                </label>
-              </div>
-
-              <div className="file-permission-dialog__info-card">
-                <div className="file-permission-dialog__info-copy">
-                  <span className="file-permission-dialog__info-title">{t.ownerGroup}</span>
-                  <span className="file-permission-dialog__info-value">{ownerGroup || '-'}</span>
-                </div>
-              </div>
-            </div>
-
-            {supportsRecursive ? (
-              <div className="file-permission-dialog__recursive-card">
-                <div className="file-permission-dialog__recursive-copy">
-                  <span className="file-permission-dialog__info-title">{t.permissionRecursiveTitle}</span>
-                  <span className="file-permission-dialog__info-subtitle">
-                    {recursive ? t.permissionRecursiveEnabledHint : t.permissionRecursiveDisabledHint}
-                  </span>
-                </div>
-                <label className="file-permission-dialog__switch">
-                  <input checked={recursive} type="checkbox" onChange={(event) => setRecursive(event.target.checked)} />
-                  <span className="file-permission-dialog__switch-track" />
-                </label>
-              </div>
-            ) : null}
-
-            {supportsRecursive && recursive ? (
-              <div className="file-permission-dialog__apply-grid">
-                <label className="file-permission-dialog__apply-option">
-                  <input checked={applyTo === 'all'} type="radio" onChange={() => setApplyTo('all')} />
-                  <span>{t.permissionApplyAll}</span>
-                </label>
-                <label className="file-permission-dialog__apply-option">
-                  <input checked={applyTo === 'files'} type="radio" onChange={() => setApplyTo('files')} />
-                  <span>{t.permissionApplyFiles}</span>
-                </label>
-                <label className="file-permission-dialog__apply-option">
-                  <input checked={applyTo === 'directories'} type="radio" onChange={() => setApplyTo('directories')} />
-                  <span>{t.permissionApplyDirectories}</span>
-                </label>
-              </div>
-            ) : null}
-          </section>
-
-          {effectiveError ? <div className="modal-error">{effectiveError}</div> : null}
-        </div>
-
-        <div className="form-actions file-permission-dialog__actions">
-          <button className="flat-button compact" onClick={onClose} type="button">
-            {t.cancel}
-          </button>
-          <button
-            className="primary-button compact"
-            disabled={!isModeValid}
-            onClick={() => {
-              if (!isModeValid) {
-                return
-              }
-
-              onSubmit({
-                mode: modeValue.trim(),
-                recursive,
-                applyTo
-              })
-            }}
-            type="button"
-          >
-            {t.permissionApplyChanges}
-          </button>
-        </div>
+                onSubmit({
+                  mode: modeValue.trim(),
+                  recursive,
+                  applyTo
+                })
+              }}
+              type="button"
+            >
+              {isSubmitting ? <span aria-hidden="true" className="button-spinner" /> : null}
+              <span>{t.permissionApplyChanges}</span>
+            </button>
+          </div>
+        </fieldset>
       </div>
     </div>
   )

@@ -132,8 +132,7 @@ export function useWorkspaceModals({
 
   const openEditConnection = (profile: ConnectionProfile) => {
     if (desktopApi) {
-      void desktopApi.openConnectionFormWindow('edit', profile.id)
-      return
+      return desktopApi.openConnectionFormWindow('edit', profile.id)
     }
     openEditModal(profile)
   }

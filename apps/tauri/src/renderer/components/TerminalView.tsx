@@ -15,6 +15,7 @@ import { t } from '../i18n'
 import { ContextMenu } from '../features/common/ContextMenu'
 import { CloseButton } from '../features/common/CloseButton'
 import { AppIcon } from '../features/common/AppIcon'
+import { FILETERM_MONO_FONT_FAMILY, observeCanvasTextMetrics } from '../app/font-metrics'
 
 function localizeTerminalText(value: string) {
   return value
@@ -111,12 +112,14 @@ export const TerminalView = memo(function TerminalView({
   tabId,
   bootText,
   connected = false,
+  connecting = false,
   onStatus,
   onReconnect
 }: {
   tabId: string
   bootText: string
   connected?: boolean
+  connecting?: boolean
   onStatus?(message: string | null): void
   onReconnect?(): void | Promise<void>
 }) {
@@ -141,6 +144,7 @@ export const TerminalView = memo(function TerminalView({
   // through a ref prevents a stale terminal-state event from a background
   // tab from swallowing keystrokes after this tab is brought back.
   const connectedRef = useRef(Boolean(connected))
+  const connectingRef = useRef(Boolean(connecting))
   const lastSyncedSizeRef = useRef<{ cols: number; rows: number; width: number; height: number } | null>(null)
   const lastObservedHostRectRef = useRef<{ width: number; height: number } | null>(null)
   const isHorizontalResizeActiveRef = useRef(false)
@@ -154,6 +158,7 @@ export const TerminalView = memo(function TerminalView({
   const activeTerminalTabIdRef = useRef<string | null>(null)
   tabIdRef.current = tabId
   connectedRef.current = Boolean(connected)
+  connectingRef.current = Boolean(connecting)
   onStatusRef.current = onStatus
   onReconnectRef.current = onReconnect
   const [hasSelection, setHasSelection] = useState(false)
@@ -278,14 +283,20 @@ export const TerminalView = memo(function TerminalView({
     if (!terminal) {
       return
     }
-    const value = window.fileterm?.readClipboardText
-      ? await window.fileterm.readClipboardText()
-      : await navigator.clipboard?.readText?.()
-    if (value) {
-      clearEphemeralHighlight()
-      terminal.paste(value)
+    try {
+      const value = window.fileterm?.readClipboardText
+        ? await window.fileterm.readClipboardText()
+        : await navigator.clipboard?.readText?.()
+      if (value) {
+        clearEphemeralHighlight()
+        terminal.paste(value)
+      }
+    } catch {
+      // Image-only/locked clipboards are a normal empty-paste case on native
+      // desktops. Keep the terminal usable and avoid an unhandled rejection.
+    } finally {
+      terminal.focus()
     }
-    terminal.focus()
   }
 
   const searchTerminal = (query: string, direction: 1 | -1 = 1) => {
@@ -535,7 +546,7 @@ export const TerminalView = memo(function TerminalView({
     }
 
     const terminal = new Terminal({
-      fontFamily: '"SF Mono", Menlo, Consolas, monospace',
+      fontFamily: FILETERM_MONO_FONT_FAMILY,
       fontSize: 12,
       lineHeight: 1.05,
       cursorBlink: true,
@@ -567,7 +578,7 @@ export const TerminalView = memo(function TerminalView({
     terminal.unicode.activeVersion = '11'
     terminal.open(hostRef.current)
     const requestReconnect = () => {
-      if (wasConnectedRef.current || isReconnectingRef.current) {
+      if (wasConnectedRef.current || connectingRef.current || isReconnectingRef.current) {
         return false
       }
 
@@ -679,9 +690,14 @@ export const TerminalView = memo(function TerminalView({
       }
 
       if (parsed.data === '?') {
-        const clipboardText = window.fileterm?.readClipboardText
-          ? await window.fileterm.readClipboardText()
-          : ((await navigator.clipboard?.readText?.()) ?? '')
+        let clipboardText = ''
+        try {
+          clipboardText = window.fileterm?.readClipboardText
+            ? await window.fileterm.readClipboardText()
+            : ((await navigator.clipboard?.readText?.()) ?? '')
+        } catch {
+          clipboardText = ''
+        }
         const encoded = encodeBase64Utf8(clipboardText)
         await window.fileterm?.writeTerminal(tabIdRef.current, `\u001b]52;${parsed.target || 'c'};${encoded}\u0007`)
         return true
@@ -729,6 +745,15 @@ export const TerminalView = memo(function TerminalView({
         resize(shouldForce, shouldFreezeCols, preserveVisibleBuffer)
       })
     }
+
+    // Font loading and a monitor-DPI transition occur outside ResizeObserver's
+    // CSS-box model. Refresh xterm's cached glyph/canvas metrics explicitly so
+    // packaged WebView2/WebKit builds cannot keep a fallback-font grid.
+    const disposeCanvasTextMetrics = observeCanvasTextMetrics((fontFamily) => {
+      terminal.options.fontFamily = fontFamily
+      terminal.refresh(0, Math.max(terminal.rows - 1, 0))
+      scheduleResize(true)
+    })
 
     const scheduleSettledHorizontalResize = () => {
       if (resizeSettleTimerRef.current !== null) {
@@ -993,6 +1018,7 @@ export const TerminalView = memo(function TerminalView({
       pendingPromptResizeRef.current = false
       searchResultsDisposable.dispose()
       osc52Disposable.dispose()
+      disposeCanvasTextMetrics()
       resizeObserver.disconnect()
       hostRef.current?.removeEventListener('contextmenu', onContextMenu)
       window.removeEventListener('keydown', onKeyDown, true)

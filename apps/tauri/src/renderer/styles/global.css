@@ -18,15 +18,15 @@ body,
   -webkit-user-select: none;
 }
 
-html.tauri-standalone-window,
-html.tauri-standalone-window body,
-html.tauri-standalone-window #root {
+html[data-platform='darwin'].tauri-standalone-window,
+html[data-platform='darwin'].tauri-standalone-window body,
+html[data-platform='darwin'].tauri-standalone-window #root {
   background: transparent !important;
 }
 
-html.tauri-standalone-window #root {
+html[data-platform='darwin'].tauri-standalone-window #root {
   overflow: hidden;
-  border-radius: 14px;
+  border-radius: var(--window-corner-radius);
 }
 
 input,

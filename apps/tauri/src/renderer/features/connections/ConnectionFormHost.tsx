@@ -7,6 +7,7 @@ export function ConnectionFormHost({
   errorMessage,
   form,
   groupOptions,
+  isSubmitting,
   mode,
   profiles,
   setForm,
@@ -19,6 +20,7 @@ export function ConnectionFormHost({
   errorMessage: string | null
   form: CreateProfileInput
   groupOptions: string[]
+  isSubmitting?: boolean
   mode: ConnectionFormMode
   profiles: ConnectionProfile[]
   setForm(updater: CreateProfileInput | ((current: CreateProfileInput) => CreateProfileInput)): void
@@ -27,10 +29,9 @@ export function ConnectionFormHost({
   onClose(): void
   onSubmit(event: FormEvent<HTMLFormElement>): void
 }) {
+  const editingProfile = editingProfileId ? (profiles.find((profile) => profile.id === editingProfileId) ?? null) : null
+
   const clearHostFingerprint = () => {
-    const editingProfile = editingProfileId
-      ? (profiles.find((profile) => profile.id === editingProfileId) ?? null)
-      : null
     if (!editingProfile) {
       return
     }
@@ -42,8 +43,10 @@ export function ConnectionFormHost({
     <ConnectionModal
       errorMessage={errorMessage}
       groupOptions={groupOptions}
+      isSubmitting={isSubmitting}
       mode={mode}
       form={form}
+      hasSavedPassword={editingProfile?.hasSavedPassword === true}
       profiles={profiles}
       setForm={setForm}
       onClearHostFingerprint={clearHostFingerprint}

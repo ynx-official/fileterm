@@ -54,7 +54,6 @@ import { defaultLocale, setLocale, t, type AppLocale } from './i18n'
 
 import { useWorkspaceIpcSync } from './hooks/useWorkspaceIpcSync'
 import { useWorkspaceTabs } from './hooks/useWorkspaceTabs'
-import { useWorkspaceWindowContext } from './hooks/useWorkspaceWindowContext'
 import { useWorkspaceModals } from './hooks/useWorkspaceModals'
 import { useFileOperations } from './hooks/useFileOperations'
 import { useSshInteractions } from './hooks/useSshInteractions'
@@ -95,9 +94,12 @@ export function App() {
   const isConnectionFormWindow = windowMode === 'connection-form'
   const isCommandFormWindow = windowMode === 'command-form'
   const isFileEditorWindow = windowMode === 'file-editor'
-  const isDetachedSessionWindow = windowMode === 'detached-session'
-  const isMainWorkspaceWindow = windowMode === 'main'
-  const isWorkspaceWindow = isMainWorkspaceWindow || isDetachedSessionWindow
+  const isMainWorkspaceWindow =
+    !isConnectionManagerWindow &&
+    !isCommandManagerWindow &&
+    !isConnectionFormWindow &&
+    !isCommandFormWindow &&
+    !isFileEditorWindow
 
   const formWindowMode = (searchParams.get('mode') as ConnectionFormMode | null) ?? 'create'
   const formWindowProfileId = searchParams.get('profileId')
@@ -125,10 +127,6 @@ export function App() {
 
   const desktopApi = window.fileterm
   const isWindowsDesktop = desktopApi?.platform === 'win32'
-  const workspaceWindow = useWorkspaceWindowContext({
-    desktopApi,
-    enabled: isWorkspaceWindow
-  })
 
   const openConnectionImportPreview = () => {
     void desktopApi
@@ -171,10 +169,11 @@ export function App() {
     windowCloseRequest,
     clearWindowCloseRequest,
     closeActiveRequestVersion,
-    closeCurrentWindow
+    closeCurrentWindow,
+    requestQuitApp
   } = useWorkspaceIpcSync({
     desktopApi,
-    isWorkspaceWindow,
+    isMainWorkspaceWindow,
     isConnectionManagerWindow,
     themeMode,
     locale,
@@ -192,7 +191,7 @@ export function App() {
     localTabs,
     tabContextMenu,
     shortcutCloseConfirm,
-    isSystemSidebarCollapsed,
+    isSystemSidebarCollapsed: isSystemSidebarUserCollapsed,
     visibleWorkspaceTabs,
     activeLocalTab,
     visibleActiveSessionTabId,
@@ -219,9 +218,7 @@ export function App() {
     closeTabContextMenu,
     startTabDrag,
     enterDraggedTab,
-    dropDraggedTab,
     endTabDrag,
-    tabDragFeedback,
     setIsSystemSidebarCollapsed,
     dismissShortcutCloseConfirm,
     activateHomeTab,
@@ -231,9 +228,6 @@ export function App() {
   } = useWorkspaceTabs({
     desktopApi,
     workspace,
-    windowContext: workspaceWindow.context,
-    workspaceTabPlacements: workspaceWindow.placements,
-    isWorkspaceWindow,
     isMainWorkspaceWindow,
     hasLoadedInitialSnapshot,
     locale,
@@ -243,7 +237,8 @@ export function App() {
     onBusyChange: setIsBusy,
     onStatusMessage: (msg) => setError(msg),
     onError: (scope, err) => reportError(setError, scope, err),
-    onCloseCurrentWindow: closeCurrentWindow
+    onCloseCurrentWindow: closeCurrentWindow,
+    onRequestQuit: requestQuitApp
   })
 
   const activeFilePanelHeight = activeTab ? (filePanelHeights[activeTab.id] ?? 218) : 218
@@ -254,6 +249,8 @@ export function App() {
   const isWorkspaceFocusMode = activeWorkspaceFocusKey ? (workspaceFocusModes[activeWorkspaceFocusKey] ?? false) : false
   const isResourceMonitoringAvailable =
     activeProfile?.type === 'ssh' && activeProfile.enableResourceMonitoring !== false
+  const isSystemSidebarCollapsed =
+    isSystemSidebarUserCollapsed || Boolean(activeTab && (isWorkspaceFocusMode || !isResourceMonitoringAvailable))
   const activeTabId = activeTab?.id ?? null
   const setActiveFilePanelHeight = useCallback(
     (next: SetStateAction<number>) => {
@@ -288,23 +285,6 @@ export function App() {
     setFilePanelHeights((currentHeights) => retainOpenTabUiState(currentHeights, openTabIds))
     setWorkspaceFocusModes((currentModes) => retainOpenTabUiState(currentModes, openTabIds))
   }, [localTabs, visibleWorkspaceTabs])
-
-  useEffect(() => {
-    if (!activeWorkspaceFocusKey || isHomeWorkspaceVisible) {
-      return
-    }
-
-    setIsSystemSidebarCollapsed(isWorkspaceFocusMode || !isResourceMonitoringAvailable)
-    if (!isWorkspaceFocusMode) {
-      setSidebarWidth(214)
-    }
-  }, [
-    activeWorkspaceFocusKey,
-    isHomeWorkspaceVisible,
-    isResourceMonitoringAvailable,
-    isWorkspaceFocusMode,
-    setIsSystemSidebarCollapsed
-  ])
 
   // 3. Workspace Modals Hook
   const {
@@ -573,19 +553,12 @@ export function App() {
     if (!windowCloseRequest) {
       return
     }
-    const tabsToCheck = windowCloseRequest.isQuit ? workspace.tabs : visibleWorkspaceTabs
-    const hasActive = tabsToCheck.some((tab) =>
+    const hasActive = workspace.tabs.some((tab) =>
       Boolean(tab && (tab.status === 'connecting' || tab.status === 'connected'))
     )
     requestWindowCloseConfirmation(windowCloseRequest.isQuit, hasActive)
     clearWindowCloseRequest()
-  }, [
-    windowCloseRequest,
-    workspace.tabs,
-    visibleWorkspaceTabs,
-    requestWindowCloseConfirmation,
-    clearWindowCloseRequest
-  ])
+  }, [windowCloseRequest, workspace.tabs, requestWindowCloseConfirmation, clearWindowCloseRequest])
 
   const normalizeErrorMessage = (err: unknown) => {
     const rawMessage = err instanceof Error ? err.message : String(err)
@@ -833,7 +806,7 @@ export function App() {
 
   const windowCloseConfirmProps = windowCloseConfirm
     ? {
-        confirmLabel: windowCloseConfirm.isQuit ? t.closeConfirmQuit : t.closeConfirmWorkspace,
+        confirmLabel: t.closeConfirmQuit,
         confirmVariant: 'danger' as const,
         description: (
           <>
@@ -855,8 +828,8 @@ export function App() {
           </button>
         ) : null,
         onClose: () => resolveWindowCloseConfirmation('cancel'),
-        onConfirm: () => resolveWindowCloseConfirmation(windowCloseConfirm.isQuit ? 'quit' : 'close-workspace'),
-        title: windowCloseConfirm.isQuit ? t.closeConfirmTitle : t.closeWorkspaceConfirmTitle
+        onConfirm: () => resolveWindowCloseConfirmation('quit'),
+        title: t.closeConfirmTitle
       }
     : null
 
@@ -1102,8 +1075,6 @@ export function App() {
   const tabBarProps: Omit<TabBarProps, 'homeBrandContent'> = {
     activeHomeTabId: effectiveActiveLocalTabId,
     activeSessionTabId: visibleActiveSessionTabId,
-    canAddHomeTab: isWorkspaceWindow,
-    dragFeedback: tabDragFeedback,
     isWorkspaceFocusMode,
     onAddHomeTab: addHomeTab,
     onActivateHome: activateHomeTab,
@@ -1117,7 +1088,6 @@ export function App() {
     onDragEnd: endTabDrag,
     onDragEnter: enterDraggedTab,
     onDragStart: startTabDrag,
-    onDrop: dropDraggedTab,
     onOpenSettings: () => setShowSettings(true),
     onOpenTabContext: (event: React.MouseEvent<HTMLDivElement>, target: TabContextTarget) => {
       openTabContextMenu(event, target)
@@ -1131,13 +1101,11 @@ export function App() {
         ...currentModes,
         [activeWorkspaceFocusKey]: nextFocusMode
       }))
-      setIsSystemSidebarCollapsed(nextFocusMode)
       if (!nextFocusMode) {
         setSidebarWidth(214)
       }
     },
-    orderedTabs,
-    showWorkspaceTools: isWorkspaceWindow
+    orderedTabs
   }
 
   return (
@@ -1528,8 +1496,6 @@ export function App() {
                 canCloseCurrent:
                   tabContextMenu.target.kind === 'session' ? true : localTabs.length + visibleWorkspaceTabs.length > 1,
                 canCloseOthers: localTabs.length + visibleWorkspaceTabs.length > 1,
-                canDetach: tabContextMenu.target.kind === 'session',
-                canAttach: isDetachedSessionWindow && tabContextMenu.target.kind === 'session',
                 isSessionTab: tabContextMenu.target.kind === 'session',
                 onAction: (action) => {
                   void handleTabContextAction(action)

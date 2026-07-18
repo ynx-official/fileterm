@@ -1,4 +1,4 @@
-name: Release Electron
+name: Release Tauri
 
 on:
   push:
@@ -12,8 +12,6 @@ permissions:
 jobs:
   validate-release-tag:
     runs-on: ubuntu-latest
-    outputs:
-      release_branch: ${{ steps.validate.outputs.release_branch }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -21,19 +19,16 @@ jobs:
           fetch-depth: 0
 
       - name: Validate tag source branch
-        id: validate
         shell: bash
         run: |
           set -euo pipefail
 
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
             echo "Manual workflow dispatch: skip release branch tag validation."
-            echo "release_branch=manual-dispatch" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
           git fetch --prune origin '+refs/heads/release/*:refs/remotes/origin/release/*'
-
           tag_commit="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
           release_branches="$(git branch -r --contains "${tag_commit}" | sed 's/^[*[:space:]]*//' | grep '^origin/release/' || true)"
 
@@ -42,20 +37,19 @@ jobs:
             exit 1
           fi
 
-          first_branch="$(printf '%s\n' "${release_branches}" | head -n 1)"
-          echo "Validated release tag on branch: ${first_branch}"
-          echo "release_branch=${first_branch}" >> "${GITHUB_OUTPUT}"
+          echo "Validated release tag on branch: $(printf '%s\n' "${release_branches}" | head -n 1)"
 
-  build-mac:
+  build-macos-arm64:
     needs: validate-release-tag
     runs-on: macos-14
-    env:
-      CSC_LINK: ${{ secrets.CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-      CSC_IDENTITY_AUTO_DISCOVERY: false
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
 
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -66,80 +60,47 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build packages (core → shared → storage)
+      - name: Build shared packages and typecheck Tauri
         run: |
           npm run build -w @fileterm/core
           npm run build -w @fileterm/shared
           npm run build -w @fileterm/storage
+          npm run typecheck -w @fileterm/tauri
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Package macOS Apple Silicon
+        run: npm run release:mac -w @fileterm/tauri
 
-      - name: Build renderer + main
-        run: npm run build -w @fileterm/electron
-
-      - name: Package macOS arm64 and x64
-        run: |
-          if [[ -z "${CSC_LINK:-}" ]]; then
-            unset CSC_LINK CSC_KEY_PASSWORD
-          fi
-          cd apps/electron
-          npx electron-builder --mac --arm64 --x64 --publish never
-
-      - name: Verify macOS Ad-hoc signatures
+      - name: Normalize macOS Apple Silicon artifact name
         shell: bash
         run: |
           set -euo pipefail
+          bundle_dir="apps/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg"
+          source_file="$(find "$bundle_dir" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$source_file"
+          mv "$source_file" "$bundle_dir/FileTerm-${GITHUB_REF_NAME#v}-macos-arm64.dmg"
 
-          apps=()
-          while IFS= read -r -d '' app; do
-            apps+=("${app}")
-          done < <(find apps/electron/release -type d -name 'FileTerm.app' -print0)
-          if [[ "${#apps[@]}" -ne 2 ]]; then
-            echo "Expected two architecture-specific FileTerm.app bundles, found ${#apps[@]}."
-            printf '%s\n' "${apps[@]}"
-            exit 1
-          fi
-
-          for app in "${apps[@]}"; do
-            echo "Verifying Ad-hoc signature: ${app}"
-            codesign --verify --deep --strict --verbose=2 "${app}"
-            signature_info="$(codesign --display --verbose=4 "${app}" 2>&1)"
-            printf '%s\n' "${signature_info}"
-            grep -q 'Signature=adhoc' <<<"${signature_info}"
-          done
-
-      - name: Validate macOS update metadata
+      - name: Verify macOS package
         shell: bash
-        run: |
-          set -euo pipefail
-          test -f apps/electron/release/latest-mac.yml
-          compgen -G 'apps/electron/release/*macos-arm64.dmg' >/dev/null
-          compgen -G 'apps/electron/release/*macos-arm64.zip' >/dev/null
-          compgen -G 'apps/electron/release/*macos-x64.dmg' >/dev/null
-          compgen -G 'apps/electron/release/*macos-x64.zip' >/dev/null
+        run: test -n "$(find apps/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)"
 
-      - name: Upload artifacts
+      - name: Upload macOS Apple Silicon artifact
         uses: actions/upload-artifact@v6
         with:
-          name: FileTerm-macOS-arch-split
-          path: |
-            apps/electron/release/*.dmg
-            apps/electron/release/*.zip
-            apps/electron/release/*.yml
+          name: FileTerm-macOS-arm64
+          path: apps/tauri/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
 
-  build-win:
+  build-macos-x64:
     needs: validate-release-tag
-    runs-on: windows-latest
-    strategy:
-      matrix:
-        arch: [x64]
-      fail-fast: false
-
+    runs-on: macos-15-intel
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
 
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -150,62 +111,122 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build packages (core → shared → storage)
+      - name: Build shared packages and typecheck Tauri
         run: |
           npm run build -w @fileterm/core
           npm run build -w @fileterm/shared
           npm run build -w @fileterm/storage
+          npm run typecheck -w @fileterm/tauri
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Package macOS Intel
+        run: npm run release:mac:x64 -w @fileterm/tauri
 
-      - name: Build renderer + main
-        run: npm run build -w @fileterm/electron
-
-      - name: Package Windows (${{ matrix.arch }})
-        run: |
-          cd apps/electron
-          npx electron-builder --win --${{ matrix.arch }} --publish never
-
-      - name: Validate Windows update metadata
+      - name: Normalize macOS Intel artifact name
         shell: bash
         run: |
           set -euo pipefail
-          test -f apps/electron/release/latest.yml
-          compgen -G 'apps/electron/release/*.exe' >/dev/null
+          bundle_dir="apps/tauri/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg"
+          source_file="$(find "$bundle_dir" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$source_file"
+          mv "$source_file" "$bundle_dir/FileTerm-${GITHUB_REF_NAME#v}-macos-x64.dmg"
 
-      - name: Upload artifacts
+      - name: Verify macOS package
+        shell: bash
+        run: test -n "$(find apps/tauri/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg -name '*.dmg' -print -quit)"
+
+      - name: Upload macOS Intel artifact
         uses: actions/upload-artifact@v6
         with:
-          name: FileTerm-Windows-${{ matrix.arch }}
+          name: FileTerm-macOS-x64
+          path: apps/tauri/src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+  build-windows:
+    needs: validate-release-tag
+    runs-on: windows-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages and typecheck Tauri
+        run: |
+          npm run build -w @fileterm/core
+          npm run build -w @fileterm/shared
+          npm run build -w @fileterm/storage
+          npm run typecheck -w @fileterm/tauri
+
+      - name: Require the updater signing key
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'Missing repository secret TAURI_SIGNING_PRIVATE_KEY. See README release prerequisites.'
+          }
+
+      - name: Package signed Windows installer and updater signature
+        run: npm run release:win -w @fileterm/tauri
+
+      - name: Normalize Windows installer artifact names
+        shell: pwsh
+        run: |
+          $bundleDir = 'apps/tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $installer = Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe' -File | Select-Object -First 1
+          if (-not $installer) { throw 'NSIS installer was not generated.' }
+          $signature = Get-Item -LiteralPath ($installer.FullName + '.sig')
+          $targetName = "FileTerm-$version-windows-x64-setup.exe"
+          Move-Item -LiteralPath $installer.FullName -Destination (Join-Path $bundleDir $targetName)
+          Move-Item -LiteralPath $signature.FullName -Destination (Join-Path $bundleDir "$targetName.sig")
+
+      - name: Create GitHub Release updater manifest
+        if: startsWith(github.ref, 'refs/tags/')
+        run: node ./scripts/create-windows-updater-manifest.mjs ./src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis
+        working-directory: apps/tauri
+
+      - name: Verify Windows updater artifacts
+        shell: pwsh
+        run: |
+          $bundleDir = 'apps/tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis'
+          if (-not (Get-ChildItem -LiteralPath $bundleDir -Filter '*.exe' -File)) { throw 'NSIS installer was not generated.' }
+          if (-not (Get-ChildItem -LiteralPath $bundleDir -Filter '*-setup.exe.sig' -File)) { throw 'NSIS updater signature was not generated.' }
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: FileTerm-Windows-x64
           path: |
-            apps/electron/release/*.exe
-            apps/electron/release/*.yml
+            apps/tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            apps/tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.sig
+            apps/tauri/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/latest.json
           if-no-files-found: error
 
   release:
-    needs: [validate-release-tag, build-mac, build-win]
+    needs: [validate-release-tag, build-macos-arm64, build-macos-x64, build-windows]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Download all artifacts
+      - name: Download release artifacts
         uses: actions/download-artifact@v7
-
-      - name: Clean up stale draft releases
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          REPO="${{ github.repository }}"
-          gh release list -R "${REPO}" --limit 100 --json tagName,isDraft \
-            | jq -r '.[] | select(.isDraft) | .tagName' \
-            | while read -r tag; do
-              echo "Deleting draft release: ${tag}"
-              gh release delete "${tag}" -R "${REPO}" --yes --cleanup-tag 2>/dev/null || true
-            done
 
       - name: Publish GitHub Release
         shell: bash
@@ -213,28 +234,30 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          repo="${{ github.repository }}"
+          tag="${GITHUB_REF_NAME}"
 
-          REPO="${{ github.repository }}"
-          TAG="${GITHUB_REF_NAME}"
-
-          # Delete any existing release for this tag (draft or otherwise)
-          if gh release view "${TAG}" -R "${REPO}" &>/dev/null; then
-            echo "Removing existing release for tag ${TAG}..."
-            gh release delete "${TAG}" -R "${REPO}" --yes --cleanup-tag 2>/dev/null || true
-            sleep 2  # Give GitHub API time to sync
+          if gh release view "${tag}" -R "${repo}" >/dev/null 2>&1; then
+            gh release delete "${tag}" -R "${repo}" --yes
           fi
 
-          echo "Creating release for ${TAG}..."
-          release_flags=()
-          if [[ "${TAG}" == *-* ]]; then
-            release_flags+=(--prerelease)
-          fi
-          notes_file="docs/quality/release-notes-${TAG#v}.md"
+          notes_file="docs/quality/release-notes-${tag#v}.md"
           notes_flags=(--generate-notes)
-          if [[ -f "${notes_file}" ]]; then
+          if [ -f "${notes_file}" ]; then
             notes_flags=(--notes-file "${notes_file}")
           fi
-          gh release create "${TAG}" -R "${REPO}" \
+          release_flags=()
+          if [[ "${tag}" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+
+          mapfile -d '' assets < <(find . -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.sig' -o -name 'latest.json' \) -print0)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo 'No Tauri release assets were downloaded.'
+            exit 1
+          fi
+
+          gh release create "${tag}" -R "${repo}" \
             "${release_flags[@]}" \
             "${notes_flags[@]}" \
-            **/*.dmg **/*.zip **/*.exe **/latest.yml **/latest-mac.yml
+            "${assets[@]}"

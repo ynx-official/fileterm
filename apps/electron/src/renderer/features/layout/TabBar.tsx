@@ -1,4 +1,4 @@
-import type { DragEvent, MouseEvent, ReactNode } from 'react'
+import type { MouseEvent, ReactNode } from 'react'
 import type { WorkspaceTab } from '@fileterm/core'
 import { tabStatusClass } from '../../app/app-utils'
 import { t } from '../../i18n'
@@ -14,13 +14,9 @@ export type TabContextTarget =
   | { kind: 'local'; id: string; title: string }
   | { kind: 'session'; id: string; title: string; status: WorkspaceTab['status'] }
 
-export type TabDragFeedback = 'sort' | 'detach' | 'attach' | 'blocked'
-
 export interface TabBarProps {
   activeHomeTabId: string | null
   activeSessionTabId: string | null
-  canAddHomeTab?: boolean
-  dragFeedback: TabDragFeedback | null
   homeBrandContent?: ReactNode
   isWorkspaceFocusMode: boolean
   onAddHomeTab(): void
@@ -28,22 +24,18 @@ export interface TabBarProps {
   onActivateSession(id: string): void
   onCloseHomeTab(event: MouseEvent<HTMLButtonElement>, id: string): void
   onCloseSessionTab(event: MouseEvent<HTMLButtonElement>, id: string): void
-  onDragEnd(event: DragEvent<HTMLElement>): void
+  onDragEnd(): void
   onDragEnter(targetKey: string): void
-  onDragStart(event: DragEvent<HTMLElement>, tabKey: string): void
-  onDrop(event: DragEvent<HTMLElement>, targetKey?: string): void
+  onDragStart(tabKey: string): void
   onOpenTabContext(event: MouseEvent<HTMLDivElement>, target: TabContextTarget): void
   onOpenSettings(): void
   onToggleWorkspaceFocus(): void
   orderedTabs: OrderedTabEntry[]
-  showWorkspaceTools?: boolean
 }
 
 export function TabBar({
   activeHomeTabId,
   activeSessionTabId,
-  canAddHomeTab = true,
-  dragFeedback,
   homeBrandContent,
   isWorkspaceFocusMode,
   onAddHomeTab,
@@ -54,24 +46,12 @@ export function TabBar({
   onDragEnd,
   onDragEnter,
   onDragStart,
-  onDrop,
   onOpenTabContext,
   onOpenSettings,
   onToggleWorkspaceFocus,
-  orderedTabs,
-  showWorkspaceTools = true
+  orderedTabs
 }: TabBarProps) {
   const focusModeLabel = isWorkspaceFocusMode ? t.exitWorkspaceFocusMode : t.enterWorkspaceFocusMode
-  const dragFeedbackLabel =
-    dragFeedback === 'detach'
-      ? t.tabDragDetachHint
-      : dragFeedback === 'attach'
-        ? t.tabDragAttachHint
-        : dragFeedback === 'blocked'
-          ? t.tabDragBlockedHint
-          : dragFeedback === 'sort'
-            ? t.tabDragSortHint
-            : null
 
   return (
     <header className="fs-tabbar">
@@ -90,16 +70,7 @@ export function TabBar({
         )}
       </div>
       <div className="titlebar-tabarea">
-        <div
-          className="fs-tabs"
-          data-workspace-tab-drop-zone="precise"
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => {
-            event.stopPropagation()
-            onDrop(event)
-          }}
-          onWheel={handleHorizontalWheelScroll}
-        >
+        <div className="fs-tabs" onWheel={handleHorizontalWheelScroll}>
           {orderedTabs.map((entry, index) =>
             entry.kind === 'local' ? (
               <div
@@ -120,11 +91,7 @@ export function TabBar({
                 onDragEnd={onDragEnd}
                 onDragEnter={() => onDragEnter(entry.key)}
                 onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => {
-                  event.stopPropagation()
-                  onDrop(event, entry.key)
-                }}
-                onDragStart={(event) => onDragStart(event, entry.key)}
+                onDragStart={() => onDragStart(entry.key)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     onActivateHome(entry.id)
@@ -161,11 +128,7 @@ export function TabBar({
                 onDragEnd={onDragEnd}
                 onDragEnter={() => onDragEnter(entry.key)}
                 onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => {
-                  event.stopPropagation()
-                  onDrop(event, entry.key)
-                }}
-                onDragStart={(event) => onDragStart(event, entry.key)}
+                onDragStart={() => onDragStart(entry.key)}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter' || event.key === ' ') {
                     onActivateSession(entry.tab.id)
@@ -185,40 +148,28 @@ export function TabBar({
               </div>
             )
           )}
-          {canAddHomeTab ? (
-            <button aria-label={t.newTab} className="add-tab" type="button" onClick={onAddHomeTab}>
-              <AppIcon name="plus" size={16} />
-            </button>
-          ) : null}
+          <button aria-label={t.newTab} className="add-tab" type="button" onClick={onAddHomeTab}>
+            <AppIcon name="plus" size={16} />
+          </button>
         </div>
-        {showWorkspaceTools ? (
-          <div className="window-tools">
-            <button
-              aria-label={focusModeLabel}
-              aria-pressed={isWorkspaceFocusMode}
-              className={`workspace-focus-toggle ${isWorkspaceFocusMode ? 'is-active' : ''}`}
-              title={focusModeLabel}
-              type="button"
-              onClick={onToggleWorkspaceFocus}
-            >
-              <span className="material-symbols-outlined">
-                {isWorkspaceFocusMode ? 'close_fullscreen' : 'open_in_full'}
-              </span>
-            </button>
-            <button aria-label={t.settings} title={t.settings} type="button" onClick={onOpenSettings}>
-              <span className="material-symbols-outlined">settings</span>
-            </button>
-          </div>
-        ) : null}
+        <div className="window-tools">
+          <button
+            aria-label={focusModeLabel}
+            aria-pressed={isWorkspaceFocusMode}
+            className={`workspace-focus-toggle ${isWorkspaceFocusMode ? 'is-active' : ''}`}
+            title={focusModeLabel}
+            type="button"
+            onClick={onToggleWorkspaceFocus}
+          >
+            <span className="material-symbols-outlined">
+              {isWorkspaceFocusMode ? 'close_fullscreen' : 'open_in_full'}
+            </span>
+          </button>
+          <button aria-label={t.settings} title={t.settings} type="button" onClick={onOpenSettings}>
+            <span className="material-symbols-outlined">settings</span>
+          </button>
+        </div>
       </div>
-      {dragFeedbackLabel ? (
-        <div className={`tab-drag-feedback is-${dragFeedback}`} role="status">
-          <span className="material-symbols-outlined" aria-hidden="true">
-            {dragFeedback === 'blocked' ? 'block' : dragFeedback === 'sort' ? 'swap_horiz' : 'open_in_new'}
-          </span>
-          <strong>{dragFeedbackLabel}</strong>
-        </div>
-      ) : null}
     </header>
   )
 }

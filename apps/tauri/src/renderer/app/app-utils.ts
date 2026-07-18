@@ -49,6 +49,17 @@ export function hasSelectedText() {
   return selection.toString().trim().length > 0
 }
 
+export function settledResultsError(action: string, results: PromiseSettledResult<unknown>[]): Error | null {
+  const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (!failures.length) {
+    return null
+  }
+  const firstReason = failures[0]?.reason
+  const detail = firstReason instanceof Error ? firstReason.message : String(firstReason ?? '')
+  const summary = `${action}失败：${failures.length}/${results.length} 个目标未完成`
+  return new Error(detail ? `${summary}；${detail}` : summary)
+}
+
 export function homeTabKey(id: string) {
   return `home:${id}`
 }

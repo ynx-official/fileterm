@@ -18,10 +18,8 @@ const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 static LOG_DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 static AUTHORIZATION_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
-        r#"(?i)(authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+)[^\s,;"'}]+"#,
-    )
-    .expect("static authorization redaction regex")
+    regex::Regex::new(r#"(?i)(authorization["']?\s*[:=]\s*["']?(?:bearer|basic)\s+)[^\s,;"'}]+"#)
+        .expect("static authorization redaction regex")
 });
 static SECRET_PATTERN: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(
@@ -67,10 +65,7 @@ fn append(directory: &Path, level: &str, scope: &str, message: &str) {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
-    let line = format!(
-        "{timestamp} [{level}] [{scope}] {}\n",
-        redact(message)
-    );
+    let line = format!("{timestamp} [{level}] [{scope}] {}\n", redact(message));
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(line.as_bytes());
     }

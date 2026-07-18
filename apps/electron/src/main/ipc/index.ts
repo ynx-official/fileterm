@@ -19,8 +19,6 @@ import { registerTerminalHandlers } from './terminal-handlers.js'
 import { registerTransferHandlers } from './transfer-handlers.js'
 import type { IpcServices, IpcWindowOptions } from './types.js'
 import { registerWorkspaceHandlers } from './workspace-handlers.js'
-import { registerWorkspaceWindowHandlers } from './workspace-window-handlers.js'
-import { WorkspaceWindowRegistry } from '../services/windows/workspace-window-registry.js'
 
 export function registerIpcHandlers(userDataPath: string, options: IpcWindowOptions) {
   const profileRepository = new FileProfileRepository(
@@ -35,45 +33,26 @@ export function registerIpcHandlers(userDataPath: string, options: IpcWindowOpti
     transferJournal: new TransferJournal(userDataPath),
     sshKeyService
   })
-  const broadcastToWindows = (channel: string, payload: unknown) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) {
-        try {
-          window.webContents.send(channel, payload)
-        } catch (error) {
-          if (!isIgnorableBroadcastError(error)) {
-            throw error
+  const services: IpcServices = {
+    workspaceService,
+    sshKeyService,
+    localFilesService: new LocalFilesService(),
+    broadcastSnapshot(snapshot) {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed()) {
+          try {
+            window.webContents.send('workspace:snapshot', snapshot)
+          } catch (error) {
+            if (!isIgnorableBroadcastError(error)) {
+              throw error
+            }
           }
         }
       }
     }
   }
-  const workspaceWindowRegistry = new WorkspaceWindowRegistry({
-    getMainWindow: options.getMainWindow,
-    ensureMainWindow: options.ensureMainWindow,
-    listTabIds: () => workspaceService.listWorkspaceTabIds(),
-    createDetachedWindow: options.createDetachedWorkspaceWindow,
-    claimTabRenderer: (tabId, sender) => workspaceService.claimTabRenderer(tabId, sender),
-    releaseTabRenderer: (tabId, sender) => workspaceService.releaseTabRenderer(tabId, sender),
-    closeTab: async (tabId) => {
-      const snapshot = await workspaceService.closeTab(tabId)
-      broadcastToWindows('workspace:snapshot', snapshot)
-    },
-    broadcastPlacements: (placements) => broadcastToWindows('workspaceWindow:placementsChanged', placements),
-    isQuitting: options.isQuitting
-  })
-  const services: IpcServices = {
-    workspaceService,
-    workspaceWindowRegistry,
-    sshKeyService,
-    localFilesService: new LocalFilesService(),
-    broadcastSnapshot(snapshot) {
-      broadcastToWindows('workspace:snapshot', snapshot)
-    }
-  }
 
   registerAppHandlers(options)
-  registerWorkspaceWindowHandlers(services)
   registerWorkspaceHandlers(services, options)
   registerLocalFilesHandlers(services)
   registerTransferHandlers(services)

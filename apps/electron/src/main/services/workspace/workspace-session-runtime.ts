@@ -38,15 +38,6 @@ type WorkspaceSessionRuntimeEvents = {
   'tab-event': [event: WorkspaceSessionTabEvent]
 }
 
-export interface WorkspaceSessionRuntimeOptions {
-  getSnapshot(): Promise<WorkspaceSnapshot>
-  getTabStatus(tabId: string): WorkspaceTab['status'] | undefined
-  resolveProfile(profileId: string): Promise<ConnectionProfile | null>
-  rememberTrustedHostFingerprint(profileId: string, fingerprint: string): Promise<void>
-  resolveSshKey(keyId: string): Promise<ResolvedSshKey>
-  setSshKeyPassphrase(keyId: string, passphrase: string | undefined): Promise<void>
-}
-
 export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntimeEvents> {
   private readonly sessions = new Map<string, SessionSnapshot>()
   private readonly liveControllers = new Map<string, LiveSessionController>()
@@ -77,11 +68,18 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
       reject(error: Error): void
     }
   >()
-  private readonly options: WorkspaceSessionRuntimeOptions
 
-  constructor(options: WorkspaceSessionRuntimeOptions) {
+  constructor(
+    private readonly options: {
+      getSnapshot(): Promise<WorkspaceSnapshot>
+      getTabStatus(tabId: string): WorkspaceTab['status'] | undefined
+      resolveProfile(profileId: string): Promise<ConnectionProfile | null>
+      rememberTrustedHostFingerprint(profileId: string, fingerprint: string): Promise<void>
+      resolveSshKey(keyId: string): Promise<ResolvedSshKey>
+      setSshKeyPassphrase(keyId: string, passphrase: string | undefined): Promise<void>
+    }
+  ) {
     super()
-    this.options = options
     this.terminalOutputBatcher = new TerminalOutputBatcher((tabId, chunk) => {
       this.sendToTab(tabId, 'terminal:data', { tabId, chunk })
     })
@@ -102,24 +100,13 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
     this.sessions.set(tabId, snapshot)
   }
 
-  claimTabRenderer(tabId: string, sender: WebContents) {
+  setSender(tabId: string, sender: WebContents) {
     this.invalidSenders.delete(sender)
     this.tabSenders.set(tabId, sender)
     this.attachSenderLifecycleListeners(sender)
 
     const controller = this.liveControllers.get(tabId)
     const session = this.sessions.get(tabId)
-    const liveSession = session ? this.withLiveTerminalTranscript(tabId, session) : undefined
-    if (liveSession?.terminalTranscript !== undefined) {
-      this.sendToTab(tabId, 'terminal:state', {
-        tabId,
-        summary: liveSession.summary,
-        transcript: liveSession.terminalTranscript,
-        connected: liveSession.connected
-      })
-    }
-    void this.emitSnapshotForTab(tabId)
-
     if (
       controller?.type === 'ssh' &&
       session?.connected &&
@@ -130,17 +117,7 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
     }
   }
 
-  releaseTabRenderer(tabId: string, sender: WebContents) {
-    if (this.tabSenders.get(tabId) !== sender) {
-      return
-    }
-
-    this.tabSenders.delete(tabId)
-    this.stopMetricsPolling(tabId)
-    this.rejectPendingSshInteractionsForTab(tabId, new Error('SSH interaction window was closed'))
-  }
-
-  getTabRenderer(tabId: string) {
+  getSender(tabId: string) {
     return this.tabSenders.get(tabId)
   }
 
@@ -163,11 +140,10 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
     await controller?.disconnect()
     this.terminalOutputBatcher.flush(tabId)
     const current = this.sessions.get(tabId)
-    if (current) {
+    if (current && isTerminalController(controller)) {
       this.sessions.set(tabId, {
         ...current,
-        ...(isTerminalController(controller) ? { terminalTranscript: controller.getTerminalTranscript() } : {}),
-        remoteFilesLoading: false
+        terminalTranscript: controller.getTerminalTranscript()
       })
     }
     this.liveControllers.delete(tabId)
@@ -316,15 +292,9 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
           this.terminalOutputBatcher.queue(tabId, chunk)
         },
         (cwd) => {
-          if (this.liveControllers.get(tabId) !== sshController) {
-            return
-          }
           void this.handleShellCwdChanged(tabId, cwd).catch(() => undefined)
         },
         (user) => {
-          if (this.liveControllers.get(tabId) !== sshController) {
-            return
-          }
           if (!this.shellLoginUsers.has(tabId)) {
             this.shellLoginUsers.set(tabId, user)
           }
@@ -333,9 +303,6 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
           })
         },
         (summary, transcript, connected) => {
-          if (this.liveControllers.get(tabId) !== sshController) {
-            return
-          }
           this.terminalOutputBatcher.flush(tabId)
           const current = this.sessions.get(tabId)
           if (!current) {
@@ -348,7 +315,6 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
             summary,
             terminalTranscript: transcript,
             remoteFiles: connected ? current.remoteFiles : [],
-            remoteFilesLoading: connected ? current.remoteFilesLoading : false,
             shellUser: connected ? current.shellUser : undefined,
             fileAccessMode: connected ? (sshController?.getFileAccessMode() ?? current.fileAccessMode) : 'user',
             hasReusableSudoAuth: connected ? (sshController?.hasReusableSudoAuth() ?? false) : false,
@@ -548,8 +514,7 @@ export class WorkspaceSessionRuntime extends EventEmitter<WorkspaceSessionRuntim
           ...current,
           summary,
           terminalTranscript: transcript,
-          connected: false,
-          remoteFilesLoading: false
+          connected: false
         })
         if (controller.type === 'ssh') {
           this.sendToTab(tabId, 'terminal:state', {

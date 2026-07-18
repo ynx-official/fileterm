@@ -43,7 +43,7 @@
   min-height: 0;
   padding: 0;
   overflow: hidden;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 
 .connection-form-window,

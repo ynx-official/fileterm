@@ -4,6 +4,7 @@ import OpenCC from 'opencc-js'
 import * as monacoEditor from 'monaco-editor'
 import type { FileContentSnapshot } from '@fileterm/core'
 import { t } from '../../i18n'
+import { FILETERM_MONO_FONT_FAMILY, observeCanvasTextMetrics } from '../../app/font-metrics'
 import { CloseButton } from '../common/CloseButton'
 import { AppIcon } from '../common/AppIcon'
 import {
@@ -91,6 +92,7 @@ export function FileEditorModal({
 
   const editorRef = useRef<EditorInstance | null>(null)
   const monacoRef = useRef<Monaco | null>(null)
+  const disposeCanvasTextMetricsRef = useRef<(() => void) | null>(null)
   const encodingRef = useRef(encoding)
   const shellRef = useRef<HTMLDivElement | null>(null)
 
@@ -102,6 +104,13 @@ export function FileEditorModal({
   useEffect(() => {
     encodingRef.current = encoding
   }, [encoding])
+
+  useEffect(() => {
+    return () => {
+      disposeCanvasTextMetricsRef.current?.()
+      disposeCanvasTextMetricsRef.current = null
+    }
+  }, [])
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
@@ -142,6 +151,7 @@ export function FileEditorModal({
   const currentEncoding = findEncodingOption(encoding)
   const currentLanguage = languages.find((option) => option.id === language)?.label ?? language
   const handleMount: OnMount = (editor, monaco) => {
+    disposeCanvasTextMetricsRef.current?.()
     editorRef.current = editor
     monacoRef.current = monaco
     setLanguages(sortEditorLanguages(monaco.languages.getLanguages()))
@@ -149,6 +159,14 @@ export function FileEditorModal({
     defineFileTermMonacoTheme(monaco)
     monaco.editor.setTheme(themeMode === 'default-dark' ? MONACO_DARK_THEME : 'vs')
     setLanguage(editor.getModel()?.getLanguageId() ?? 'plaintext')
+
+    // Monaco caches both font widths and line rendering. Unlike normal DOM
+    // text it must be remeasured after local fonts or WebView DPI become ready.
+    disposeCanvasTextMetricsRef.current = observeCanvasTextMetrics((fontFamily) => {
+      editor.updateOptions({ fontFamily })
+      monaco.editor.remeasureFonts()
+      editor.layout()
+    })
 
     const position = editor.getPosition()
     if (position) {
@@ -273,7 +291,7 @@ export function FileEditorModal({
             {isSaving ? <span aria-hidden="true" className="button-spinner" /> : null}
             <span>{isSaving ? t.saving : t.save}</span>
           </button>
-          <CloseButton onClick={onClose} />
+          <CloseButton disabled={isBusy || isSaving} onClick={onClose} />
         </div>
       </div>
 
@@ -360,7 +378,7 @@ export function FileEditorModal({
                     seedSearchStringFromSelection: 'always'
                   },
                   fixedOverflowWidgets: true,
-                  fontFamily: '"SF Mono", Menlo, Consolas, monospace',
+                  fontFamily: FILETERM_MONO_FONT_FAMILY,
                   fontLigatures: true,
                   fontSize: 13,
                   lineHeight: 20,

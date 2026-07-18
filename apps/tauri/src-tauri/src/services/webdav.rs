@@ -1,6 +1,7 @@
-//! Manual, conflict-aware WebDAV synchronization for the portable profile
-//! bundle. The renderer only ever receives the public config; passwords and
-//! local content hashes stay in the main process' data directory.
+//! Manual, conflict-aware WebDAV synchronization for the complete profile
+//! bundle. Connection credentials stay inside the Rust service boundary but
+//! are intentionally included in the remote bundle so another FileTerm
+//! installation can reconnect after downloading it.
 
 use std::fs;
 use std::path::PathBuf;
@@ -125,6 +126,7 @@ fn read_config(app: &AppHandle) -> Result<StoredConfig, AppError> {
     if !path.exists() {
         return Ok(StoredConfig::default());
     }
+    lock_down_config_file(&path)?;
     let content = fs::read_to_string(path).map_err(|error| AppError::Storage(error.to_string()))?;
     let mut config: StoredConfig = serde_json::from_str(&content)
         .map_err(|error| AppError::Serialization(error.to_string()))?;
@@ -136,16 +138,29 @@ fn read_config(app: &AppHandle) -> Result<StoredConfig, AppError> {
 
 fn write_config(app: &AppHandle, config: &StoredConfig) -> Result<(), AppError> {
     let path = config_path(app)?;
-    let temporary = path.with_file_name("webdav-sync.json.tmp");
+    let temporary = path.with_file_name(format!(".webdav-sync.json.{}.tmp", uuid::Uuid::new_v4()));
     let content = serde_json::to_vec_pretty(config)
         .map_err(|error| AppError::Serialization(error.to_string()))?;
-    fs::write(&temporary, content).map_err(|error| AppError::Storage(error.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600));
+    crate::storage::write_restricted_file(&temporary, &content)?;
+    if let Err(error) = lock_down_config_file(&temporary) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
     }
-    fs::rename(&temporary, path).map_err(|error| AppError::Storage(error.to_string()))
+    crate::storage::replace_file_atomically(&temporary, &path)?;
+    lock_down_config_file(&path)
+}
+
+#[cfg(unix)]
+fn lock_down_config_file(path: &std::path::Path) -> Result<(), AppError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| AppError::Storage(error.to_string()))
+}
+
+#[cfg(not(unix))]
+fn lock_down_config_file(_path: &std::path::Path) -> Result<(), AppError> {
+    Ok(())
 }
 
 fn configured(app: &AppHandle) -> Result<StoredConfig, AppError> {
@@ -216,15 +231,16 @@ pub fn export_timestamp() -> String {
 
 fn export_bundle(app: &AppHandle) -> Result<(Vec<u8>, String), AppError> {
     let (profiles, _) = profile_ops::read_and_heal_profiles(app)?;
-    let profiles = profiles
-        .iter()
-        .map(profile_ops::strip_secret_fields_public)
-        .collect::<Vec<_>>();
+    build_export_bundle(&profiles)
+}
+
+fn build_export_bundle(profiles: &[Value]) -> Result<(Vec<u8>, String), AppError> {
     let profile_bytes = serde_json::to_vec(&profiles)
         .map_err(|error| AppError::Serialization(error.to_string()))?;
     let content_hash = sha256_hex(&profile_bytes);
     let payload = serde_json::json!({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "containsSecrets": true,
         "generatedAt": export_timestamp(),
         "contentHash": content_hash,
         "profiles": profiles,
@@ -304,21 +320,26 @@ fn sanitize_import_profile(value: &Value) -> Result<Value, String> {
     object
         .entry("username".to_string())
         .or_insert_with(|| Value::String(String::new()));
-    for key in [
-        "id",
-        "parentId",
-        "order",
-        "lastUsedAt",
-        "password",
-        "passphrase",
-        "privateKeyPath",
-    ] {
+    for key in ["id", "parentId", "order", "lastUsedAt"] {
         object.remove(key);
     }
-    if let Some(proxy) = object.get_mut("proxy").and_then(Value::as_object_mut) {
-        proxy.remove("password");
-    }
     Ok(Value::Object(object))
+}
+
+fn merge_synced_profile(existing: &Value, incoming: &Value) -> Result<Value, String> {
+    let mut merged = existing
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "本地配置项不是对象".to_string())?;
+    let incoming = incoming
+        .as_object()
+        .ok_or_else(|| "远端配置项不是对象".to_string())?;
+    for (key, value) in incoming {
+        if !matches!(key.as_str(), "id" | "parentId" | "order" | "lastUsedAt") {
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::Object(merged))
 }
 
 fn parse_bundle(bytes: &[u8]) -> Result<Vec<Value>, AppError> {
@@ -412,7 +433,9 @@ pub async fn upload(app: &AppHandle) -> Result<Value, AppError> {
     let result = upload_inner(app).await;
     match &result {
         Ok(_) => crate::services::logging::info(app, "webdav", "upload completed"),
-        Err(error) => crate::services::logging::error(app, "webdav", format!("upload failed: {error}")),
+        Err(error) => {
+            crate::services::logging::error(app, "webdav", format!("upload failed: {error}"))
+        }
     }
     result
 }
@@ -494,12 +517,15 @@ pub async fn download(app: &AppHandle) -> Result<Value, AppError> {
             app,
             "webdav",
             format!(
-                "download completed imported={} skipped={}",
+                "download completed imported={} updated={} skipped={}",
                 value.get("imported").and_then(Value::as_u64).unwrap_or(0),
+                value.get("updated").and_then(Value::as_u64).unwrap_or(0),
                 value.get("skipped").and_then(Value::as_u64).unwrap_or(0)
             ),
         ),
-        Err(error) => crate::services::logging::error(app, "webdav", format!("download failed: {error}")),
+        Err(error) => {
+            crate::services::logging::error(app, "webdav", format!("download failed: {error}"))
+        }
     }
     result
 }
@@ -512,9 +538,12 @@ async fn download_inner(app: &AppHandle) -> Result<Value, AppError> {
     let (existing, _) = profile_ops::read_and_heal_profiles(app)?;
     let mut known = existing
         .iter()
-        .filter_map(profile_fingerprint)
-        .collect::<std::collections::HashSet<_>>();
+        .filter_map(|profile| {
+            profile_fingerprint(profile).map(|fingerprint| (fingerprint, profile.clone()))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
     let mut imported = 0_u64;
+    let mut updated = 0_u64;
     let mut skipped = 0_u64;
     for profile in profiles {
         let sanitized = match sanitize_import_profile(&profile) {
@@ -528,11 +557,29 @@ async fn download_inner(app: &AppHandle) -> Result<Value, AppError> {
             skipped += 1;
             continue;
         };
-        if !known.insert(fingerprint) {
-            skipped += 1;
+        if let Some(existing_profile) = known.get(&fingerprint).cloned() {
+            let Some(profile_id) = existing_profile
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+            else {
+                skipped += 1;
+                continue;
+            };
+            let merged = match merge_synced_profile(&existing_profile, &sanitized) {
+                Ok(profile) => profile,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let saved = profile_ops::update_profile(app, &profile_id, merged)?;
+            known.insert(fingerprint, saved);
+            updated += 1;
             continue;
         }
-        profile_ops::create_profile(app, sanitized)?;
+        let created = profile_ops::create_profile(app, sanitized)?;
+        known.insert(fingerprint, created);
         imported += 1;
     }
     config.last_etag = remote_etag;
@@ -541,8 +588,9 @@ async fn download_inner(app: &AppHandle) -> Result<Value, AppError> {
     write_config(app, &config)?;
     Ok(serde_json::json!({
         "action": "download",
-        "message": format!("已从 WebDAV 导入 {imported} 个连接；跳过 {skipped} 个重复或无效项。"),
+        "message": format!("已从 WebDAV 导入 {imported} 个连接，更新 {updated} 个现有连接；跳过 {skipped} 个无效项。"),
         "imported": imported,
+        "updated": updated,
         "skipped": skipped,
     }))
 }
@@ -554,7 +602,7 @@ async fn download_payload(
     client: &Client,
     config: &StoredConfig,
 ) -> Result<(Vec<u8>, Option<String>), AppError> {
-    let response = authenticated(client.get(remote_url(&config)?), &config)
+    let response = authenticated(client.get(remote_url(config)?), config)
         .send()
         .await
         .map_err(|error| command_error(format!("WebDAV 下载失败: {error}")))?;
@@ -581,7 +629,8 @@ async fn download_payload(
 #[cfg(test)]
 mod tests {
     use super::{
-        client, download_payload, normalize_remote_path, parse_bundle, sha256_hex, upload_payload, StoredConfig,
+        build_export_bundle, client, download_payload, merge_synced_profile, normalize_remote_path,
+        parse_bundle, sanitize_import_profile, sha256_hex, upload_payload, StoredConfig,
     };
     use serde_json::json;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -595,6 +644,22 @@ mod tests {
             assert!(count > 0, "client closed before completing HTTP headers");
             request.extend_from_slice(&byte[..count]);
         }
+
+        let headers = String::from_utf8(request.clone()).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or_default();
+        if content_length > 0 {
+            let mut body = vec![0_u8; content_length];
+            socket.read_exact(&mut body).await.unwrap();
+            request.extend_from_slice(&body);
+        }
+
         String::from_utf8(request).unwrap()
     }
 
@@ -620,6 +685,74 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn keeps_connection_credentials_when_sanitizing_webdav_profiles() {
+        let profile = sanitize_import_profile(&json!({
+            "id": "remote-id",
+            "name": "dev",
+            "type": "ssh",
+            "host": "example.test",
+            "port": 22,
+            "username": "ops",
+            "password": "secret",
+            "passphrase": "key-secret",
+            "proxy": { "type": "http", "password": "proxy-secret" }
+        }))
+        .unwrap();
+        assert_eq!(profile["password"], "secret");
+        assert_eq!(profile["passphrase"], "key-secret");
+        assert_eq!(profile["proxy"]["password"], "proxy-secret");
+        assert!(profile.get("id").is_none());
+    }
+
+    #[test]
+    fn webdav_upload_bundle_contains_saved_credentials() {
+        let profiles = vec![json!({
+            "id": "profile-1",
+            "name": "dev",
+            "type": "ssh",
+            "host": "example.test",
+            "port": 22,
+            "username": "ops",
+            "password": "secret",
+            "passphrase": "key-secret",
+            "proxy": { "type": "http", "password": "proxy-secret" }
+        })];
+        let (bytes, _) = build_export_bundle(&profiles).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(payload["schemaVersion"], 2);
+        assert_eq!(payload["containsSecrets"], true);
+        assert_eq!(payload["profiles"][0]["password"], "secret");
+        assert_eq!(payload["profiles"][0]["passphrase"], "key-secret");
+        assert_eq!(payload["profiles"][0]["proxy"]["password"], "proxy-secret");
+    }
+
+    #[test]
+    fn remote_duplicate_updates_credentials_without_replacing_local_identity() {
+        let existing = json!({
+            "id": "local-id",
+            "name": "dev",
+            "type": "ssh",
+            "host": "example.test",
+            "port": 22,
+            "username": "ops",
+            "password": "old",
+            "order": 42
+        });
+        let incoming = json!({
+            "name": "dev",
+            "type": "ssh",
+            "host": "example.test",
+            "port": 22,
+            "username": "ops",
+            "password": "new"
+        });
+        let merged = merge_synced_profile(&existing, &incoming).unwrap();
+        assert_eq!(merged["id"], "local-id");
+        assert_eq!(merged["order"], 42);
+        assert_eq!(merged["password"], "new");
     }
 
     #[tokio::test]
@@ -658,11 +791,10 @@ mod tests {
             last_etag: Some("\"etag-before-write\"".to_string()),
             content_hash: None,
         };
-        let error = upload_payload(&client().unwrap(), &config, b"{}".to_vec())
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("ETag 冲突"));
+        let result = upload_payload(&client().unwrap(), &config, b"{}".to_vec()).await;
         server.await.unwrap();
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("ETag 冲突"), "{error}");
     }
 
     #[tokio::test]
@@ -685,9 +817,10 @@ mod tests {
             let put_request = read_request(&mut put).await;
             assert!(put_request.starts_with("PUT /profiles.json HTTP/1.1\r\n"));
             assert!(put_request.contains("if-none-match: *\r\n"));
-            assert!(put_request.contains(&format!("content-length: {}\r\n", expected_payload.len())));
-            let mut body = vec![0_u8; expected_payload.len()];
-            put.read_exact(&mut body).await.unwrap();
+            assert!(
+                put_request.contains(&format!("content-length: {}\r\n", expected_payload.len()))
+            );
+            let body = put_request.split_once("\r\n\r\n").unwrap().1.as_bytes();
             assert_eq!(body, expected_payload);
             put.write_all(
                 b"HTTP/1.1 201 Created\r\nETag: \"etag-after-write\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -708,7 +841,9 @@ mod tests {
             content_hash: None,
         };
         assert_eq!(
-            upload_payload(&client().unwrap(), &config, payload).await.unwrap(),
+            upload_payload(&client().unwrap(), &config, payload)
+                .await
+                .unwrap(),
             Some("\"etag-after-write\"".to_string())
         );
         server.await.unwrap();
@@ -718,7 +853,8 @@ mod tests {
     async fn real_webdav_server_downloads_payload_and_hash_is_verified() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let profiles = json!([{ "name": "dev", "type": "ssh", "host": "example.test", "port": 22 }]);
+        let profiles =
+            json!([{ "name": "dev", "type": "ssh", "host": "example.test", "port": 22 }]);
         let profile_bytes = serde_json::to_vec(&profiles).unwrap();
         let payload = serde_json::to_vec(&json!({
             "schemaVersion": 1,

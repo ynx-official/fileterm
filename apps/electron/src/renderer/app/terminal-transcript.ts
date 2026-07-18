@@ -42,43 +42,6 @@ function extractAnsiEraseCharacters(value: string) {
   return result
 }
 
-export type TerminalTranscriptHydration = { mode: 'append'; text: string } | { mode: 'replace'; text: string } | null
-
-export function resolveTerminalTranscriptHydration({
-  currentTranscript,
-  nextTranscript,
-  connected,
-  preserveVisibleBuffer = false
-}: {
-  currentTranscript: string
-  nextTranscript: string
-  connected: boolean
-  preserveVisibleBuffer?: boolean
-}): TerminalTranscriptHydration {
-  if (!nextTranscript || nextTranscript === currentTranscript) {
-    return null
-  }
-
-  if (preserveVisibleBuffer && currentTranscript) {
-    return null
-  }
-
-  if (!currentTranscript) {
-    return { mode: 'replace', text: nextTranscript }
-  }
-
-  if (nextTranscript.startsWith(currentTranscript)) {
-    const text = nextTranscript.slice(currentTranscript.length)
-    return text ? { mode: 'append', text } : null
-  }
-
-  if (connected) {
-    return null
-  }
-
-  return { mode: 'replace', text: nextTranscript }
-}
-
 export function trimHydratedTerminalChunk(currentTranscript: string, chunk: string): string {
   if (!currentTranscript || !chunk) {
     return chunk
