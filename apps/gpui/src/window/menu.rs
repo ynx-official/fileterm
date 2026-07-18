@@ -15,7 +15,7 @@
 //! the spike-first pattern: get the structure compiling, fill in behavior
 //! incrementally.
 
-use gpui::{MenuItem, SharedString};
+use gpui::{Menu, MenuItem, SharedString};
 
 // ---- Action types ----
 //
@@ -91,63 +91,51 @@ pub struct OpenDocs;
 
 /// Build the application menu (File / Edit / View / Window / Help).
 ///
-/// Returns `Vec<MenuItem>` to be passed to `cx.set_menus(...)`. The
+/// Returns `Vec<Menu>` to be passed to `cx.set_menus(...)`. The
 /// `is_english` flag matches Tauri's localization: `true` → English
 /// labels, `false` → Chinese labels.
 ///
 /// G2 returns the structure with stub actions. G3+ wires real handlers.
-pub fn build_application_menu(is_english: bool) -> Vec<MenuItem> {
-    let label = |en: &str, zh: &str| -> SharedString {
-        if is_english { en } else { zh }.into()
-    };
+pub fn build_application_menu(is_english: bool) -> Vec<Menu> {
+    let label = |en: &str, zh: &str| -> SharedString { if is_english { en } else { zh }.into() };
 
-    let file = MenuItem::submenu(
-        gpui::Menu::new(label("File", "文件")).items(vec![
-            MenuItem::action(label("New Connection", "新建连接"), NewConnection),
-            MenuItem::action(
-                label("Connection Manager", "连接管理器"),
-                OpenConnectionManager,
-            ),
-            MenuItem::action(
-                label("Command Manager", "命令管理器"),
-                OpenCommandManager,
-            ),
-            MenuItem::separator(),
-            MenuItem::action(label("Close Tab", "关闭标签"), CloseTab),
-            MenuItem::separator(),
-            MenuItem::action(label("Quit", "退出"), Quit),
-        ]),
-    );
+    let file = Menu::new(label("File", "文件")).items(vec![
+        MenuItem::action(label("New Connection", "新建连接"), NewConnection),
+        MenuItem::action(
+            label("Connection Manager", "连接管理器"),
+            OpenConnectionManager,
+        ),
+        MenuItem::action(label("Command Manager", "命令管理器"), OpenCommandManager),
+        MenuItem::separator(),
+        MenuItem::action(label("Close Tab", "关闭标签"), CloseTab),
+        MenuItem::separator(),
+        MenuItem::action(label("Quit", "退出"), Quit),
+    ]);
 
-    let edit = MenuItem::submenu(
-        gpui::Menu::new(label("Edit", "编辑")).items(vec![
-            MenuItem::action(label("Undo", "撤销"), EditUndo),
-            MenuItem::action(label("Redo", "重做"), EditRedo),
-            MenuItem::separator(),
-            MenuItem::action(label("Cut", "剪切"), EditCut),
-            MenuItem::action(label("Copy", "复制"), EditCopy),
-            MenuItem::action(label("Paste", "粘贴"), EditPaste),
-            MenuItem::action(label("Select All", "全选"), EditSelectAll),
-        ]),
-    );
+    let edit = Menu::new(label("Edit", "编辑")).items(vec![
+        MenuItem::action(label("Undo", "撤销"), EditUndo),
+        MenuItem::action(label("Redo", "重做"), EditRedo),
+        MenuItem::separator(),
+        MenuItem::action(label("Cut", "剪切"), EditCut),
+        MenuItem::action(label("Copy", "复制"), EditCopy),
+        MenuItem::action(label("Paste", "粘贴"), EditPaste),
+        MenuItem::action(label("Select All", "全选"), EditSelectAll),
+    ]);
 
-    let view = MenuItem::submenu(gpui::Menu::new(label("View", "视图")).items(vec![
-        MenuItem::action(label("Toggle Theme", "切换主题"), ToggleTheme),
-    ]));
+    let view = Menu::new(label("View", "视图")).items(vec![MenuItem::action(
+        label("Toggle Theme", "切换主题"),
+        ToggleTheme,
+    )]);
 
-    let window = MenuItem::submenu(
-        gpui::Menu::new(label("Window", "窗口")).items(vec![MenuItem::action(
-            label("Show Main", "显示主窗口"),
-            ShowMain,
-        )]),
-    );
+    let window = Menu::new(label("Window", "窗口")).items(vec![MenuItem::action(
+        label("Show Main", "显示主窗口"),
+        ShowMain,
+    )]);
 
-    let help = MenuItem::submenu(
-        gpui::Menu::new(label("Help", "帮助")).items(vec![MenuItem::action(
-            label("Documentation", "文档"),
-            OpenDocs,
-        )]),
-    );
+    let help = Menu::new(label("Help", "帮助")).items(vec![MenuItem::action(
+        label("Documentation", "文档"),
+        OpenDocs,
+    )]);
 
     vec![file, edit, view, window, help]
 }
@@ -156,9 +144,7 @@ pub fn build_application_menu(is_english: bool) -> Vec<MenuItem> {
 /// / Quit). Smaller than the app menu — the tray only needs the
 /// "jump back into the app" actions.
 pub fn build_tray_menu(is_english: bool) -> Vec<MenuItem> {
-    let label = |en: &str, zh: &str| -> SharedString {
-        if is_english { en } else { zh }.into()
-    };
+    let label = |en: &str, zh: &str| -> SharedString { if is_english { en } else { zh }.into() };
 
     vec![
         MenuItem::action(label("Show Main", "显示主窗口"), ShowMain),
@@ -167,10 +153,7 @@ pub fn build_tray_menu(is_english: bool) -> Vec<MenuItem> {
             label("Connection Manager", "连接管理器"),
             OpenConnectionManager,
         ),
-        MenuItem::action(
-            label("Command Manager", "命令管理器"),
-            OpenCommandManager,
-        ),
+        MenuItem::action(label("Command Manager", "命令管理器"), OpenCommandManager),
         MenuItem::separator(),
         MenuItem::action(label("Quit", "退出"), Quit),
     ]

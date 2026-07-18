@@ -189,10 +189,7 @@ mod tests {
 
     #[test]
     fn detect_platform_windows() {
-        assert_eq!(
-            SystemMetrics::detect_platform("Windows_NT", ""),
-            "windows"
-        );
+        assert_eq!(SystemMetrics::detect_platform("Windows_NT", ""), "windows");
     }
 
     #[test]

@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
-use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::broadcast;
 
 /// A chunk of bytes emitted by the PTY's slave side (shell output).
@@ -77,7 +77,11 @@ impl PtyHandle {
     ///
     /// On Windows the caller should pass `cmd.exe` or `powershell.exe`;
     /// `portable-pty` will pick ConPTY automatically when available.
-    pub fn spawn(shell: &str, cols: u16, rows: u16) -> Result<(Self, broadcast::Receiver<TermChunk>)> {
+    pub fn spawn(
+        shell: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(Self, broadcast::Receiver<TermChunk>)> {
         let mut cmd = CommandBuilder::new(shell);
         Self::apply_term_env(&mut cmd);
         Self::spawn_impl(cmd, shell, cols, rows)

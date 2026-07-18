@@ -276,10 +276,9 @@ mod tests {
 
     #[test]
     fn move_tab_input_deserializes_camel_case() {
-        let input: MoveTabInput = serde_json::from_str(
-            r#"{"tabId":"t1","targetWindowId":"main","targetIndex":2}"#,
-        )
-        .expect("MoveTabInput should accept camelCase");
+        let input: MoveTabInput =
+            serde_json::from_str(r#"{"tabId":"t1","targetWindowId":"main","targetIndex":2}"#)
+                .expect("MoveTabInput should accept camelCase");
         assert_eq!(input.tab_id, "t1");
         assert_eq!(input.target_window_id, "main");
         assert_eq!(input.target_index, 2);
@@ -322,9 +321,7 @@ mod tests {
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].tab_id, "tab-1");
         assert!(
-            placements[0]
-                .window_id
-                .starts_with("detached-session-"),
+            placements[0].window_id.starts_with("detached-session-"),
             "window_id should be a detached-session-{{uuid}}, got {}",
             placements[0].window_id
         );
@@ -386,9 +383,8 @@ mod tests {
 
         // Drop inside the main window — SameWindow target.
         let windows = vec![("main".to_string(), ScreenBounds::new(0, 0, 1200, 800))];
-        let placements =
-            finish_tab_drag_with_registry(&mut drag, &reg, 100, 100, &windows)
-                .expect("should return Some");
+        let placements = finish_tab_drag_with_registry(&mut drag, &reg, 100, 100, &windows)
+            .expect("should return Some");
         // No detach happened, so placements is empty.
         assert!(placements.is_empty());
         assert!(reg.window_for_tab("tab-1").is_none());
@@ -405,12 +401,14 @@ mod tests {
         // Detached window already exists at (1300, 0, 800, 600).
         // Drop point (1400, 100) is inside it.
         let windows = vec![
-            ("detached-session-1".to_string(), ScreenBounds::new(1300, 0, 800, 600)),
+            (
+                "detached-session-1".to_string(),
+                ScreenBounds::new(1300, 0, 800, 600),
+            ),
             ("main".to_string(), ScreenBounds::new(0, 0, 1200, 800)),
         ];
-        let placements =
-            finish_tab_drag_with_registry(&mut drag, &reg, 1400, 100, &windows)
-                .expect("should return Some");
+        let placements = finish_tab_drag_with_registry(&mut drag, &reg, 1400, 100, &windows)
+            .expect("should return Some");
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].tab_id, "tab-1");
         assert_eq!(placements[0].window_id, "detached-session-1");
@@ -428,15 +426,12 @@ mod tests {
 
         // Drop far away — NewWindow target.
         let windows = vec![("main".to_string(), ScreenBounds::new(0, 0, 1200, 800))];
-        let placements =
-            finish_tab_drag_with_registry(&mut drag, &reg, 5000, 5000, &windows)
-                .expect("should return Some");
+        let placements = finish_tab_drag_with_registry(&mut drag, &reg, 5000, 5000, &windows)
+            .expect("should return Some");
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].tab_id, "tab-1");
         assert!(
-            placements[0]
-                .window_id
-                .starts_with("detached-session-"),
+            placements[0].window_id.starts_with("detached-session-"),
             "drop on empty screen should mint a new detached-session-{{uuid}}, got {}",
             placements[0].window_id
         );

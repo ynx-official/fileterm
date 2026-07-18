@@ -1,16 +1,10 @@
 //! Bridge layer: the in-process async API surface that GPUI views call to
 //! reach backend services.
 //!
-//! G0 phase of `docs/plans/active/gpui-refactor.md` section 6.1.
-//!
-//! ## What G0 delivers
-//!
-//! Just the **trait shell** + a stub implementation. The trait declares the
-//! domain-grouped method categories (matching the inventory's 14 sections),
-//! but every method body in `GpuiDesktopApi` returns `AppError::Unsupported`
-//! — the real implementations land incrementally in G1 (storage fork),
-//! G2 (window/tray/menu), G3 (SSH terminal), G4 (SFTP + transfer),
-//! G5 (detach + release).
+//! The bridge is migrated incrementally by runnable product capability. Shared
+//! storage and the public connection library are live; protocol/session,
+//! transfer, and multi-window methods remain explicit `Unsupported` boundaries
+//! until their service implementation is connected.
 //!
 //! ## Why a trait at all?
 //!
@@ -35,7 +29,11 @@
 //! framework params (which don't exist in-process). The inventory's 108
 //! commands map 1:1 to trait methods in the same domain groupings.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub mod app_handle;
 pub mod commands;
@@ -46,12 +44,17 @@ pub use app_handle::AppHandle;
 
 use crate::error::Result;
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ConnectionLibrary {
+    pub profiles: Vec<Value>,
+    pub folders: Vec<Value>,
+}
+
 /// In-process bridge between GPUI views and FileTerm backend services.
 ///
 /// Method categories mirror `docs/plans/active/gpui-migration-inventory.md`
-/// section 1's 14 groups. G0 only declares the trait + stub impl; each
-/// method's real signature lands together with its backend in the phase
-/// that needs it (see the `// G1` / `// G3` / etc. comments below).
+/// section 1's 14 groups. Methods land with the service and product view that
+/// consume them, keeping unsupported capabilities visible at the bridge seam.
 ///
 /// The trait is `Send + Sync` because it's held inside gpui entities
 /// (`Arc<dyn FileTermDesktopApi>`) which must be `Send` for the foreground
@@ -67,6 +70,9 @@ pub trait FileTermDesktopApi: Send + Sync {
     /// G0 returns `Unsupported` so view-layer scaffolding can compile
     /// against the trait without waiting for storage migration.
     async fn app_get_platform(&self) -> Result<String>;
+
+    /// Read the shared Tauri/GPUI connection library with secrets redacted.
+    async fn app_get_connection_library(&self) -> Result<ConnectionLibrary>;
 
     // ===== G2 (window/tray/menu) — inventory 1.2 / 1.6 =====
     // WindowRegistry + 7 window kinds + tray + native menu.
@@ -102,22 +108,41 @@ pub trait FileTermDesktopApi: Send + Sync {
     // surface minimal.
 }
 
-/// G0 stub implementation: every method returns `AppError::Unsupported`.
+/// Concrete in-process desktop API.
 ///
-/// Held by the main window's root view as `Arc<dyn FileTermDesktopApi>`
-/// so view code compiles today and silently no-ops until G1+ wires real
-/// backends. Once a method gets a real impl, replace the
-/// `Err(AppError::Unsupported(...))` line with the actual logic and
-/// remove the `// G0 stub` comment.
-#[derive(Default)]
-pub struct GpuiDesktopApi;
+/// Implemented capabilities delegate to framework-independent services;
+/// remaining methods return an explicit phase-tagged `Unsupported` error.
+pub struct GpuiDesktopApi {
+    app: Arc<AppHandle>,
+}
+
+impl GpuiDesktopApi {
+    pub fn new(app: Arc<AppHandle>) -> Self {
+        Self { app }
+    }
+
+    pub fn app_handle(&self) -> &AppHandle {
+        &self.app
+    }
+}
+
+impl Default for GpuiDesktopApi {
+    fn default() -> Self {
+        let app = AppHandle::platform_default().expect("resolve FileTerm app data directory");
+        Self::new(Arc::new(app))
+    }
+}
 
 #[async_trait]
 impl FileTermDesktopApi for GpuiDesktopApi {
     async fn app_get_platform(&self) -> Result<String> {
-        Err(crate::error::AppError::Unsupported(
-            "app_get_platform (G1: storage fork)",
-        ))
+        Ok(commands::app_get_platform())
+    }
+
+    async fn app_get_connection_library(&self) -> Result<ConnectionLibrary> {
+        let (profiles, folders) =
+            crate::services::profile_ops::read_public_connection_library(&self.app)?;
+        Ok(ConnectionLibrary { profiles, folders })
     }
 
     async fn workspace_list_windows(&self) -> Result<Vec<()>> {
@@ -157,28 +182,65 @@ mod tests {
 
     use super::*;
 
-    /// G0 acceptance: the stub compiles, is `Send + Sync`, and every
-    /// method returns `Unsupported` with a phase tag. As G1+ lands, each
-    /// method's test gets a real assertion; for now we just verify the
-    /// trait is usable as `Arc<dyn FileTermDesktopApi>` (the shape view
-    /// code will hold).
     #[tokio::test]
-    async fn stub_is_usable_as_dyn_arc() {
-        let api: Arc<dyn FileTermDesktopApi> = Arc::new(GpuiDesktopApi);
-        let err = api.app_get_platform().await.unwrap_err();
-        assert!(matches!(
-            err,
-            crate::error::AppError::Unsupported(name) if name.contains("G1")
-        ));
+    async fn implementation_is_usable_as_dyn_arc() {
+        let api: Arc<dyn FileTermDesktopApi> = Arc::new(GpuiDesktopApi::default());
+        assert_eq!(api.app_get_platform().await.unwrap(), std::env::consts::OS);
     }
 
-    /// Every stub method returns `Unsupported`. Once a method gets a real
-    /// impl, remove its line from this test rather than weakening the
-    /// assertion.
     #[tokio::test]
-    async fn all_stubs_return_unsupported() {
-        let api = GpuiDesktopApi;
-        assert!(api.app_get_platform().await.is_err());
+    async fn connection_library_reads_shared_store_and_redacts_secrets() {
+        let directory =
+            std::env::temp_dir().join(format!("fileterm-gpui-library-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let app = Arc::new(AppHandle::new(directory.clone()));
+        storage::write_json_array(
+            &app,
+            "folders.json",
+            &[serde_json::json!({ "id": "folder-1", "name": "生产" })],
+        )
+        .unwrap();
+        storage::write_json_array(
+            &app,
+            "profiles.json",
+            &[serde_json::json!({
+                "id": "profile-1",
+                "type": "ssh",
+                "name": "server",
+                "host": "example.test",
+                "port": 22,
+                "username": "root",
+                "group": "生产",
+                "parentId": null
+            })],
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("profile-secrets.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "profiles": {
+                    "profile-1": { "password": { "value": "secret" } }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let library = GpuiDesktopApi::new(app)
+            .app_get_connection_library()
+            .await
+            .unwrap();
+
+        assert_eq!(library.profiles.len(), 1);
+        assert_eq!(library.profiles[0]["parentId"], "folder-1");
+        assert_eq!(library.profiles[0]["hasSavedPassword"], true);
+        assert!(library.profiles[0].get("password").is_none());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn remaining_unwired_methods_return_unsupported() {
+        let api = GpuiDesktopApi::default();
         assert!(api.workspace_list_windows().await.is_err());
         assert!(api.ssh_connect().await.is_err());
         assert!(api.sftp_list().await.is_err());

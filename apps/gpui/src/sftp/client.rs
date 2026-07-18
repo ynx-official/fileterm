@@ -23,7 +23,7 @@ pub struct RemoteFileEntry {
     pub is_dir: bool,
     pub is_symlink: bool,
     pub size: u64,
-    pub modified: Option<u64>, // Unix timestamp seconds.
+    pub modified: Option<u64>,       // Unix timestamp seconds.
     pub permissions: Option<String>, // e.g. "rwxr-xr-x".
     pub owner: Option<String>,
     pub group: Option<String>,

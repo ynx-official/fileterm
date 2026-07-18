@@ -145,7 +145,11 @@ mod tests {
     #[test]
     fn sort_by_size_descending() {
         let mut fm = FileManager::new();
-        fm.entries = vec![entry("a", 100, false), entry("b", 300, false), entry("c", 200, false)];
+        fm.entries = vec![
+            entry("a", 100, false),
+            entry("b", 300, false),
+            entry("c", 200, false),
+        ];
         fm.sort = Some((SortKey::Size, SortDir::Desc));
         fm.sort_entries();
         let names: Vec<_> = fm.entries.iter().map(|e| e.name.as_str()).collect();
@@ -155,7 +159,11 @@ mod tests {
     #[test]
     fn sort_by_name_ascending() {
         let mut fm = FileManager::new();
-        fm.entries = vec![entry("charlie", 0, false), entry("alpha", 0, false), entry("bravo", 0, false)];
+        fm.entries = vec![
+            entry("charlie", 0, false),
+            entry("alpha", 0, false),
+            entry("bravo", 0, false),
+        ];
         fm.sort = Some((SortKey::Name, SortDir::Asc));
         fm.sort_entries();
         let names: Vec<_> = fm.entries.iter().map(|e| e.name.as_str()).collect();

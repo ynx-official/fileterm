@@ -531,10 +531,7 @@ mod tests {
         // vte abstracts this away — both should land in osc_dispatch.
         let mut s = session_of(10, 3);
         s.feed(b"\x1b]7;file://localhost/etc\x1b\\");
-        assert_eq!(
-            s.model.cwd.as_deref(),
-            Some(std::path::Path::new("/etc"))
-        );
+        assert_eq!(s.model.cwd.as_deref(), Some(std::path::Path::new("/etc")));
     }
 
     #[test]

@@ -90,7 +90,10 @@ fn write_macos_plist(_out_dir: &std::path::Path) {
     // path is layout-dependent and not known to build.rs.
     let out_path = _out_dir.join("Info.plist");
     let _ = fs::write(&out_path, plist);
-    println!("cargo:warning=fileterm-gpui build.rs: wrote {}", out_path.display());
+    println!(
+        "cargo:warning=fileterm-gpui build.rs: wrote {}",
+        out_path.display()
+    );
 }
 
 /// Write a Windows application manifest declaring DPI awareness so
@@ -117,5 +120,8 @@ fn write_windows_manifest(_out_dir: &std::path::Path) {
 "#;
     let out_path = _out_dir.join("FileTerm.exe.manifest");
     let _ = fs::write(&out_path, manifest);
-    println!("cargo:warning=fileterm-gpui build.rs: wrote {}", out_path.display());
+    println!(
+        "cargo:warning=fileterm-gpui build.rs: wrote {}",
+        out_path.display()
+    );
 }

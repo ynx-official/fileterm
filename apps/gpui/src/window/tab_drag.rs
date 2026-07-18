@@ -160,16 +160,18 @@ pub struct ScreenBounds {
 
 impl ScreenBounds {
     pub fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
-        Self { x, y, width, height }
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
     }
 
     /// Whether `(px, py)` falls inside this rect (inclusive on the
     /// top-left, exclusive on the bottom-right — standard GUI convention).
     pub fn contains(&self, px: i32, py: i32) -> bool {
-        px >= self.x
-            && py >= self.y
-            && px < self.x + self.width
-            && py < self.y + self.height
+        px >= self.x && py >= self.y && px < self.x + self.width && py < self.y + self.height
     }
 }
 

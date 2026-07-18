@@ -15,18 +15,21 @@
 //! Protocol Adapters → Remote Servers
 //! ```
 //!
-//! ## Current phase: G0 (scaffold)
+//! ## Current phase: product integration
 //!
-//! Only `term` (from the G-1 spike) and the `backend` trait shell +
-//! `error` types are wired up. `backend::GpuiDesktopApi` returns
-//! `AppError::Unsupported` for every method — real implementations land
-//! incrementally in G1 (storage), G2 (window/tray/menu), G3 (SSH
-//! terminal), G4 (SFTP + transfer), G5 (detach + release).
+//! The native shell, terminal core, shared storage bridge, connection-library
+//! projection, and window/menu foundations are wired. Protocol/session and
+//! product views are being connected as runnable vertical slices; methods
+//! that still return `AppError::Unsupported` identify the remaining migration
+//! boundary explicitly.
 
 pub mod backend;
 pub mod error;
 pub mod services;
 pub mod sftp;
 pub mod ssh;
+pub mod state;
 pub mod term;
+pub mod theme;
+pub mod view;
 pub mod window;

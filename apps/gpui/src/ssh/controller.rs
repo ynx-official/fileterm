@@ -76,9 +76,7 @@ impl SshController {
     /// placeholder that returns `Err` immediately. The real russh
     /// integration (client connect → auth → channel open → shell req →
     /// pump loop) lands in G3.1.
-    pub async fn connect(
-        _config: SshConfig,
-    ) -> Result<(Self, broadcast::Receiver<TermChunk>)> {
+    pub async fn connect(_config: SshConfig) -> Result<(Self, broadcast::Receiver<TermChunk>)> {
         // G3.1 TODO:
         // 1. let config = Arc::new(russh::client::Config::default());
         // 2. let handler = ClientHandler { ... };
@@ -155,9 +153,6 @@ mod tests {
         };
         let result = SshController::connect(config).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("G3 stub"));
+        assert!(result.unwrap_err().to_string().contains("G3 stub"));
     }
 }

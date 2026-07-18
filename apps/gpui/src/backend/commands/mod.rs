@@ -341,8 +341,7 @@ pub fn app_set_terminal_command_history(
 pub fn app_get_command_send_preferences(
     app: &AppHandle,
 ) -> Result<CommandSendPreferences, AppError> {
-    let value =
-        crate::backend::storage::read_json_object(app, "command-send-preferences.json")?;
+    let value = crate::backend::storage::read_json_object(app, "command-send-preferences.json")?;
     let preferences = serde_json::from_value::<CommandSendPreferences>(value).unwrap_or_default();
     Ok(CommandSendPreferences {
         send_scope: match preferences.send_scope.as_str() {
@@ -393,10 +392,12 @@ pub async fn app_get_snapshot(app: &AppHandle) -> Result<serde_json::Value, AppE
     Err(AppError::Unsupported("G3: needs WorkspaceState"))
 }
 
-// TODO(G3): migrate original body from Tauri (needs `WorkspaceState` +
-// `services::profile_ops`).
 pub async fn app_get_connection_library(app: &AppHandle) -> Result<serde_json::Value, AppError> {
-    Err(AppError::Unsupported("G3: needs WorkspaceState/profile_ops"))
+    let (profiles, folders) = crate::services::profile_ops::read_public_connection_library(app)?;
+    Ok(serde_json::json!({
+        "profiles": profiles,
+        "folders": folders,
+    }))
 }
 
 // TODO(G3): migrate original body from Tauri (needs `services::ssh_keys`).
@@ -549,10 +550,7 @@ fn destroy_child_window_after_invoke_reply() {
 
 // TODO(G2): migrate original body from Tauri (needs `WebviewWindow` +
 // `app.emit` + `services::transfers` + window lifecycle helpers).
-pub async fn app_window_action(
-    app: &AppHandle,
-    action: String,
-) -> Result<(), AppError> {
+pub async fn app_window_action(app: &AppHandle, action: String) -> Result<(), AppError> {
     Err(AppError::Unsupported("G2: needs WindowRegistry"))
 }
 
@@ -599,18 +597,13 @@ pub async fn get_workspace_snapshot(app: &AppHandle) -> Result<serde_json::Value
 
 // TODO(G3): migrate original body from Tauri (needs `app.emit` +
 // `services::logging`).
-async fn get_workspace_snapshot_and_emit(
-    app: &AppHandle,
-) -> Result<serde_json::Value, AppError> {
+async fn get_workspace_snapshot_and_emit(app: &AppHandle) -> Result<serde_json::Value, AppError> {
     Err(AppError::Unsupported("G3: needs event emitter"))
 }
 
 // TODO(G3): migrate original body from Tauri (needs `WorkspaceState` +
 // `WorkerCmd` + `oneshot`).
-async fn send_worker_cmd<T>(
-    app: &AppHandle,
-    tab_id: &str,
-) -> Result<T, AppError> {
+async fn send_worker_cmd<T>(app: &AppHandle, tab_id: &str) -> Result<T, AppError> {
     Err(AppError::Unsupported("G3: needs sessions/services"))
 }
 
@@ -690,10 +683,7 @@ pub async fn app_disconnect_tab(
 
 // TODO(G3): migrate original body from Tauri (needs `services::transfers` +
 // `WorkspaceState`).
-pub async fn app_close_tab(
-    app: &AppHandle,
-    tab_id: String,
-) -> Result<serde_json::Value, AppError> {
+pub async fn app_close_tab(app: &AppHandle, tab_id: String) -> Result<serde_json::Value, AppError> {
     Err(AppError::Unsupported("G3: needs sessions/services"))
 }
 

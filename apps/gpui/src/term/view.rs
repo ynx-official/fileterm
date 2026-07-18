@@ -45,10 +45,10 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, FontStyle, FontWeight,
-    Hsla, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, ParentElement, Pixels, Render,
-    SharedString, ShapedLine, Styled, TextAlign, Window, canvas, div, fill, font, point, px, rgb,
-    size, transparent_black,
+    canvas, div, fill, font, point, px, rgb, size, transparent_black, App, AppContext, Bounds,
+    Context, Entity, FocusHandle, Focusable, FontStyle, FontWeight, Hsla, InteractiveElement,
+    IntoElement, KeyDownEvent, Keystroke, ParentElement, Pixels, Render, ShapedLine, SharedString,
+    Styled, TextAlign, Window,
 };
 
 use crate::term::{CellFlags, Color, ColorKind, Cursor, CursorStyle, PtyHandle, TermSession};
@@ -80,22 +80,102 @@ const CURSOR_COLOR: Hsla = Hsla {
 /// const constructor and we want to keep `hsla(...)`'s clamping behavior.
 fn ansi_palette() -> [Hsla; 16] {
     [
-        Hsla { h: 0.0, s: 0.0, l: 0.0, a: 1.0 },   // 0 black
-        Hsla { h: 0.0, s: 1.0, l: 0.5, a: 1.0 },   // 1 red
-        Hsla { h: 0.33, s: 1.0, l: 0.4, a: 1.0 },  // 2 green
-        Hsla { h: 0.17, s: 1.0, l: 0.5, a: 1.0 },  // 3 yellow
-        Hsla { h: 0.66, s: 1.0, l: 0.5, a: 1.0 },  // 4 blue
-        Hsla { h: 0.83, s: 1.0, l: 0.5, a: 1.0 },  // 5 magenta
-        Hsla { h: 0.5, s: 1.0, l: 0.5, a: 1.0 },   // 6 cyan
-        Hsla { h: 0.0, s: 0.0, l: 0.85, a: 1.0 },  // 7 white (light gray)
-        Hsla { h: 0.0, s: 0.0, l: 0.5, a: 1.0 },   // 8 bright black (dark gray)
-        Hsla { h: 0.0, s: 1.0, l: 0.65, a: 1.0 },  // 9 bright red
-        Hsla { h: 0.33, s: 1.0, l: 0.6, a: 1.0 },  // 10 bright green
-        Hsla { h: 0.17, s: 1.0, l: 0.65, a: 1.0 }, // 11 bright yellow
-        Hsla { h: 0.66, s: 1.0, l: 0.7, a: 1.0 },  // 12 bright blue
-        Hsla { h: 0.83, s: 1.0, l: 0.7, a: 1.0 },  // 13 bright magenta
-        Hsla { h: 0.5, s: 1.0, l: 0.7, a: 1.0 },   // 14 bright cyan
-        Hsla { h: 0.0, s: 0.0, l: 1.0, a: 1.0 },   // 15 bright white
+        Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.0,
+            a: 1.0,
+        }, // 0 black
+        Hsla {
+            h: 0.0,
+            s: 1.0,
+            l: 0.5,
+            a: 1.0,
+        }, // 1 red
+        Hsla {
+            h: 0.33,
+            s: 1.0,
+            l: 0.4,
+            a: 1.0,
+        }, // 2 green
+        Hsla {
+            h: 0.17,
+            s: 1.0,
+            l: 0.5,
+            a: 1.0,
+        }, // 3 yellow
+        Hsla {
+            h: 0.66,
+            s: 1.0,
+            l: 0.5,
+            a: 1.0,
+        }, // 4 blue
+        Hsla {
+            h: 0.83,
+            s: 1.0,
+            l: 0.5,
+            a: 1.0,
+        }, // 5 magenta
+        Hsla {
+            h: 0.5,
+            s: 1.0,
+            l: 0.5,
+            a: 1.0,
+        }, // 6 cyan
+        Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.85,
+            a: 1.0,
+        }, // 7 white (light gray)
+        Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 0.5,
+            a: 1.0,
+        }, // 8 bright black (dark gray)
+        Hsla {
+            h: 0.0,
+            s: 1.0,
+            l: 0.65,
+            a: 1.0,
+        }, // 9 bright red
+        Hsla {
+            h: 0.33,
+            s: 1.0,
+            l: 0.6,
+            a: 1.0,
+        }, // 10 bright green
+        Hsla {
+            h: 0.17,
+            s: 1.0,
+            l: 0.65,
+            a: 1.0,
+        }, // 11 bright yellow
+        Hsla {
+            h: 0.66,
+            s: 1.0,
+            l: 0.7,
+            a: 1.0,
+        }, // 12 bright blue
+        Hsla {
+            h: 0.83,
+            s: 1.0,
+            l: 0.7,
+            a: 1.0,
+        }, // 13 bright magenta
+        Hsla {
+            h: 0.5,
+            s: 1.0,
+            l: 0.7,
+            a: 1.0,
+        }, // 14 bright cyan
+        Hsla {
+            h: 0.0,
+            s: 0.0,
+            l: 1.0,
+            a: 1.0,
+        }, // 15 bright white
     ]
 }
 
@@ -123,9 +203,7 @@ fn color_to_hsla(c: Color, is_fg: bool) -> Hsla {
                 }
             }
         }
-        ColorKind::Rgb(r, g, b) => {
-            rgb(((r as u32) << 16) | ((g as u32) << 8) | (b as u32)).into()
-        }
+        ColorKind::Rgb(r, g, b) => rgb(((r as u32) << 16) | ((g as u32) << 8) | (b as u32)).into(),
     }
 }
 
@@ -171,12 +249,7 @@ impl TermView {
     ///
     /// `cols` and `rows` are the initial grid dimensions; they will be
     /// re-derived from the actual canvas bounds on the first paint.
-    pub fn new(
-        cx: &mut Context<Self>,
-        pty: Arc<PtyHandle>,
-        cols: usize,
-        rows: usize,
-    ) -> Self {
+    pub fn new(cx: &mut Context<Self>, pty: Arc<PtyHandle>, cols: usize, rows: usize) -> Self {
         let session = cx.new(|_cx| TermSession::new(cols, rows));
         let focus = cx.focus_handle();
         let dropped_chunks = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -195,9 +268,9 @@ impl TermView {
             .advance(font_id, font_size, 'M')
             .map(|s| s.width)
             .unwrap_or_else(|_| font_size * 0.6);
-        let cell_h =
-            text_system.ascent(font_id, font_size) + text_system.descent(font_id, font_size)
-                + px(1.0);
+        let cell_h = text_system.ascent(font_id, font_size)
+            + text_system.descent(font_id, font_size)
+            + px(1.0);
         // font_id is consumed by the metrics calls above; we keep it around
         // for diagnostics but don't need to store it on the view (shape_line
         // picks its own font_id from each TextRun's Font).
@@ -214,8 +287,7 @@ impl TermView {
         // See `spawn.rs` for the full backpressure / coalescing story.
         let rx = pty.subscribe();
         let session_weak = session.downgrade();
-        crate::term::spawn::spawn_term_feed(cx, session_weak, rx, dropped_chunks.clone())
-            .detach();
+        crate::term::spawn::spawn_term_feed(cx, session_weak, rx, dropped_chunks.clone()).detach();
 
         Self {
             session,
@@ -262,10 +334,7 @@ impl Render for TermView {
             .load(std::sync::atomic::Ordering::Relaxed);
         if dropped != self.last_title_dropped || self.frame_counter.is_multiple_of(30) {
             self.last_title_dropped = dropped;
-            _window.set_window_title(&format!(
-                "FileTerm GPUI Spike — dropped: {}",
-                dropped
-            ));
+            _window.set_window_title(&format!("FileTerm GPUI Spike — dropped: {}", dropped));
         }
 
         let cell_w = self.cell_w;
@@ -442,8 +511,7 @@ fn paint_terminal_grid(
                 };
 
                 for (i, cell) in row.iter().enumerate() {
-                    if i > 0
-                        && (cell.fg != cur_fg || cell.bg != cur_bg || cell.flags != cur_flags)
+                    if i > 0 && (cell.fg != cur_fg || cell.bg != cur_bg || cell.flags != cur_flags)
                     {
                         flush_run(
                             &mut runs,

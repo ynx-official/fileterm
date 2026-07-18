@@ -11,7 +11,7 @@
 //! (no display / GPU needed). The window integration lands in G-1.4.
 
 use anyhow::Result;
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 
 use fileterm_gpui::term::PtyHandle;
 

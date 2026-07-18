@@ -22,7 +22,7 @@
 //!   * Cursor movement clamps to `rows - 1` / `cols - 1` only when the
 //!     dimension is non-zero; otherwise saturating math would underflow.
 
-use vte::{Perform, Params};
+use vte::{Params, Perform};
 
 use crate::term::model::{Cell, CellFlags, Color, ColorKind, TermModel};
 
@@ -369,11 +369,7 @@ where
                 kind: ColorKind::Indexed(*p.get(2)? as u8),
             }),
             2 => Some(Color {
-                kind: ColorKind::Rgb(
-                    *p.get(2)? as u8,
-                    *p.get(3)? as u8,
-                    *p.get(4)? as u8,
-                ),
+                kind: ColorKind::Rgb(*p.get(2)? as u8, *p.get(3)? as u8, *p.get(4)? as u8),
             }),
             _ => None,
         }

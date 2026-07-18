@@ -98,9 +98,7 @@ impl WindowRegistry {
         window_id: &str,
         handle: gpui::WindowHandle<RootViewPlaceholder>,
     ) {
-        self.handles
-            .write()
-            .insert(window_id.to_string(), handle);
+        self.handles.write().insert(window_id.to_string(), handle);
     }
 
     /// Detach a tab from its current window into a target window.
@@ -194,10 +192,7 @@ impl WindowRegistry {
     /// Returns `None` if the window isn't open yet (registered in
     /// `detached_tabs` but `register_handle` hasn't been called) or
     /// already closed.
-    pub fn handle_for(
-        &self,
-        window_id: &str,
-    ) -> Option<gpui::WindowHandle<RootViewPlaceholder>> {
+    pub fn handle_for(&self, window_id: &str) -> Option<gpui::WindowHandle<RootViewPlaceholder>> {
         self.handles.read().get(window_id).copied()
     }
 
@@ -261,12 +256,12 @@ impl WindowRegistry {
 
         // Every tab_owner entry must appear in some detached_tabs list.
         for (tab_id, window_id) in owner.iter() {
-            let tabs = detached
-                .get(window_id)
-                .unwrap_or_else(|| panic!(
+            let tabs = detached.get(window_id).unwrap_or_else(|| {
+                panic!(
                     "tab {} tab_owner says {} but window has no detached_tabs entry",
                     tab_id, window_id
-                ));
+                )
+            });
             assert!(
                 tabs.contains(tab_id),
                 "tab {} tab_owner says {} but not in that window's detached_tabs list",
@@ -289,7 +284,10 @@ mod tests {
         let reg = WindowRegistry::new();
         // Detach tab-1 into window "detached-session-1".
         reg.detach_tab("tab-1", "detached-session-1");
-        assert_eq!(reg.window_for_tab("tab-1"), Some("detached-session-1".into()));
+        assert_eq!(
+            reg.window_for_tab("tab-1"),
+            Some("detached-session-1".into())
+        );
         assert_eq!(
             reg.list_placements(),
             vec![WorkspaceTabPlacement {
@@ -310,7 +308,10 @@ mod tests {
         reg.detach_tab("tab-1", "detached-session-1");
         reg.detach_tab("tab-1", "detached-session-2");
         // Should be in window 2, not window 1.
-        assert_eq!(reg.window_for_tab("tab-1"), Some("detached-session-2".into()));
+        assert_eq!(
+            reg.window_for_tab("tab-1"),
+            Some("detached-session-2".into())
+        );
         let placements = reg.list_placements();
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].window_id, "detached-session-2");
@@ -358,7 +359,10 @@ mod tests {
         ids.sort();
         assert_eq!(
             ids,
-            vec!["detached-session-1".to_string(), "detached-session-2".to_string()]
+            vec![
+                "detached-session-1".to_string(),
+                "detached-session-2".to_string()
+            ]
         );
     }
 
@@ -372,7 +376,10 @@ mod tests {
         reg.detach_tab("tab-3", "detached-session-1");
 
         let moved = reg.return_tab_to_main("tab-2");
-        assert!(moved, "return_tab_to_main should report success for tracked tab");
+        assert!(
+            moved,
+            "return_tab_to_main should report success for tracked tab"
+        );
 
         // tab-2 is gone from the registry; tab-1 and tab-3 remain.
         assert!(reg.window_for_tab("tab-2").is_none());

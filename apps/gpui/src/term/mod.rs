@@ -7,8 +7,6 @@ pub mod pty;
 pub mod spawn;
 pub mod view;
 
-pub use model::{
-    Cell, CellFlags, Color, ColorKind, Cursor, CursorStyle, TermModel, TermSession,
-};
+pub use model::{Cell, CellFlags, Color, ColorKind, Cursor, CursorStyle, TermModel, TermSession};
 pub use pty::{PtyHandle, TermChunk};
 pub use view::TermView;

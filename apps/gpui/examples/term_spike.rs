@@ -36,8 +36,8 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Bounds, Context, TitlebarOptions, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions, size, px,
+    px, size, App, AppContext, Bounds, Context, TitlebarOptions, WindowBounds, WindowDecorations,
+    WindowKind, WindowOptions,
 };
 
 use fileterm_gpui::term::{PtyHandle, TermView};
@@ -84,9 +84,7 @@ fn main() {
                 kind: WindowKind::Normal,
                 ..Default::default()
             },
-            |_window, cx| {
-                cx.new(|cx| TermView::new(cx, pty.clone(), 80, 24))
-            },
+            |_window, cx| cx.new(|cx| TermView::new(cx, pty.clone(), 80, 24)),
         )
         .unwrap();
     });

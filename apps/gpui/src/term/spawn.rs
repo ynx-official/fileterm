@@ -212,8 +212,7 @@ pub fn spawn_term_feed<U: 'static>(
                             cx.notify();
                         });
                         if drops > 0 {
-                            dropped_chunks
-                                .fetch_add(drops, std::sync::atomic::Ordering::Relaxed);
+                            dropped_chunks.fetch_add(drops, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,

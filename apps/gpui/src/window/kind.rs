@@ -108,10 +108,7 @@ mod tests {
     #[test]
     fn kebab_case_labels() {
         assert_eq!(WindowKind::Main.as_str(), "main");
-        assert_eq!(
-            WindowKind::ConnectionManager.as_str(),
-            "connection-manager"
-        );
+        assert_eq!(WindowKind::ConnectionManager.as_str(), "connection-manager");
         assert_eq!(WindowKind::CommandManager.as_str(), "command-manager");
         assert_eq!(WindowKind::ConnectionForm.as_str(), "connection-form");
         assert_eq!(WindowKind::CommandForm.as_str(), "command-form");

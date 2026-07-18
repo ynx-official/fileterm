@@ -479,9 +479,7 @@ fn apply_permissions_recursive(
     Ok(())
 }
 
-pub async fn app_select_local_files(
-    default_path: Option<String>,
-) -> Result<Vec<String>, AppError> {
+pub async fn app_select_local_files(default_path: Option<String>) -> Result<Vec<String>, AppError> {
     let mut dialog = rfd::AsyncFileDialog::new();
     if let Some(p) = default_path {
         dialog = dialog.set_directory(p);

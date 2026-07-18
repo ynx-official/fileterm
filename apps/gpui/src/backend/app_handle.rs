@@ -56,15 +56,14 @@ impl AppHandle {
     /// `~/Library/Application Support/<bundle>`, Windows →
     /// `%APPDATA%/<bundle>`, Linux → `~/.local/share/<bundle>`.
     ///
-    /// The bundle identifier is `dev.fileterm` (same as Tauri's
+    /// The bundle identifier is `com.fileterm.desktop` (same as Tauri's
     /// `tauri.conf.json` identifier) so the GPUI runtime shares the data
     /// directory with the Tauri runtime — per refactor.md decision 8
     /// ("数据目录：与 Tauri 共享").
     pub fn platform_default() -> Result<Self> {
-        let dir = dirs::data_dir().ok_or_else(|| {
-            AppError::Storage("could not resolve platform data dir".into())
-        })?;
-        Ok(Self::new(dir.join("dev.fileterm")))
+        let dir = dirs::data_dir()
+            .ok_or_else(|| AppError::Storage("could not resolve platform data dir".into()))?;
+        Ok(Self::new(dir.join("com.fileterm.desktop")))
     }
 
     /// Equivalent of `tauri::Manager::app_data_dir()`.

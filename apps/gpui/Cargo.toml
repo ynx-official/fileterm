@@ -29,7 +29,7 @@ path = "src/main.rs"
 # in the next plan pass.
 [dependencies]
 gpui = { package = "gpui-unofficial", version = "=1.8.2" }
-gpui_platform = { package = "gpui-platform-gpui-unofficial", version = "=1.8.2", features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { package = "gpui-platform-gpui-unofficial", version = "=1.8.2", features = ["font-kit", "runtime_shaders", "wayland", "x11"] }
 # `gpui-unofficial` 1.8.2 declares loose `^1.8.2` requirements on its own
 # sub-crates (collections / gpui-util / etc.), so cargo's default "pick the
 # latest matching" resolver pulls their 1.11.3 line. The 1.11.x line uses the

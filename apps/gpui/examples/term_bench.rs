@@ -62,9 +62,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled, TitlebarOptions,
-    Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div, px, rgb, size,
+    div, px, rgb, size, App, AppContext, Bounds, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString, Styled,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
 };
 
 use fileterm_gpui::term::{PtyHandle, TermView};
@@ -109,13 +109,8 @@ fn main() {
     // before opening the window so the PTY is ready when the first frame
     // renders — otherwise the first 100ms of frame times would be
     // dominated by fork/exec latency rather than render cost.
-    let (pty, _rx) = PtyHandle::spawn_with_args(
-        "sh",
-        &["-c", &args.command],
-        args.cols,
-        args.rows,
-    )
-    .expect("pty spawn");
+    let (pty, _rx) = PtyHandle::spawn_with_args("sh", &["-c", &args.command], args.cols, args.rows)
+        .expect("pty spawn");
     // `Arc<PtyHandle>` is not Send+Sync because portable-pty's master
     // isn't; we keep it on the main thread (gpui runs single-threaded
     // in foreground anyway). Allow the clippy lint locally.
@@ -146,7 +141,16 @@ fn main() {
                 ..Default::default()
             },
             move |_window, cx| {
-                cx.new(|cx| BenchView::new(cx, pty_clone.clone(), cols, rows, duration, args.command.clone()))
+                cx.new(|cx| {
+                    BenchView::new(
+                        cx,
+                        pty_clone.clone(),
+                        cols,
+                        rows,
+                        duration,
+                        args.command.clone(),
+                    )
+                })
             },
         )
         .unwrap();

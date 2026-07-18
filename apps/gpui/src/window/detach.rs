@@ -53,10 +53,7 @@ pub struct DetachResult {
 /// `detached-session-{uuid}` where `{uuid}` is a v4 UUID. Matches the
 /// format documented in refactor.md 4.2.1 (`detached-session-{id}`) so
 /// the renderer can parse the kind back out of the window id if needed.
-pub fn detach_tab_to_new_window(
-    registry: &SharedWindowRegistry,
-    tab_id: &str,
-) -> DetachResult {
+pub fn detach_tab_to_new_window(registry: &SharedWindowRegistry, tab_id: &str) -> DetachResult {
     let new_window_id = format!("detached-session-{}", Uuid::new_v4());
     registry.detach_tab(tab_id, &new_window_id);
     DetachResult {
@@ -77,10 +74,7 @@ pub fn detach_tab_to_new_window(
 ///
 /// Returns the list of tab ids that were in the window (always ≥0; the
 /// caller may have already removed the specific tab it cares about).
-pub fn return_window_to_main(
-    registry: &SharedWindowRegistry,
-    window_id: &str,
-) -> Vec<String> {
+pub fn return_window_to_main(registry: &SharedWindowRegistry, window_id: &str) -> Vec<String> {
     registry.return_tabs_to_main(window_id)
 }
 
