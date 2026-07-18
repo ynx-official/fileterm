@@ -37,6 +37,13 @@
 
 use async_trait::async_trait;
 
+pub mod app_handle;
+pub mod commands;
+pub mod sessions;
+pub mod storage;
+
+pub use app_handle::AppHandle;
+
 use crate::error::Result;
 
 /// In-process bridge between GPUI views and FileTerm backend services.

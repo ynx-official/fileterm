@@ -55,11 +55,29 @@ portable-pty = "0.8"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 thiserror = "1"
+dirs = "5"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 bitflags = "2"
+# `uuid` is used by the forked `backend::storage` module (G1 phase) for
+# transaction dirs, atomic-replace backup names, and the `new_id` helper.
+# Mirrors `apps/tauri/src-tauri/Cargo.toml`'s `uuid` dep so the fork stays
+# line-for-line with Tauri's storage code.
+uuid = { version = "1", features = ["v4"] }
+# `encoding_rs` and `rfd` are used by the forked `backend::sessions::local_files`
+# module (G1 phase): `encoding_rs` powers the decode/encode helpers for local
+# file reads/writes with non-UTF-8 labels; `rfd` backs the native file/folder
+# picker dialogs (`app_select_local_files` / `app_select_local_directory`).
+# Mirrors `apps/tauri/src-tauri/Cargo.toml` so the fork stays line-for-line.
+encoding_rs = "0.8"
+rfd = "0.17"
+# `regex` is used by the forked `backend::commands` module (G1 phase) for
+# `render_command_template`'s `[p#N]` positional-placeholder substitution.
+# Mirrors `apps/tauri/src-tauri/Cargo.toml`'s `regex` dep so the fork stays
+# line-for-line with Tauri's command-template rendering code.
+regex = "1"
 
 [[example]]
 name = "term_spike"

@@ -25,4 +25,5 @@
 
 pub mod backend;
 pub mod error;
+pub mod services;
 pub mod term;
