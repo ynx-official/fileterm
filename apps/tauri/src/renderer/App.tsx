@@ -55,6 +55,7 @@ import { defaultLocale, setLocale, t, type AppLocale } from './i18n'
 
 import { useWorkspaceIpcSync } from './hooks/useWorkspaceIpcSync'
 import { useWorkspaceTabs } from './hooks/useWorkspaceTabs'
+import { useWorkspaceWindowContext } from './hooks/useWorkspaceWindowContext'
 import { useWorkspaceModals } from './hooks/useWorkspaceModals'
 import { useFileOperations } from './hooks/useFileOperations'
 import { useSshInteractions } from './hooks/useSshInteractions'
@@ -95,12 +96,19 @@ export function App() {
   const isConnectionFormWindow = windowMode === 'connection-form'
   const isCommandFormWindow = windowMode === 'command-form'
   const isFileEditorWindow = windowMode === 'file-editor'
+  // detached-session 是用户从主窗口拖出/右键分离创建的独立会话窗口。
+  // 它复用主工作区 UI（标签栏 + WorkspaceStage + 文件面板），但不参与
+  // 主窗口独有的 home tab UI 状态持久化（localTabs / tabOrder 持久化）。
+  const isDetachedSessionWindow = windowMode === 'detached-session'
   const isMainWorkspaceWindow =
     !isConnectionManagerWindow &&
     !isCommandManagerWindow &&
     !isConnectionFormWindow &&
     !isCommandFormWindow &&
-    !isFileEditorWindow
+    !isFileEditorWindow &&
+    !isDetachedSessionWindow
+  // 主窗口与可拆分窗口都需要完整的 IPC 同步 + 标签归属过滤。
+  const isWorkspaceWindow = isMainWorkspaceWindow || isDetachedSessionWindow
 
   const formWindowMode = (searchParams.get('mode') as ConnectionFormMode | null) ?? 'create'
   const formWindowProfileId = searchParams.get('profileId')
@@ -177,7 +185,7 @@ export function App() {
   } = useWorkspaceIpcSync({
     desktopApi,
     isConnectionFormWindow,
-    isMainWorkspaceWindow,
+    isWorkspaceWindow,
     isConnectionManagerWindow,
     themeMode,
     locale,
@@ -193,6 +201,8 @@ export function App() {
   // Child windows remain hidden until their route's first data fetch has
   // settled. This is the Tauri equivalent of Electron's `ready-to-show` and
   // prevents a blank/transparent first paint from being visible to the user.
+  // detached-session 窗口同样以 visible(false) 启动，需要等首次 snapshot
+  // 加载完成后再揭示；只有主窗口由 Rust 启动时直接显示。
   useEffect(() => {
     if (isMainWorkspaceWindow || !desktopApi || !hasLoadedInitialSnapshot || hasRevealedStandaloneWindowRef.current) {
       return
@@ -200,6 +210,14 @@ export function App() {
     hasRevealedStandaloneWindowRef.current = true
     void desktopApi.showCurrentWindow().catch((cause) => reportError(setError, '显示窗口', cause))
   }, [desktopApi, hasLoadedInitialSnapshot, isMainWorkspaceWindow])
+
+  // 1.5 Window Context Hook — 当前窗口身份与标签归属（用于可拆分窗口）
+  // 仅在 workspace 窗口（主窗口 + detached-session）启用；其他子窗口
+  // （连接管理器、文件编辑器等）不渲染工作区标签，无需订阅。
+  const { context: workspaceWindowContext, placementsByTabId: workspacePlacementsByTabId } = useWorkspaceWindowContext({
+    desktopApi,
+    enabled: isWorkspaceWindow
+  })
 
   // 2. Workspace Tabs Hook
   const {
@@ -248,6 +266,8 @@ export function App() {
     locale,
     isBusy,
     closeActiveRequestVersion,
+    windowContext: workspaceWindowContext,
+    placementsByTabId: workspacePlacementsByTabId,
     onSnapshot: applySnapshot,
     onBusyChange: setIsBusy,
     onStatusMessage: (msg) => setError(msg),

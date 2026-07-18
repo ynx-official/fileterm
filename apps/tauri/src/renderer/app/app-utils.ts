@@ -40,6 +40,30 @@ export function copyText(value: string) {
   document.body.removeChild(textarea)
 }
 
+/**
+ * 将 webview 内的 clientX/Y（CSS 像素，相对于 webview 左上角）转换为
+ * Tauri 物理屏幕坐标（用于 Rust 侧 window bounds 比较与多显示器计算）。
+ *
+ * 公式：globalPhysical = window.outerPosition() + client * scaleFactor
+ *
+ * 失败时回退到原始 client 坐标（单显示器 + 100% 缩放下仍可用），
+ * 调用方应能容忍这种回退——Rust 侧的 find_window_at 在没有命中窗口
+ * bounds 时会落到"创建新窗口"分支，坐标偏差不会造成数据损坏。
+ */
+export async function clientToGlobalScreenCoords(clientX: number, clientY: number): Promise<{ x: number; y: number }> {
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window')
+    const win = getCurrentWindow()
+    const [outerPos, scaleFactor] = await Promise.all([win.outerPosition(), win.scaleFactor()])
+    return {
+      x: outerPos.x + Math.round(clientX * scaleFactor),
+      y: outerPos.y + Math.round(clientY * scaleFactor)
+    }
+  } catch {
+    return { x: Math.round(clientX), y: Math.round(clientY) }
+  }
+}
+
 export function hasSelectedText() {
   const selection = window.getSelection()
   if (!selection || selection.rangeCount === 0) {
@@ -66,6 +90,19 @@ export function homeTabKey(id: string) {
 
 export function sessionTabKey(id: string) {
   return `session:${id}`
+}
+
+/**
+ * 从 `session:<id>` 格式的 tab key 中解析会话标签 id。
+ * 非 session key（如 `home:home-1`）返回 null。
+ */
+export function parseSessionTabIdFromKey(tabKey: string): string | null {
+  const prefix = 'session:'
+  if (!tabKey.startsWith(prefix)) {
+    return null
+  }
+  const id = tabKey.slice(prefix.length)
+  return id.length > 0 ? id : null
 }
 
 export function reorderTabKeys(keys: string[], draggingKey: string | null, targetKey: string) {

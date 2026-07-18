@@ -28,6 +28,12 @@ export interface TabBarProps {
   onDragEnd(): void
   onDragEnter(targetKey: string): void
   onDragStart(tabKey: string): void
+  /**
+   * 拖出窗口分离信号。pointerup 时若 pointer 在窗口外，TabBar 调用此方法。
+   * clientX/Y 为 webview 内坐标（可能为负或超过 innerWidth），由调用方
+   * 转换为屏幕坐标后交给 Rust 判断释放点落在哪个窗口 bounds 内。
+   */
+  onDetachTab(tabKey: string, clientX: number, clientY: number): void
   onOpenTabContext(event: MouseEvent<HTMLDivElement>, target: TabContextTarget): void
   onOpenSettings(): void
   onToggleWorkspaceFocus(): void
@@ -47,6 +53,7 @@ export function TabBar({
   onDragEnd,
   onDragEnter,
   onDragStart,
+  onDetachTab,
   onOpenTabContext,
   onOpenSettings,
   onToggleWorkspaceFocus,
@@ -74,6 +81,10 @@ export function TabBar({
     },
     onCancel: () => {
       onDragEnd()
+      releaseSuppressedClick()
+    },
+    onDetach: (tabKey, clientX, clientY) => {
+      onDetachTab(tabKey, clientX, clientY)
       releaseSuppressedClick()
     }
   })

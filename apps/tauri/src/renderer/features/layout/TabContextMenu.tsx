@@ -19,7 +19,7 @@ export function TabContextMenu({
   canCloseOthers: boolean
   isSessionTab: boolean
   onAction(
-    action: 'copy' | 'clone' | 'connect' | 'connectAll' | 'disconnect' | 'close' | 'closeOthers' | 'closeAll'
+    action: 'copy' | 'clone' | 'connect' | 'connectAll' | 'disconnect' | 'close' | 'closeOthers' | 'closeAll' | 'detach'
   ): void
   onClose(): void
   position: { x: number; y: number }
@@ -27,6 +27,8 @@ export function TabContextMenu({
 }) {
   const canDisconnect = isSessionTab && tabStatus === 'connected'
   const canConnect = isSessionTab && (tabStatus === 'idle' || tabStatus === 'error' || tabStatus === 'closed')
+  // 仅会话标签可拆分到新窗口；本地 home/system 标签不携带连接，拆出无意义。
+  const canDetach = isSessionTab
 
   return (
     <ContextMenu
@@ -39,6 +41,8 @@ export function TabContextMenu({
         { label: t.connectAll, disabled: !isSessionTab || !canConnectAll, action: () => onAction('connectAll') },
         { separator: true },
         { label: t.disconnect, disabled: !canDisconnect, action: () => onAction('disconnect') },
+        { separator: true },
+        { label: t.detachToNewWindow, disabled: !canDetach, action: () => onAction('detach') },
         { separator: true },
         { label: t.closeTab, disabled: !canCloseCurrent, action: () => onAction('close') },
         { separator: true },

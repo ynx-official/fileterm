@@ -877,6 +877,14 @@ export interface FileTermDesktopApi {
   isCurrentWindowMaximized(): Promise<boolean>
   toggleMaximizeCurrentWindow(): Promise<void>
   closeCurrentWindow(): Promise<void>
+  // 可拆分会话窗口
+  getWorkspaceWindowContext(): Promise<WorkspaceWindowContext>
+  getWorkspaceTabPlacements(): Promise<WorkspaceTabPlacement[]>
+  moveWorkspaceTab(input: MoveWorkspaceTabInput): Promise<WorkspaceTabPlacement[]>
+  detachWorkspaceTab(input: DetachWorkspaceTabInput): Promise<WorkspaceTabPlacement[]>
+  startWorkspaceTabDrag(input: WorkspaceTabDragInput): Promise<void>
+  finishWorkspaceTabDrag(input: FinishWorkspaceTabDragInput): Promise<WorkspaceTabPlacement[]>
+  listWorkspaceWindows(): Promise<WorkspaceWindowContext[]>
   confirmCloseCurrentFileEditor(): Promise<void>
   cancelCloseCurrentFileEditor(): Promise<void>
   showWindowMenu(menuType: 'app' | 'file' | 'view' | 'window', x: number, y: number): Promise<void>
@@ -1011,6 +1019,7 @@ export interface FileTermDesktopApi {
   onSshInteraction(listener: (request: SshInteractionRequest) => void): () => void
   onWindowCloseRequest(listener: (event: { isQuit: boolean }) => void): () => void
   onRequestCloseActiveWorkspaceItem(listener: () => void): () => void
+  onWorkspaceTabPlacementsChanged(listener: (placements: WorkspaceTabPlacement[]) => void): () => void
   confirmCloseWindow(action: 'quit' | 'hide' | 'cancel'): Promise<void>
 }
 
@@ -1092,4 +1101,61 @@ export interface FtpSessionController extends FileSessionController {
 
 export const createTabLayout = (profile: ConnectionProfile): TabLayout => {
   return profile.type === 'ssh' ? 'terminal-file' : profile.type === 'ftp' ? 'file-only' : 'terminal-only'
+}
+
+// ===== 可拆分会话窗口（Tauri 架构）=====
+// 详见 docs/plans/active/detachable-session-windows-tauri.md
+
+/** 窗口类型。main 是默认入口窗口；detached-session 是用户拖出/移动创建的独立窗口。 */
+export type WorkspaceWindowKind = 'main' | 'detached-session'
+
+/**
+ * 窗口稳定身份。windowId 在窗口整个生命周期不变；
+ * initialTabId 仅用于新窗口首次认领提示，窗口建立后不能依赖该字段限制可见标签。
+ */
+export interface WorkspaceWindowContext {
+  windowId: string
+  kind: WorkspaceWindowKind
+  initialTabId?: string
+}
+
+/**
+ * 标签归属与窗口内顺序的权威记录。
+ * 新连接必须由 Rust 根据 command 调用方窗口解析发起窗口，
+ * 并在广播 workspace snapshot 前写入 placement；不能由 renderer 提供目标窗口 ID。
+ */
+export interface WorkspaceTabPlacement {
+  tabId: string
+  ownerWindowId: string
+  ownerKind: WorkspaceWindowKind
+  order: number
+}
+
+/** 统一移动入口输入。拖拽和右键菜单共用 Rust 侧的归属迁移链路。 */
+export interface MoveWorkspaceTabInput {
+  tabId: string
+  targetWindowId: string
+  targetIndex: number
+}
+
+/** 拖拽分离到新窗口输入。 */
+export interface DetachWorkspaceTabInput {
+  tabId: string
+  sourceWindowId: string
+  /** 屏幕坐标系下的释放点，用于多显示器 bounds 计算。 */
+  screenX: number
+  screenY: number
+}
+
+/** 拖拽状态输入。pointerdown 时发起，Rust 记录 drag 状态。 */
+export interface WorkspaceTabDragInput {
+  tabId: string
+  sourceWindowId: string
+}
+
+/** 拖拽结束输入。pointerup 时携带屏幕坐标，Rust 判断释放点落在哪个窗口 bounds 内。 */
+export interface FinishWorkspaceTabDragInput {
+  tabId: string
+  screenX: number
+  screenY: number
 }

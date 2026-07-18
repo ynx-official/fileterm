@@ -14,8 +14,8 @@ use tauri::{
     menu::{Menu, MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     window::Color,
-    AppHandle, Emitter, LogicalPosition, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
-    WindowEvent, Wry,
+    AppHandle, Emitter, LogicalPosition, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder, WindowEvent, Wry,
 };
 use thiserror::Error;
 use tokio::sync::oneshot;
@@ -945,6 +945,132 @@ fn open_child_window_from_native_event(app: &AppHandle, input: OpenWindowInput) 
     });
 }
 
+/// 创建可拆分会话独立窗口。
+///
+/// 与 `open_child_window` 的差异：
+/// - label = windowId（registry 已注册），不再从 kind 推导
+/// - URL 携带 `window=detached-session&windowId=<id>&initialTabId=<tabId>`
+/// - 尺寸与位置由调用方传入（多显示器 bounds 计算后）
+/// - 带原生装饰（workspace 窗口是完整工作台，不是 frameless 弹窗）
+/// - 注册 `WindowEvent::Destroyed` 处理：标签 owner 归还 main + 广播 placement
+///
+/// 详见 `docs/plans/active/detachable-session-windows-tauri.md`。
+pub fn open_detached_session_window(
+    app: &AppHandle,
+    label: &str,
+    window_id: &str,
+    initial_tab_id: &str,
+    position: PhysicalPosition<i32>,
+    width: u32,
+    height: u32,
+) -> Result<(), AppError> {
+    // 若已存在同 label 窗口（罕见，注册表碰撞），先聚焦已有的
+    if let Some(existing) = app.get_webview_window(label) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        crate::services::logging::warn(
+            app,
+            "window",
+            format!("detached label collision, focusing existing label={label}"),
+        );
+        return Ok(());
+    }
+
+    let url = WebviewUrl::App(
+        format!(
+            "index.html?window=detached-session&windowId={window_id}&initialTabId={initial_tab_id}"
+        )
+        .into(),
+    );
+
+    // workspace 窗口带原生装饰：它是一个完整工作台，不是 frameless 弹窗。
+    // macOS 上保留 traffic-light；Windows/Linux 保留系统标题栏。
+    let transparent = false;
+    let background_color = Color(21, 21, 21, 255);
+
+    let window = WebviewWindowBuilder::new(app, label, url)
+        .title("FileTerm")
+        .inner_size(width as f64, height as f64)
+        .min_inner_size(640.0, 480.0)
+        .decorations(true)
+        .transparent(transparent)
+        .background_color(background_color)
+        .shadow(true)
+        .visible(false)
+        .build()
+        .map_err(|error| {
+            crate::services::logging::error(
+                app,
+                "window",
+                format!("detached create failed label={label} error={error}"),
+            );
+            AppError::Window(error.to_string())
+        })?;
+
+    // 用物理坐标设置位置（多显示器 bounds 计算的结果）。
+    // 不能用 builder.position() — 它接受逻辑坐标，会因 scale_factor 偏移。
+    if let Err(error) = window.set_outer_position(position) {
+        crate::services::logging::warn(
+            app,
+            "window",
+            format!("detached set_outer_position failed label={label} error={error}"),
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    window
+        .set_icon(windows_app_icon(window.scale_factor().unwrap_or(1.0))?)
+        .map_err(|error| AppError::Window(error.to_string()))?;
+    #[cfg(target_os = "windows")]
+    prefer_windows_native_rounded_corners(&window);
+
+    crate::services::logging::info(
+        app,
+        "window",
+        format!("detached created label={label} windowId={window_id}"),
+    );
+
+    // 注册窗口销毁处理器：标签 owner 归还 main + 广播 placement 变更。
+    // 这是崩溃恢复与用户关闭独立窗口的统一清理路径。
+    let app_for_destroy = app.clone();
+    let window_id_for_destroy = window_id.to_string();
+    window.on_window_event(move |event| {
+        if matches!(event, WindowEvent::Destroyed) {
+            handle_detached_window_destroyed(&app_for_destroy, &window_id_for_destroy);
+        }
+    });
+
+    Ok(())
+}
+
+/// 独立窗口销毁时的清理：从 registry 注销，标签 owner 归还 main，
+/// 广播 placement 变更。连接本身不受影响（session runtime 持有）。
+fn handle_detached_window_destroyed(app: &AppHandle, window_id: &str) {
+    let state = app.state::<crate::services::workspace::WorkspaceState>();
+    let registry = &state.window_registry;
+    let returned_tabs = registry.unregister_detached(window_id);
+    crate::services::logging::info(
+        app,
+        "window",
+        format!(
+            "detached destroyed windowId={window_id} returned_tabs={}",
+            returned_tabs.len()
+        ),
+    );
+    // 广播 placement 变更，让所有 renderer 同步标签归还
+    let placements = registry.list_placements();
+    if let Err(error) = app.emit(
+        crate::commands::workspace_window::PLACEMENTS_CHANGED_EVENT,
+        &placements,
+    ) {
+        crate::services::logging::warn(
+            app,
+            "workspace-window",
+            format!("failed to broadcast placements after destroy: {error}"),
+        );
+    }
+}
+
 fn show_main_window(app: &AppHandle<Wry>) {
     let hidden_labels = {
         let state = app.state::<HiddenWithMainRegistry>();
@@ -1304,6 +1430,15 @@ pub fn run() {
             crate::commands::app_is_window_maximized,
             crate::commands::app_cancel_file_editor_close,
             crate::commands::app_show_window_menu,
+            // 可拆分会话窗口
+            crate::commands::workspace_window::workspace_get_window_context,
+            crate::commands::workspace_window::workspace_get_tab_placements,
+            crate::commands::workspace_window::workspace_list_windows,
+            crate::commands::workspace_window::workspace_move_tab,
+            crate::commands::workspace_window::workspace_detach_tab,
+            crate::commands::workspace_window::workspace_start_tab_drag,
+            crate::commands::workspace_window::workspace_finish_tab_drag,
+            crate::commands::workspace_window::workspace_mark_detached_ready,
             // Phase 3 commands
             crate::commands::app_open_profile,
             crate::commands::app_activate_tab,

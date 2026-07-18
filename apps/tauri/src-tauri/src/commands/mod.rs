@@ -10,6 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+pub mod workspace_window;
+
 /// 等待 worker 接收命令的最大时间。worker 主循环被 SFTP init / shell
 /// channel 写阻塞 时，mpsc 一旦满，send 会永久 await，导致前端 invoke
 /// 链路整体卡死（多窗口发送后续 tab 全部排队、Cmd+Q 退出无法完成）。

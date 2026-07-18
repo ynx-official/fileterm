@@ -17,31 +17,46 @@ type PointerSortState<T> = {
   dragStartY: number
   pointerId: number
   active: boolean
+  /**
+   * 拖出分离标志：当 onDetach 提供时，pointer 离开窗口可视区域后置 true，
+   * 后续 onTarget 不再触发；pointerup 时若仍为 true 则走 onDetach 而非 onDrop。
+   * 重新回到窗口内会复位为 false，允许用户拖出后再拖回取消分离。
+   */
+  detaching: boolean
 } | null
 
 const TARGET_SELECTOR = '[data-fileterm-sort-id]'
 const INTERACTIVE_SELECTOR = 'button, input, textarea, select, a, [contenteditable="true"]'
+const DETACHING_BODY_CLASS = 'fileterm-tab-detaching'
 
 /**
  * Tauri's macOS WebView does not consistently complete HTML5 drag/drop for
  * in-page sortable rows. This uses pointer movement as the authoritative
  * local-sort path while leaving native drag/drop available for external files.
+ *
+ * 可选 `onDetach` 用于实现"拖出窗口分离"信号：拖动过程中 pointer 离开
+ * 当前窗口可视区域时，转入 detaching 状态；在 detaching 状态下释放
+ * pointer，调用 `onDetach(source, clientX, clientY)` 而不是 `onDrop`。
+ * 调用方负责把 clientX/Y 转换为 Tauri 物理屏幕坐标并触发 Rust 侧
+ * finishWorkspaceTabDrag。
  */
 export function usePointerSortFallback<T>({
   onStart,
   onTarget,
   onDrop,
-  onCancel
+  onCancel,
+  onDetach
 }: {
   onStart(source: T): void
   onTarget(source: T, target: PointerSortTarget, clientY: number): void
   onDrop(source: T, target: PointerSortTarget | null, clientY: number): void
   onCancel(): void
+  onDetach?(source: T, clientX: number, clientY: number): void
 }) {
   const stateRef = useRef<PointerSortState<T>>(null)
   const ghostRef = useRef<HTMLElement | null>(null)
-  const callbacksRef = useRef({ onStart, onTarget, onDrop, onCancel })
-  callbacksRef.current = { onStart, onTarget, onDrop, onCancel }
+  const callbacksRef = useRef({ onStart, onTarget, onDrop, onCancel, onDetach })
+  callbacksRef.current = { onStart, onTarget, onDrop, onCancel, onDetach }
 
   useEffect(() => {
     const resolveTarget = (clientX: number, clientY: number): PointerSortTarget | null => {
@@ -56,6 +71,7 @@ export function usePointerSortFallback<T>({
       ghostRef.current?.remove()
       ghostRef.current = null
       document.documentElement.classList.remove('fileterm-pointer-sorting')
+      document.documentElement.classList.remove(DETACHING_BODY_CLASS)
     }
 
     const moveGhost = (state: NonNullable<PointerSortState<T>>, clientX: number, clientY: number) => {
@@ -120,8 +136,28 @@ export function usePointerSortFallback<T>({
       }
 
       moveGhost(state, event.clientX, event.clientY)
-      const target = resolveTarget(event.clientX, event.clientY)
-      if (target) callbacksRef.current.onTarget(state.source, target, event.clientY)
+      // 拖出分离检测：仅当 onDetach 被提供时启用。pointer 离开当前窗口
+      // 可视区域时进入 detaching 状态，回到窗口内则退出。detaching 状态
+      // 下不触发 onTarget，避免在窗口外的 ghost 误命中不可见的目标。
+      if (callbacksRef.current.onDetach) {
+        const outsideWindow =
+          event.clientX < 0 ||
+          event.clientX > window.innerWidth ||
+          event.clientY < 0 ||
+          event.clientY > window.innerHeight
+        if (outsideWindow !== state.detaching) {
+          state.detaching = outsideWindow
+          if (outsideWindow) {
+            document.documentElement.classList.add(DETACHING_BODY_CLASS)
+          } else {
+            document.documentElement.classList.remove(DETACHING_BODY_CLASS)
+          }
+        }
+      }
+      if (!state.detaching) {
+        const target = resolveTarget(event.clientX, event.clientY)
+        if (target) callbacksRef.current.onTarget(state.source, target, event.clientY)
+      }
     }
 
     const handlePointerUp = (event: PointerEvent) => {
@@ -133,6 +169,11 @@ export function usePointerSortFallback<T>({
       }
       removeGhost()
       if (!state.active) return
+      // 拖出分离：用最后已知的 client 坐标回调，调用方负责转换为屏幕坐标。
+      if (state.detaching && callbacksRef.current.onDetach) {
+        callbacksRef.current.onDetach(state.source, event.clientX, event.clientY)
+        return
+      }
       callbacksRef.current.onDrop(state.source, resolveTarget(event.clientX, event.clientY), event.clientY)
     }
 
@@ -182,7 +223,8 @@ export function usePointerSortFallback<T>({
       dragStartX: event.clientX,
       dragStartY: event.clientY,
       pointerId: event.pointerId,
-      active: false
+      active: false,
+      detaching: false
     }
   }
 }

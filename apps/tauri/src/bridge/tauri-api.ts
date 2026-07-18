@@ -28,7 +28,13 @@ import type {
   LocalFileItem,
   SshForwardRule,
   SshTunnelSnapshot,
-  CommandExecutionResult
+  CommandExecutionResult,
+  WorkspaceWindowContext,
+  WorkspaceTabPlacement,
+  MoveWorkspaceTabInput,
+  DetachWorkspaceTabInput,
+  WorkspaceTabDragInput,
+  FinishWorkspaceTabDragInput
 } from '@fileterm/core'
 
 let latestNativeDropPaths: string[] = []
@@ -263,6 +269,17 @@ export async function createTauriApi(): Promise<FileTermDesktopApi> {
     closeCurrentWindow: () => invoke<void>('app_window_action', { action: 'close' }),
     confirmCloseCurrentFileEditor: () => invoke<void>('app_window_action', { action: 'close' }),
     cancelCloseCurrentFileEditor: () => invoke<void>('app_cancel_file_editor_close'),
+    // 可拆分会话窗口
+    getWorkspaceWindowContext: () => invoke<WorkspaceWindowContext>('workspace_get_window_context'),
+    getWorkspaceTabPlacements: () => invoke<WorkspaceTabPlacement[]>('workspace_get_tab_placements'),
+    moveWorkspaceTab: (input: MoveWorkspaceTabInput) =>
+      invoke<WorkspaceTabPlacement[]>('workspace_move_tab', { input }),
+    detachWorkspaceTab: (input: DetachWorkspaceTabInput) =>
+      invoke<WorkspaceTabPlacement[]>('workspace_detach_tab', { input }),
+    startWorkspaceTabDrag: (input: WorkspaceTabDragInput) => invoke<void>('workspace_start_tab_drag', { input }),
+    finishWorkspaceTabDrag: (input: FinishWorkspaceTabDragInput) =>
+      invoke<WorkspaceTabPlacement[]>('workspace_finish_tab_drag', { input }),
+    listWorkspaceWindows: () => invoke<WorkspaceWindowContext[]>('workspace_list_windows'),
     showWindowMenu: (menuType: 'app' | 'file' | 'view' | 'window', x: number, y: number) =>
       invoke<void>('app_show_window_menu', { menuType, x, y }),
     requestQuitApp: () => invoke<void>('app_window_action', { action: 'request-quit' }),
@@ -462,6 +479,8 @@ export async function createTauriApi(): Promise<FileTermDesktopApi> {
       subscribe('app:window-close-request', listener),
     onRequestCloseActiveWorkspaceItem: (listener: () => void) =>
       subscribe('app:close-active-workspace-item-request', listener),
+    onWorkspaceTabPlacementsChanged: (listener: (placements: WorkspaceTabPlacement[]) => void) =>
+      subscribe('workspace:placements-changed', listener),
     confirmCloseWindow: (action: 'quit' | 'hide' | 'cancel') => {
       if (action === 'cancel') return Promise.resolve()
       if (action === 'quit') {

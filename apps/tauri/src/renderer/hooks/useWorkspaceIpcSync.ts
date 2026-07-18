@@ -20,7 +20,9 @@ export type WorkspaceWindowCloseRequest = {
 export type UseWorkspaceIpcSyncOptions = {
   desktopApi?: FileTermDesktopApi
   isConnectionFormWindow: boolean
-  isMainWorkspaceWindow: boolean
+  // 主窗口与可拆分的 detached-session 窗口都需要完整的 IPC 同步：snapshot
+  // 订阅、关闭请求处理、最大化状态、本机目录列表等。两者共用此 hook。
+  isWorkspaceWindow: boolean
   isConnectionManagerWindow: boolean
   themeMode: ThemeMode
   locale: AppLocale
@@ -66,7 +68,7 @@ function isUploadPermissionFailure(transfer: TransferTask) {
 export function useWorkspaceIpcSync({
   desktopApi,
   isConnectionFormWindow,
-  isMainWorkspaceWindow,
+  isWorkspaceWindow,
   isConnectionManagerWindow,
   themeMode,
   locale,
@@ -191,7 +193,7 @@ export function useWorkspaceIpcSync({
   }, [desktopApi, locale, themeMode])
 
   useEffect(() => {
-    if (!desktopApi || !isMainWorkspaceWindow) {
+    if (!desktopApi || !isWorkspaceWindow) {
       setIsMaximized(false)
       return
     }
@@ -223,10 +225,10 @@ export function useWorkspaceIpcSync({
       canceled = true
       unsubscribe()
     }
-  }, [desktopApi, isMainWorkspaceWindow])
+  }, [desktopApi, isWorkspaceWindow])
 
   useEffect(() => {
-    if (!desktopApi || !isMainWorkspaceWindow) {
+    if (!desktopApi || !isWorkspaceWindow) {
       return
     }
 
@@ -245,7 +247,7 @@ export function useWorkspaceIpcSync({
       unsubscribeWindowClose()
       unsubscribeCloseActive()
     }
-  }, [desktopApi, isMainWorkspaceWindow])
+  }, [desktopApi, isWorkspaceWindow])
 
   useEffect(() => {
     let canceled = false
@@ -256,7 +258,7 @@ export function useWorkspaceIpcSync({
       setLocalPath(previewLocalPath)
       setLocalItems(localPreviewFiles)
       setHasLoadedInitialSnapshot(true)
-      if (isMainWorkspaceWindow) {
+      if (isWorkspaceWindow) {
         onStatusMessageRef.current(t.browserPreview)
       }
       return () => {
@@ -270,7 +272,7 @@ export function useWorkspaceIpcSync({
     const pendingTransfers: TransferTask[] = []
 
     const processTransferUpdate = (transfer: TransferTask) => {
-      if (isMainWorkspaceWindow && isUploadPermissionFailure(transfer)) {
+      if (isWorkspaceWindow && isUploadPermissionFailure(transfer)) {
         const notificationKey = `${transfer.status}:${transfer.updatedAt ?? ''}:${transfer.message ?? ''}`
         if (notifiedTransferFailuresRef.current.get(transfer.id) !== notificationKey) {
           notifiedTransferFailuresRef.current.set(transfer.id, notificationKey)
@@ -368,7 +370,7 @@ export function useWorkspaceIpcSync({
 
     void hydrateWorkspace()
 
-    if (isMainWorkspaceWindow) {
+    if (isWorkspaceWindow) {
       void desktopApi
         .listLocalDirectory()
         .then(({ path, items }) => {
@@ -400,7 +402,7 @@ export function useWorkspaceIpcSync({
     desktopApi,
     isConnectionFormWindow,
     isConnectionManagerWindow,
-    isMainWorkspaceWindow
+    isWorkspaceWindow
   ])
 
   const clearWindowCloseRequest = useCallback(() => {

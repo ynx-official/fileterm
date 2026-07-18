@@ -4,12 +4,16 @@ import type {
   FileTermDesktopApi,
   SessionSnapshot,
   WorkspaceSnapshot,
-  WorkspaceTab
+  WorkspaceTab,
+  WorkspaceTabPlacement,
+  WorkspaceWindowContext
 } from '@fileterm/core'
 import {
+  clientToGlobalScreenCoords,
   copyText,
   homeTabKey,
   insertTabKeyAfter,
+  parseSessionTabIdFromKey,
   reorderTabKeys,
   sessionTabKey,
   settledResultsError
@@ -51,7 +55,7 @@ export type ShortcutCloseConfirm = {
 }
 
 export type WorkspaceTabContextAction =
-  'copy' | 'clone' | 'connect' | 'connectAll' | 'disconnect' | 'close' | 'closeOthers' | 'closeAll'
+  'copy' | 'clone' | 'connect' | 'connectAll' | 'disconnect' | 'close' | 'closeOthers' | 'closeAll' | 'detach'
 
 export type WorkspaceStageKind = 'home' | 'session' | 'system'
 export type WorkspaceNavigationDirection = 'up' | 'down'
@@ -64,6 +68,20 @@ export type UseWorkspaceTabsOptions = {
   locale: AppLocale
   isBusy: boolean
   closeActiveRequestVersion: number
+  /**
+   * 当前窗口的身份与标签归属映射。来自 useWorkspaceWindowContext。
+   *
+   * 主窗口（context.windowId === 'main'）显示所有 placement 中 ownerWindowId
+   * 为 'main' 的标签，以及没有任何 placement 记录的标签（fail-safe：连接
+   * 刚建立、placement 尚未广播时仍可在主窗口看到）。
+   *
+   * 独立会话窗口（context.kind === 'detached-session'）只显示 placement 中
+   * ownerWindowId 等于本窗口 windowId 的标签。
+   *
+   * 当此字段缺失（例如老调用方未传入）时退化为"显示全部标签"的旧行为。
+   */
+  windowContext?: WorkspaceWindowContext
+  placementsByTabId?: Map<string, WorkspaceTabPlacement>
   onSnapshot(snapshot: WorkspaceSnapshot): void
   onBusyChange(isBusy: boolean): void
   onStatusMessage(message: string | null): void
@@ -224,6 +242,8 @@ export function useWorkspaceTabs({
   locale,
   isBusy,
   closeActiveRequestVersion,
+  windowContext,
+  placementsByTabId,
   onSnapshot,
   onBusyChange,
   onStatusMessage,
@@ -297,9 +317,28 @@ export function useWorkspaceTabs({
   }, [desktopApi, isMainWorkspaceWindow])
 
   const closingSessionTabIdSet = useMemo(() => new Set(closingSessionTabIds), [closingSessionTabIds])
+  // 标签归属过滤：根据 WorkspaceTabPlacement 决定本窗口可见的会话标签。
+  // 详见 UseWorkspaceTabsOptions.windowContext 的注释。
+  const ownerWindowId = windowContext?.windowId ?? 'main'
+  const hasPlacementFilter = Boolean(windowContext && placementsByTabId)
   const visibleWorkspaceTabs = useMemo(
-    () => uniqueItemsById(workspace.tabs.filter((tab) => !closingSessionTabIdSet.has(tab.id))),
-    [closingSessionTabIdSet, workspace.tabs]
+    () =>
+      uniqueItemsById(
+        workspace.tabs.filter((tab) => {
+          if (closingSessionTabIdSet.has(tab.id)) {
+            return false
+          }
+          if (!hasPlacementFilter) {
+            return true
+          }
+          const placement = placementsByTabId!.get(tab.id)
+          // 没有 placement 记录的标签默认属于 main。新连接刚建立、placement
+          // 尚未广播时仍要在主窗口可见；独立窗口此时不应看到该标签。
+          const tabOwnerWindowId = placement?.ownerWindowId ?? 'main'
+          return tabOwnerWindowId === ownerWindowId
+        })
+      ),
+    [closingSessionTabIdSet, hasPlacementFilter, ownerWindowId, placementsByTabId, workspace.tabs]
   )
 
   useEffect(() => {
@@ -1090,10 +1129,37 @@ export function useWorkspaceTabs({
     }
 
     const target = tabContextMenu.target
+    const menuClientX = tabContextMenu.x
+    const menuClientY = tabContextMenu.y
     setTabContextMenu(null)
 
     if (action === 'copy') {
       copyText(target.title)
+      return
+    }
+
+    if (action === 'detach') {
+      // 右键菜单"移动到新窗口"：使用菜单打开时的 clientX/Y 计算 Tauri
+      // 物理屏幕坐标，调用 Rust detachWorkspaceTab 创建独立窗口并迁移标签。
+      // Rust 侧负责计算新窗口位置（多显示器感知）与广播 placement。
+      if (target.kind !== 'session' || !desktopApi) {
+        return
+      }
+      try {
+        onBusyChange(true)
+        const sourceWindowId = windowContext?.windowId ?? 'main'
+        const screenCoords = await clientToGlobalScreenCoords(menuClientX, menuClientY)
+        await desktopApi.detachWorkspaceTab({
+          tabId: target.id,
+          sourceWindowId,
+          screenX: screenCoords.x,
+          screenY: screenCoords.y
+        })
+      } catch (error) {
+        onError('移动标签到新窗口', error)
+      } finally {
+        onBusyChange(false)
+      }
       return
     }
 
@@ -1219,6 +1285,20 @@ export function useWorkspaceTabs({
 
   const startTabDrag = (tabKey: string) => {
     setDraggingTabKey(tabKey)
+    // 通知 Rust 记录 drag 状态。仅会话标签可拆分；本地 home/system 标签
+    // 不携带连接，拖出无意义，跳过 Rust 通知。
+    if (!desktopApi) {
+      return
+    }
+    const sessionTabId = parseSessionTabIdFromKey(tabKey)
+    if (!sessionTabId) {
+      return
+    }
+    const sourceWindowId = windowContext?.windowId ?? 'main'
+    void desktopApi.startWorkspaceTabDrag({ tabId: sessionTabId, sourceWindowId }).catch((error: unknown) => {
+      // drag 状态记录失败不影响窗口内排序，记日志即可。
+      console.warn('[FileTerm] startWorkspaceTabDrag failed', error)
+    })
   }
 
   const enterDraggedTab = (targetKey: string) => {
@@ -1227,6 +1307,30 @@ export function useWorkspaceTabs({
 
   const endTabDrag = () => {
     setDraggingTabKey(null)
+  }
+
+  /**
+   * 拖出窗口分离信号：pointerup 时若 pointer 在窗口外，TabBar 调用此方法。
+   * clientX/Y 为 webview 内坐标（可能为负或超过 innerWidth），由
+   * clientToGlobalScreenCoords 转换为 Tauri 物理屏幕坐标后交给 Rust。
+   * Rust 判断释放点落在哪个窗口 bounds 内，移动或创建新窗口。
+   */
+  const detachDraggedTab = async (tabKey: string, clientX: number, clientY: number) => {
+    setDraggingTabKey(null)
+    const sessionTabId = parseSessionTabIdFromKey(tabKey)
+    if (!sessionTabId || !desktopApi) {
+      return
+    }
+    try {
+      const screenCoords = await clientToGlobalScreenCoords(clientX, clientY)
+      await desktopApi.finishWorkspaceTabDrag({
+        tabId: sessionTabId,
+        screenX: screenCoords.x,
+        screenY: screenCoords.y
+      })
+    } catch (error) {
+      onError('拖出标签到新窗口', error)
+    }
   }
 
   return {
@@ -1277,6 +1381,7 @@ export function useWorkspaceTabs({
     startTabDrag,
     enterDraggedTab,
     endTabDrag,
+    detachDraggedTab,
     updateTerminalDockSendState,
     updateTerminalDockSendScope,
     updateTerminalDockSelectedTabIds,

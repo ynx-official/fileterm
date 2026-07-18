@@ -250,6 +250,10 @@ pub struct WorkspaceState {
     #[cfg(target_os = "windows")]
     pub windows_downloaded_update:
         Arc<Mutex<Option<crate::services::updates::WindowsDownloadedUpdate>>>,
+    /// 可拆分会话窗口注册表。维护 windowId -> tabIds 与 tabId -> ownerWindowId
+    /// 双索引，由 Tauri managed state 持有。详见
+    /// `docs/plans/active/detachable-session-windows-tauri.md`。
+    pub window_registry: crate::services::workspace_window_registry::WorkspaceWindowRegistry,
 }
 
 impl Default for WorkspaceState {
@@ -279,6 +283,8 @@ impl Default for WorkspaceState {
             update_operation: Arc::new(Mutex::new(())),
             #[cfg(target_os = "windows")]
             windows_downloaded_update: Arc::new(Mutex::new(None)),
+            window_registry:
+                crate::services::workspace_window_registry::WorkspaceWindowRegistry::new(),
         }
     }
 }
