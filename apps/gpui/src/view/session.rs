@@ -53,6 +53,20 @@ struct PendingFileOperation {
 }
 
 impl SessionWorkspace {
+    pub fn send_command(&self, command: &str, append_carriage_return: bool) -> anyhow::Result<()> {
+        self.controller.write_input(command.as_bytes())?;
+        if append_carriage_return {
+            self.controller.write_input(b"\r")?;
+        }
+        Ok(())
+    }
+
+    pub fn close(&mut self) {
+        self.controller.shutdown();
+        self.sftp = None;
+        self.transfer_controls.clear();
+    }
+
     pub fn new(
         tab_id: String,
         controller: Arc<SshController>,
@@ -690,8 +704,7 @@ impl SessionWorkspace {
                                         path: chmod_entry.path.clone(),
                                     },
                                     "修改远端权限",
-                                    if chmod_entry.is_dir { "0755" } else { "0644" }
-                                        .to_string(),
+                                    if chmod_entry.is_dir { "0755" } else { "0644" }.to_string(),
                                     cx,
                                 )
                             }))
@@ -881,9 +894,11 @@ impl SessionWorkspace {
                                     .bg(palette.accent)
                                     .text_sm()
                                     .text_color(palette.background)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.submit_file_operation(cx)
-                                    }))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.submit_file_operation(cx)
+                                        }),
+                                    )
                                     .child("确认"),
                             ),
                     ),
@@ -1022,6 +1037,14 @@ impl SessionWorkspace {
     }
 }
 
+impl Drop for SessionWorkspace {
+    fn drop(&mut self) {
+        self.controller.shutdown();
+        self.sftp = None;
+        self.transfer_controls.clear();
+    }
+}
+
 impl Render for SessionWorkspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = ThemePalette::for_mode(self.app_state.read(cx).theme);
@@ -1061,6 +1084,9 @@ impl Render for SessionWorkspace {
                         )
                     }),
             )
+            .when_some(pending_file_operation, |view, pending| {
+                view.child(self.render_file_operation(pending, palette, cx))
+            })
     }
 }
 

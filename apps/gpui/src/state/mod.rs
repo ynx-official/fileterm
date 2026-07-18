@@ -1,6 +1,9 @@
 use serde_json::Value;
 
-use crate::{backend::ConnectionLibrary, theme::ThemeMode};
+use crate::{
+    backend::{CommandLibrary, ConnectionLibrary},
+    theme::ThemeMode,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NavigationSection {
@@ -78,28 +81,51 @@ pub struct ConnectionFolderItem {
     pub parent_id: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandListItem {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    pub description: String,
+    pub parent_id: Option<String>,
+    pub append_carriage_return: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandFolderItem {
+    pub id: String,
+    pub name: String,
+    pub parent_id: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct AppState {
     pub theme: ThemeMode,
+    pub locale: String,
     pub navigation: NavigationSection,
     pub sidebar_collapsed: bool,
     pub workspace_focus: bool,
     pub active_tab_id: String,
+    pub last_terminal_tab_id: Option<String>,
     pub tabs: Vec<WorkspaceTab>,
     pub data_load_state: DataLoadState,
     pub data_error: Option<String>,
     pub connections: Vec<ConnectionListItem>,
     pub connection_folders: Vec<ConnectionFolderItem>,
+    pub commands: Vec<CommandListItem>,
+    pub command_folders: Vec<CommandFolderItem>,
 }
 
 impl Default for AppState {
     fn default() -> Self {
         Self {
             theme: ThemeMode::Dark,
+            locale: "zhCN".to_string(),
             navigation: NavigationSection::Overview,
             sidebar_collapsed: false,
             workspace_focus: false,
             active_tab_id: "overview".to_string(),
+            last_terminal_tab_id: None,
             tabs: vec![WorkspaceTab {
                 id: "overview".to_string(),
                 title: "概览".to_string(),
@@ -109,6 +135,8 @@ impl Default for AppState {
             data_error: None,
             connections: Vec::new(),
             connection_folders: Vec::new(),
+            commands: Vec::new(),
+            command_folders: Vec::new(),
         }
     }
 }
@@ -140,7 +168,17 @@ impl AppState {
         });
     }
 
+    pub fn apply_ui_preferences(&mut self, theme: &str, locale: &str) {
+        self.theme = if theme == "default-light" {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        };
+        self.locale = if locale == "enUS" { "enUS" } else { "zhCN" }.to_string();
+    }
+
     pub fn open_session_tab(&mut self, tab_id: String, title: String) {
+        self.last_terminal_tab_id = Some(tab_id.clone());
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.status = TabStatus::Connecting;
             self.active_tab_id = tab_id;
@@ -163,6 +201,9 @@ impl AppState {
     pub fn activate_tab(&mut self, tab_id: &str) {
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab_id = tab_id.to_string();
+            if is_terminal_tab(tab_id) {
+                self.last_terminal_tab_id = Some(tab_id.to_string());
+            }
         }
     }
 
@@ -171,7 +212,16 @@ impl AppState {
             return;
         }
         let was_active = self.active_tab_id == tab_id;
+        let was_last_terminal = self.last_terminal_tab_id.as_deref() == Some(tab_id);
         self.tabs.retain(|tab| tab.id != tab_id);
+        if was_last_terminal {
+            self.last_terminal_tab_id = self
+                .tabs
+                .iter()
+                .rev()
+                .find(|tab| is_terminal_tab(&tab.id))
+                .map(|tab| tab.id.clone());
+        }
         if was_active {
             self.active_tab_id = self
                 .tabs
@@ -196,10 +246,30 @@ impl AppState {
         self.data_error = None;
     }
 
+    pub fn apply_command_library(&mut self, library: CommandLibrary) {
+        self.commands = library
+            .commands
+            .iter()
+            .filter_map(command_list_item)
+            .collect();
+        self.command_folders = library
+            .folders
+            .iter()
+            .filter_map(command_folder_item)
+            .collect();
+    }
+
     pub fn fail_data_load(&mut self, error: impl Into<String>) {
         self.data_load_state = DataLoadState::Error;
         self.data_error = Some(error.into());
     }
+}
+
+fn is_terminal_tab(tab_id: &str) -> bool {
+    tab_id.starts_with("ssh:")
+        || tab_id.starts_with("local:")
+        || tab_id.starts_with("telnet:")
+        || tab_id.starts_with("serial:")
 }
 
 fn connection_list_item(value: &Value) -> Option<ConnectionListItem> {
@@ -260,6 +330,42 @@ fn connection_folder_item(value: &Value) -> Option<ConnectionFolderItem> {
     })
 }
 
+fn command_list_item(value: &Value) -> Option<CommandListItem> {
+    Some(CommandListItem {
+        id: value.get("id")?.as_str()?.to_string(),
+        name: value
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("未命名命令")
+            .to_string(),
+        command: value.get("command")?.as_str()?.to_string(),
+        description: value
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        parent_id: value
+            .get("parentId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        append_carriage_return: value
+            .get("appendCarriageReturn")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+    })
+}
+
+fn command_folder_item(value: &Value) -> Option<CommandFolderItem> {
+    Some(CommandFolderItem {
+        id: value.get("id")?.as_str()?.to_string(),
+        name: value.get("name")?.as_str()?.to_string(),
+        parent_id: value
+            .get("parentId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +377,23 @@ mod tests {
         state.select_navigation(NavigationSection::Connections);
         assert_eq!(state.tabs.len(), 2);
         assert_eq!(state.active_tab_id, "connections");
+    }
+
+    #[test]
+    fn command_target_tracks_last_open_terminal_across_navigation() {
+        let mut state = AppState::default();
+        state.open_session_tab("local:one".to_string(), "本地终端".to_string());
+        state.select_navigation(NavigationSection::Commands);
+        assert_eq!(state.last_terminal_tab_id.as_deref(), Some("local:one"));
+
+        state.open_session_tab("ssh:server".to_string(), "server".to_string());
+        state.activate_tab("local:one");
+        assert_eq!(state.last_terminal_tab_id.as_deref(), Some("local:one"));
+
+        state.close_tab("local:one");
+        assert_eq!(state.last_terminal_tab_id.as_deref(), Some("ssh:server"));
+        state.close_tab("ssh:server");
+        assert!(state.last_terminal_tab_id.is_none());
     }
 
     #[test]

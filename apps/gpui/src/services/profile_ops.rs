@@ -36,6 +36,126 @@ pub fn read_public_connection_library(
     Ok((public_profiles, folders))
 }
 
+pub fn read_command_library(app: &AppHandle) -> Result<(Vec<Value>, Vec<Value>), AppError> {
+    storage::migrate_legacy_data_once(app)?;
+    let mut folders = storage::read_json_array(app, "command-folders.json")?;
+    let mut commands = storage::read_json_array(app, "commands.json")?;
+    if heal_command_folders(&mut folders) {
+        storage::write_json_array(app, "command-folders.json", &folders)?;
+    }
+    if heal_command_templates(&mut commands) {
+        storage::write_json_array(app, "commands.json", &commands)?;
+    }
+    Ok((commands, folders))
+}
+
+fn heal_typed_entities(entities: &mut [Value], expected_type: &str) -> bool {
+    let mut dirty = false;
+    let mut order = now_millis();
+    for entity in entities {
+        let Some(object) = entity.as_object_mut() else {
+            continue;
+        };
+        if object.get("type").and_then(Value::as_str) != Some(expected_type) {
+            object.insert("type".to_string(), Value::String(expected_type.to_string()));
+            dirty = true;
+        }
+        if object.get("order").and_then(Value::as_f64).is_none() {
+            object.insert("order".to_string(), Value::Number(order.into()));
+            order = order.saturating_add(1);
+            dirty = true;
+        }
+    }
+    dirty
+}
+
+fn heal_command_folders(folders: &mut [Value]) -> bool {
+    heal_typed_entities(folders, "command-folder")
+}
+
+fn heal_command_templates(commands: &mut [Value]) -> bool {
+    let mut dirty = heal_typed_entities(commands, "command-template");
+    for command in commands {
+        let Some(object) = command.as_object_mut() else {
+            continue;
+        };
+        if object.get("command").and_then(Value::as_str).is_none() {
+            object.insert("command".to_string(), Value::String(String::new()));
+            dirty = true;
+        }
+        if object
+            .get("appendCarriageReturn")
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            object.insert("appendCarriageReturn".to_string(), Value::Bool(true));
+            dirty = true;
+        }
+    }
+    dirty
+}
+
+pub fn save_command_template(
+    app: &AppHandle,
+    command_id: Option<&str>,
+    command_text: &str,
+) -> Result<Value, AppError> {
+    let command_text = command_text.trim();
+    if command_text.is_empty() {
+        return Err(AppError::Command("命令内容不能为空".to_string()));
+    }
+    let (mut commands, _) = read_command_library(app)?;
+    let name = command_text
+        .split_whitespace()
+        .take(4)
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(command_id) = command_id {
+        let command = commands
+            .iter_mut()
+            .find(|command| command.get("id").and_then(Value::as_str) == Some(command_id))
+            .ok_or_else(|| {
+                AppError::Storage(format!("command template not found: {command_id}"))
+            })?;
+        let object = command
+            .as_object_mut()
+            .ok_or_else(|| AppError::Serialization("命令模板格式无效".to_string()))?;
+        object.insert("name".to_string(), Value::String(name));
+        object.insert(
+            "command".to_string(),
+            Value::String(command_text.to_string()),
+        );
+        let saved = command.clone();
+        storage::write_json_array(app, "commands.json", &commands)?;
+        return Ok(saved);
+    }
+
+    let command = serde_json::json!({
+        "id": format!("cmd-{}", uuid::Uuid::new_v4()),
+        "type": "command-template",
+        "name": name,
+        "parentId": null,
+        "order": now_millis(),
+        "command": command_text,
+        "appendCarriageReturn": true,
+    });
+    commands.insert(0, command.clone());
+    storage::write_json_array(app, "commands.json", &commands)?;
+    Ok(command)
+}
+
+pub fn delete_command_template(app: &AppHandle, command_id: &str) -> Result<(), AppError> {
+    let (mut commands, _) = read_command_library(app)?;
+    let before = commands.len();
+    commands.retain(|command| command.get("id").and_then(Value::as_str) != Some(command_id));
+    if commands.len() == before {
+        return Err(AppError::Storage(format!(
+            "command template not found: {command_id}"
+        )));
+    }
+    storage::write_json_array(app, "commands.json", &commands)
+}
+
 pub fn read_connection_profile(app: &AppHandle, profile_id: &str) -> Result<Value, AppError> {
     storage::migrate_legacy_data_once(app)?;
     let profiles = merge_profile_secrets(app, read_raw_array(app, "profiles.json")?)?;
@@ -368,6 +488,30 @@ mod tests {
 
         assert!(heal_profiles(&mut profiles, &folders));
         assert_eq!(profiles[0]["parentId"], "f1");
+    }
+
+    #[test]
+    fn command_library_healing_matches_shared_core_shape() {
+        let mut folders = vec![serde_json::json!({
+            "id": "folder-1",
+            "name": "运维"
+        })];
+        let mut commands = vec![serde_json::json!({
+            "id": "command-1",
+            "name": "查看日志"
+        })];
+
+        assert!(heal_command_folders(&mut folders));
+        assert!(heal_command_templates(&mut commands));
+        assert_eq!(folders[0]["type"], "command-folder");
+        assert!(folders[0]["order"].is_number());
+        assert_eq!(commands[0]["type"], "command-template");
+        assert_eq!(commands[0]["command"], "");
+        assert_eq!(commands[0]["appendCarriageReturn"], true);
+        assert!(commands[0]["order"].is_number());
+
+        assert!(!heal_command_folders(&mut folders));
+        assert!(!heal_command_templates(&mut commands));
     }
 
     #[test]

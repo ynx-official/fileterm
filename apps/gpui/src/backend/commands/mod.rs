@@ -70,13 +70,13 @@ async fn send_terminal_input(tab_id: &str, data: String) -> Result<(), AppError>
     Err(AppError::Unsupported("G3: needs sessions/services"))
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct UiPreferences {
     pub theme: String,
     pub locale: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Clone, Deserialize, Debug)]
 pub struct UiPreferencesInput {
     pub theme: Option<String>,
     pub locale: Option<String>,
@@ -173,28 +173,37 @@ pub fn app_get_runtime_version() -> String {
     "gpui".to_string()
 }
 
-// TODO(G2): migrate original body from Tauri (needs `arboard` clipboard
-// binding wired through the GPUI system layer).
 pub fn app_read_clipboard_text() -> Result<String, AppError> {
-    Err(AppError::Unsupported("G2: needs clipboard binding"))
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| AppError::Clipboard(error.to_string()))?;
+    clipboard
+        .get_text()
+        .map_err(|error| AppError::Clipboard(error.to_string()))
 }
 
-// TODO(G2): migrate original body from Tauri (needs `arboard` clipboard
-// binding wired through the GPUI system layer).
 pub fn app_write_clipboard_text(text: String) -> Result<(), AppError> {
-    Err(AppError::Unsupported("G2: needs clipboard binding"))
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| AppError::Clipboard(error.to_string()))?;
+    clipboard
+        .set_text(text)
+        .map_err(|error| AppError::Clipboard(error.to_string()))
 }
 
-// TODO(G2): migrate original body from Tauri (needs `open` + `url` crates
-// wired through the GPUI system layer).
 pub fn app_open_external_url(url: String) -> Result<(), AppError> {
-    Err(AppError::Unsupported("G2: needs external launcher"))
+    let parsed = validate_external_url(&url)?;
+    open::that(parsed.as_str()).map_err(|error| AppError::Command(error.to_string()))
 }
 
-// TODO(G2): migrate original body from Tauri (needs `url` crate). Return
-// type narrowed from `url::Url` to `()` until the url dep is re-added.
-fn validate_external_url(url: &str) -> Result<(), AppError> {
-    Err(AppError::Unsupported("G2: needs url crate"))
+fn validate_external_url(url: &str) -> Result<url::Url, AppError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|error| AppError::Command(format!("外部链接无效: {error}")))?;
+    if matches!(parsed.scheme(), "http" | "https") {
+        Ok(parsed)
+    } else {
+        Err(AppError::Command(
+            "仅允许打开 http 或 https 外部链接".to_string(),
+        ))
+    }
 }
 
 // TODO(G2): migrate original body from Tauri (needs `services::updates`).
@@ -217,9 +226,11 @@ pub async fn app_install_update(app: &AppHandle) -> Result<(), AppError> {
     Err(AppError::Unsupported("G2: needs update service"))
 }
 
-// TODO(G2): migrate original body from Tauri (needs `open` crate).
 pub fn app_open_logs_directory(app: &AppHandle) -> Result<(), AppError> {
-    Err(AppError::Unsupported("G2: needs open crate"))
+    let log_directory = crate::backend::storage::state_path(app)?.with_file_name("logs");
+    std::fs::create_dir_all(&log_directory)
+        .map_err(|error| AppError::Storage(error.to_string()))?;
+    open::that(log_directory).map_err(|error| AppError::Command(error.to_string()))
 }
 
 pub fn app_get_ui_preferences(app: &AppHandle) -> Result<UiPreferences, AppError> {
@@ -238,13 +249,24 @@ pub fn app_get_ui_preferences(app: &AppHandle) -> Result<UiPreferences, AppError
     }
 }
 
-// TODO(G2): migrate original body from Tauri (needs native menu refresh +
-// `app.emit` + `services::logging`).
 pub fn app_set_ui_preferences(
     app: &AppHandle,
     input: UiPreferencesInput,
 ) -> Result<UiPreferences, AppError> {
-    Err(AppError::Unsupported("G2: needs menu/event/logging"))
+    let current = app_get_ui_preferences(app)?;
+    let theme = input.theme.unwrap_or(current.theme);
+    let locale = input.locale.unwrap_or(current.locale);
+    if !matches!(theme.as_str(), "default-dark" | "default-light") {
+        return Err(AppError::Command("主题设置无效".to_string()));
+    }
+    if !matches!(locale.as_str(), "zhCN" | "enUS") {
+        return Err(AppError::Command("语言设置无效".to_string()));
+    }
+    let preferences = UiPreferences { theme, locale };
+    let value = serde_json::to_value(&preferences)
+        .map_err(|error| AppError::Serialization(error.to_string()))?;
+    write_json_object(app, "ui-preferences.json", &value)?;
+    Ok(preferences)
 }
 
 fn normalize_ui_state(value: Value) -> Result<serde_json::Map<String, Value>, AppError> {
@@ -1178,6 +1200,20 @@ fn render_command_template(template: &str, args: &[String]) -> String {
                 .unwrap_or_default()
         })
         .into_owned()
+}
+
+#[cfg(test)]
+mod external_url_tests {
+    use super::validate_external_url;
+
+    #[test]
+    fn accepts_only_http_and_https_urls() {
+        assert!(validate_external_url("https://fileterm.example/docs").is_ok());
+        assert!(validate_external_url("http://127.0.0.1:8080").is_ok());
+        assert!(validate_external_url("file:///tmp/secret").is_err());
+        assert!(validate_external_url("javascript:alert(1)").is_err());
+        assert!(validate_external_url("not a url").is_err());
+    }
 }
 
 #[cfg(test)]

@@ -29,16 +29,6 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-/// Placeholder for the root view type. G3 will replace this with the
-/// real `WorkspaceView` / `RootView` type; for G2 we just need *a* type
-/// parameter so `WindowHandle` compiles. Using `()` would work but
-/// `WindowHandle<()>` is misleading — `RootViewPlaceholder` makes the
-/// "this is temporary" intent explicit.
-///
-/// When G3 lands, find-and-replace `RootViewPlaceholder` with the real
-/// view type across this module.
-pub struct RootViewPlaceholder;
-
 /// Where a tab currently lives.
 ///
 /// Serialized to JSON and broadcast to all windows on every change so
@@ -68,16 +58,9 @@ pub struct WindowRegistry {
     /// tab". Lets `window_for_tab` be O(1) instead of scanning every
     /// window's tab list.
     tab_owner: RwLock<HashMap<String, String>>,
-    /// window_id → WindowHandle. Stored as `gpui::WindowHandle` so we
-    /// can `window.update(cx, |view, cx| ...)` from anywhere with just
-    /// the window_id. G2 stores handles opaquely (we don't call them
-    /// yet); G3+ uses them for close-request routing.
-    ///
-    /// The handle is `Option<...>` because we register a window's label
-    /// in `detached_tabs` *before* its handle is known (the window-open
-    /// callback runs after `cx.open_window` returns). `None` means
-    /// "registered but not yet opened".
-    handles: RwLock<HashMap<String, gpui::WindowHandle<RootViewPlaceholder>>>,
+    /// window_id → live GPUI window id. Keeping the registry view-agnostic
+    /// avoids coupling tab ownership to a particular root view type.
+    handles: RwLock<HashMap<String, gpui::WindowId>>,
 }
 
 impl WindowRegistry {
@@ -88,16 +71,8 @@ impl WindowRegistry {
         Self::default()
     }
 
-    /// Register a window's handle after `cx.open_window` returns.
-    ///
-    /// Called from the window-open callback. The window's label may
-    /// already be in `detached_tabs` (if tabs were pre-detached before
-    /// the window opened); this just fills in the handle.
-    pub fn register_handle(
-        &self,
-        window_id: &str,
-        handle: gpui::WindowHandle<RootViewPlaceholder>,
-    ) {
+    /// Register the live GPUI window id after `open_window` succeeds.
+    pub fn register_handle(&self, window_id: &str, handle: gpui::WindowId) {
         self.handles.write().insert(window_id.to_string(), handle);
     }
 
@@ -151,6 +126,18 @@ impl WindowRegistry {
         tabs
     }
 
+    /// Return the tabs owned by a GPUI window that has just closed.
+    pub fn return_closed_window_to_main(&self, handle: gpui::WindowId) -> Vec<String> {
+        let window_id = self
+            .handles
+            .read()
+            .iter()
+            .find_map(|(window_id, id)| (*id == handle).then(|| window_id.clone()));
+        window_id
+            .map(|window_id| self.return_tabs_to_main(&window_id))
+            .unwrap_or_default()
+    }
+
     /// Return a *single* tab to the main window.
     ///
     /// G5 addition — `return_tabs_to_main` is window-scoped (returns
@@ -187,12 +174,8 @@ impl WindowRegistry {
         self.tab_owner.read().get(tab_id).cloned()
     }
 
-    /// Get the `WindowHandle` for a window id.
-    ///
-    /// Returns `None` if the window isn't open yet (registered in
-    /// `detached_tabs` but `register_handle` hasn't been called) or
-    /// already closed.
-    pub fn handle_for(&self, window_id: &str) -> Option<gpui::WindowHandle<RootViewPlaceholder>> {
+    /// Get the live GPUI window id for a registry window id.
+    pub fn handle_for(&self, window_id: &str) -> Option<gpui::WindowId> {
         self.handles.read().get(window_id).copied()
     }
 

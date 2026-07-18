@@ -54,6 +54,7 @@ pub enum SshSessionEvent {
 enum SshCommand {
     Input(Vec<u8>),
     Resize { cols: u16, rows: u16 },
+    Shutdown,
 }
 
 pub struct SshController {
@@ -61,7 +62,7 @@ pub struct SshController {
     event_tx: broadcast::Sender<SshSessionEvent>,
     command_tx: mpsc::UnboundedSender<SshCommand>,
     handle: Arc<russh::client::Handle<ClientHandler>>,
-    task: tokio::task::JoinHandle<()>,
+    _task: tokio::task::JoinHandle<()>,
 }
 
 impl SshController {
@@ -167,7 +168,8 @@ impl SshController {
                             Some(SshCommand::Resize { cols, rows }) => {
                                 channel.window_change(cols.into(), rows.into(), 0, 0).await
                             }
-                            None => {
+                            Some(SshCommand::Shutdown) | None => {
+                                let _ = channel.eof().await;
                                 let _ = channel.close().await;
                                 break;
                             }
@@ -179,6 +181,13 @@ impl SshController {
                     }
                 }
             }
+            let _ = task_handle
+                .disconnect(
+                    russh::Disconnect::ByApplication,
+                    "FileTerm session closed",
+                    "",
+                )
+                .await;
             drop(task_handle);
         });
 
@@ -188,7 +197,7 @@ impl SshController {
                 event_tx,
                 command_tx,
                 handle,
-                task,
+                _task: task,
             },
             rx,
         ))
@@ -212,6 +221,12 @@ impl SshController {
         self.command_tx
             .send(SshCommand::Resize { cols, rows })
             .context("SSH session closed")
+    }
+
+    /// Request a graceful shell/channel shutdown. The background task sends
+    /// EOF, closes the channel and disconnects the SSH transport.
+    pub fn shutdown(&self) {
+        let _ = self.command_tx.send(SshCommand::Shutdown);
     }
 
     pub async fn exec(&self, command: &str) -> Result<Vec<u8>> {
@@ -257,7 +272,7 @@ impl SshController {
 
 impl Drop for SshController {
     fn drop(&mut self) {
-        self.task.abort();
+        let _ = self.command_tx.send(SshCommand::Shutdown);
     }
 }
 

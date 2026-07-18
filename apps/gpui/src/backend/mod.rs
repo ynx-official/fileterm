@@ -41,8 +41,13 @@ pub mod sessions;
 pub mod storage;
 
 pub use app_handle::AppHandle;
+pub use commands::{UiPreferences, UiPreferencesInput};
 
-use crate::{error::Result, ssh::SshController, term::TermChunk};
+use crate::{
+    error::Result,
+    ssh::SshController,
+    term::{SerialConfig, StreamController, TermChunk},
+};
 
 const MAX_SSH_AUTHENTICATION_ATTEMPTS: u8 = 3;
 
@@ -63,6 +68,12 @@ pub struct ConnectedSshSession {
     pub controller: Arc<SshController>,
     pub output: tokio::sync::broadcast::Receiver<TermChunk>,
     pub transfer_journal_path: std::path::PathBuf,
+}
+
+pub struct ConnectedStreamSession {
+    pub controller: Arc<StreamController>,
+    pub protocol: String,
+    pub endpoint: String,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -95,6 +106,12 @@ pub struct ConnectionLibrary {
     pub folders: Vec<Value>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct CommandLibrary {
+    pub commands: Vec<Value>,
+    pub folders: Vec<Value>,
+}
+
 /// In-process bridge between GPUI views and FileTerm backend services.
 ///
 /// Method categories mirror `docs/plans/active/gpui-migration-inventory.md`
@@ -116,14 +133,39 @@ pub trait FileTermDesktopApi: Send + Sync {
     /// against the trait without waiting for storage migration.
     async fn app_get_platform(&self) -> Result<String>;
 
+    /// Read and write plain text through the operating-system clipboard.
+    async fn app_read_clipboard_text(&self) -> Result<String>;
+    async fn app_write_clipboard_text(&self, text: String) -> Result<()>;
+
+    /// Open a validated HTTP(S) URL or the FileTerm logs directory.
+    async fn app_open_external_url(&self, url: String) -> Result<()>;
+    async fn app_open_logs_directory(&self) -> Result<()>;
+
     /// Read the shared Tauri/GPUI connection library with secrets redacted.
     async fn app_get_connection_library(&self) -> Result<ConnectionLibrary>;
 
-    // ===== G2 (window/tray/menu) — inventory 1.2 / 1.6 =====
-    // WindowRegistry + 7 window kinds + tray + native menu.
+    /// Read product UI preferences from the shared runtime store.
+    async fn app_get_ui_preferences(&self) -> Result<UiPreferences>;
 
-    /// Inventory 1.2 stub. Real signature lands in G2 with WindowRegistry.
-    async fn workspace_list_windows(&self) -> Result<Vec<()>>;
+    /// Persist validated product UI preferences to the shared runtime store.
+    async fn app_set_ui_preferences(&self, input: UiPreferencesInput) -> Result<UiPreferences>;
+
+    /// Read the shared command template library.
+    async fn app_get_command_library(&self) -> Result<CommandLibrary>;
+
+    /// Create or update one command template.
+    async fn app_save_command_template(
+        &self,
+        command_id: Option<String>,
+        command: String,
+    ) -> Result<Value>;
+
+    /// Delete one command template.
+    async fn app_delete_command_template(&self, command_id: String) -> Result<()>;
+
+    // Window creation and tab placement deliberately stay in the GPUI view
+    // layer because they require `&mut App`; protocol/file operations remain
+    // behind session-scoped services with the concrete controller they need.
 
     // ===== G3 (SSH terminal) — inventory 1.3 =====
     // russh shell channel + TermView + SystemSidebar + CWD 跟随.
@@ -138,26 +180,12 @@ pub trait FileTermDesktopApi: Send + Sync {
         options: SshConnectOptions,
     ) -> Result<ConnectedSshSession>;
 
-    // ===== G4 (SFTP + transfer) — inventory 1.4 / 1.5 =====
-    // russh-sftp + TransferService + TransferCenter.
+    /// Open a stored Telnet or Serial profile as a terminal byte stream.
+    async fn stream_connect(&self, profile_id: &str) -> Result<ConnectedStreamSession>;
 
-    /// Inventory 1.4 stub. Real signature lands in G4 with russh-sftp.
-    async fn sftp_list(&self) -> Result<Vec<()>>;
-
-    /// Inventory 1.5 stub. Real signature lands in G4 with TransferService.
-    async fn transfer_create(&self) -> Result<()>;
-
-    // ===== G5 (detach + release) — inventory 1.2 (detach) =====
-    // detached-session windows + tab drag + 3-platform packaging.
-
-    /// Inventory 1.2 (detach) stub. Real signature lands in G5.
-    async fn workspace_detach_tab(&self) -> Result<()>;
-
-    // ===== Lower-priority groups (P1/P2) — inventory 1.7–1.13 =====
-    // tunnel / webdav / ssh-key / command-template / ui-state / update /
-    // clipboard / external. These get their method declarations as each
-    // phase needs them; G0 leaves them out entirely to keep the trait
-    // surface minimal.
+    // SFTP and transfer operations are session-scoped services. Their API
+    // accepts a live `SshController`/`SftpClient`; keeping parameterless bridge
+    // methods here would create an invalid second ownership boundary.
 }
 
 /// Concrete in-process desktop API.
@@ -191,16 +219,55 @@ impl FileTermDesktopApi for GpuiDesktopApi {
         Ok(commands::app_get_platform())
     }
 
+    async fn app_read_clipboard_text(&self) -> Result<String> {
+        commands::app_read_clipboard_text()
+    }
+
+    async fn app_write_clipboard_text(&self, text: String) -> Result<()> {
+        commands::app_write_clipboard_text(text)
+    }
+
+    async fn app_open_external_url(&self, url: String) -> Result<()> {
+        commands::app_open_external_url(url)
+    }
+
+    async fn app_open_logs_directory(&self) -> Result<()> {
+        commands::app_open_logs_directory(&self.app)
+    }
+
     async fn app_get_connection_library(&self) -> Result<ConnectionLibrary> {
         let (profiles, folders) =
             crate::services::profile_ops::read_public_connection_library(&self.app)?;
         Ok(ConnectionLibrary { profiles, folders })
     }
 
-    async fn workspace_list_windows(&self) -> Result<Vec<()>> {
-        Err(crate::error::AppError::Unsupported(
-            "workspace_list_windows (G2: WindowRegistry)",
-        ))
+    async fn app_get_ui_preferences(&self) -> Result<UiPreferences> {
+        commands::app_get_ui_preferences(&self.app)
+    }
+
+    async fn app_set_ui_preferences(&self, input: UiPreferencesInput) -> Result<UiPreferences> {
+        commands::app_set_ui_preferences(&self.app, input)
+    }
+
+    async fn app_get_command_library(&self) -> Result<CommandLibrary> {
+        let (commands, folders) = crate::services::profile_ops::read_command_library(&self.app)?;
+        Ok(CommandLibrary { commands, folders })
+    }
+
+    async fn app_save_command_template(
+        &self,
+        command_id: Option<String>,
+        command: String,
+    ) -> Result<Value> {
+        crate::services::profile_ops::save_command_template(
+            &self.app,
+            command_id.as_deref(),
+            &command,
+        )
+    }
+
+    async fn app_delete_command_template(&self, command_id: String) -> Result<()> {
+        crate::services::profile_ops::delete_command_template(&self.app, &command_id)
     }
 
     async fn ssh_connect(
@@ -316,22 +383,71 @@ impl FileTermDesktopApi for GpuiDesktopApi {
         })
     }
 
-    async fn sftp_list(&self) -> Result<Vec<()>> {
-        Err(crate::error::AppError::Unsupported(
-            "sftp_list (G4: russh-sftp)",
-        ))
-    }
-
-    async fn transfer_create(&self) -> Result<()> {
-        Err(crate::error::AppError::Unsupported(
-            "transfer_create (G4: TransferService)",
-        ))
-    }
-
-    async fn workspace_detach_tab(&self) -> Result<()> {
-        Err(crate::error::AppError::Unsupported(
-            "workspace_detach_tab (G5: detach + release)",
-        ))
+    async fn stream_connect(&self, profile_id: &str) -> Result<ConnectedStreamSession> {
+        let profile = crate::services::profile_ops::read_connection_profile(&self.app, profile_id)?;
+        let protocol = profile
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let (controller, endpoint) = match protocol.as_str() {
+            "telnet" => {
+                let host = profile
+                    .get("host")
+                    .and_then(Value::as_str)
+                    .filter(|host| !host.trim().is_empty())
+                    .ok_or_else(|| {
+                        crate::error::AppError::Command("Telnet host is required".into())
+                    })?;
+                let port = profile.get("port").and_then(Value::as_u64).unwrap_or(23) as u16;
+                let controller = StreamController::connect_telnet(host, port)
+                    .await
+                    .map_err(|error| crate::error::AppError::Command(error.to_string()))?;
+                (controller, format!("{host}:{port}"))
+            }
+            "serial" => {
+                let device_path = profile
+                    .get("devicePath")
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.trim().is_empty())
+                    .ok_or_else(|| {
+                        crate::error::AppError::Command("Serial device path is required".into())
+                    })?
+                    .to_string();
+                let baud_rate = profile
+                    .get("baudRate")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(115_200) as u32;
+                let controller = StreamController::connect_serial(SerialConfig {
+                    device_path: device_path.clone(),
+                    baud_rate,
+                    data_bits: profile.get("dataBits").and_then(Value::as_u64).unwrap_or(8) as u8,
+                    stop_bits: profile.get("stopBits").and_then(Value::as_u64).unwrap_or(1) as u8,
+                    parity: profile
+                        .get("parity")
+                        .and_then(Value::as_str)
+                        .unwrap_or("none")
+                        .to_string(),
+                    flow_control: profile
+                        .get("flowControl")
+                        .and_then(Value::as_str)
+                        .unwrap_or("none")
+                        .to_string(),
+                })
+                .map_err(|error| crate::error::AppError::Command(error.to_string()))?;
+                (controller, format!("{device_path} @ {baud_rate}"))
+            }
+            _ => {
+                return Err(crate::error::AppError::Command(format!(
+                    "profile {profile_id} is not a Telnet or Serial profile"
+                )))
+            }
+        };
+        Ok(ConnectedStreamSession {
+            controller: Arc::new(controller),
+            protocol,
+            endpoint,
+        })
     }
 }
 
@@ -398,15 +514,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remaining_unwired_methods_return_unsupported() {
+    async fn missing_ssh_profile_returns_error() {
         let api = GpuiDesktopApi::default();
-        assert!(api.workspace_list_windows().await.is_err());
         assert!(api
             .ssh_connect("missing", 80, 24, SshConnectOptions::default())
             .await
             .is_err());
-        assert!(api.sftp_list().await.is_err());
-        assert!(api.transfer_create().await.is_err());
-        assert!(api.workspace_detach_tab().await.is_err());
     }
 }

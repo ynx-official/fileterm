@@ -56,6 +56,7 @@ russh = "0.40"
 russh-keys = "0.40"
 russh-sftp = "2"
 tokio = { version = "1", features = ["full"] }
+tokio-serial = "5"
 async-trait = "0.1"
 thiserror = "1"
 dirs = "5"
@@ -83,6 +84,9 @@ rfd = "0.17"
 # Mirrors `apps/tauri/src-tauri/Cargo.toml`'s `regex` dep so the fork stays
 # line-for-line with Tauri's command-template rendering code.
 regex = "1"
+arboard = "3.6.1"
+open = "5.4.0"
+url = "2.5.8"
 
 [[example]]
 name = "term_spike"

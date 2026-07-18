@@ -57,9 +57,10 @@ pub struct PtyHandle {
     /// (the gpui main thread for `write_input` / `resize`). If we later need
     /// cross-thread writes, swap this for `Arc<Mutex<dyn MasterPty + Send>>`.
     master: Arc<dyn MasterPty + Send>,
-    /// The child process. Kept here so it gets reaped on drop rather than
-    /// turning into a zombie.
-    _child: Box<dyn Child + Send + Sync>,
+    /// The child process is explicitly terminated and reaped when the last
+    /// session handle drops, so closing a terminal tab cannot leave a shell
+    /// running in the background.
+    child: Mutex<Option<Box<dyn Child + Send + Sync>>>,
     /// Output broadcast. Receivers come and go; the writer thread keeps
     /// sending even if there are zero receivers (broadcast drops the chunk).
     tx: broadcast::Sender<TermChunk>,
@@ -199,7 +200,7 @@ impl PtyHandle {
         Ok((
             Self {
                 master: Arc::from(pair.master),
-                _child: child,
+                child: Mutex::new(Some(child)),
                 tx,
                 writer: Mutex::new(Some(writer)),
             },
@@ -232,6 +233,21 @@ impl PtyHandle {
         Ok(())
     }
 
+    /// Explicitly terminate and reap the child process. This is idempotent and
+    /// is called when a terminal tab closes; `Drop` remains the final fallback.
+    pub fn terminate(&self) {
+        self.writer.lock().take();
+        if let Some(mut child) = self.child.lock().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    #[cfg(test)]
+    fn is_terminated(&self) -> bool {
+        self.child.lock().is_none()
+    }
+
     /// Resize the PTY. The kernel forwards the new size to the child via
     /// SIGWINCH on Unix; on Windows ConPTY updates the console buffer.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -243,5 +259,41 @@ impl PtyHandle {
                 pixel_height: 0,
             })
             .context("pty resize failed")
+    }
+}
+
+impl Drop for PtyHandle {
+    fn drop(&mut self) {
+        self.writer.get_mut().take();
+        if let Some(mut child) = self.child.get_mut().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+
+    #[test]
+    fn terminate_is_idempotent_and_reaps_child() {
+        let program = if cfg!(target_os = "windows") {
+            "cmd.exe"
+        } else {
+            "sh"
+        };
+        let args: &[&str] = if cfg!(target_os = "windows") {
+            &["/C", "ping -n 30 127.0.0.1 >NUL"]
+        } else {
+            &["-c", "sleep 30"]
+        };
+        let (pty, _) = PtyHandle::spawn_with_args(program, args, 80, 24).expect("spawn test pty");
+
+        assert!(!pty.is_terminated());
+        pty.terminate();
+        assert!(pty.is_terminated());
+        pty.terminate();
+        assert!(pty.is_terminated());
     }
 }
