@@ -43,6 +43,10 @@ fn main() {
     // in the window-builder closure. 80x24 matches the model's default and
     // is what bash configures against on startup.
     let (pty, _rx) = PtyHandle::spawn(shell, 80, 24).expect("pty spawn");
+    // `PtyHandle` wraps a portable-pty master, which is not `Send`/`Sync`.
+    // We keep it on the main thread for the spike (gpui runs single-threaded
+    // in foreground anyway), so the `Arc` is fine despite clippy's warning.
+    #[allow(clippy::arc_with_non_send_sync)]
     let pty: Arc<PtyHandle> = Arc::new(pty);
 
     gpui_platform::application().run(move |cx: &mut App| {

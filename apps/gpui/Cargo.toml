@@ -61,5 +61,9 @@ name = "term_spike"
 path = "examples/term_spike.rs"
 
 [[example]]
+name = "term_bench"
+path = "examples/term_bench.rs"
+
+[[example]]
 name = "term_pty"
 path = "examples/term_pty.rs"

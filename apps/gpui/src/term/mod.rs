@@ -3,6 +3,7 @@
 pub mod model;
 pub mod perform;
 pub mod pty;
+pub mod spawn;
 pub mod view;
 
 pub use model::{

@@ -50,7 +50,6 @@ use gpui::{
     SharedString, ShapedLine, Styled, TextAlign, Window, canvas, div, fill, font, point, px, rgb,
     size, transparent_black,
 };
-use tokio::sync::broadcast;
 
 use crate::term::{CellFlags, Color, ColorKind, Cursor, CursorStyle, PtyHandle, TermSession};
 
@@ -148,9 +147,21 @@ pub struct TermView {
     /// place we have a `&mut Window`, so we use this flag to grab focus on
     /// the first frame.
     did_focus: bool,
-    /// Count of broadcast chunks dropped due to `Lagged` since startup. G-1.5
-    /// surfaces this as a metric; G-1.4 just records it for diagnostics.
+    /// Count of broadcast chunks dropped due to `Lagged` since startup.
+    /// Surfaced in the window title for the G-1.5 acceptance test ("run
+    /// `yes` and watch the count go non-zero"). `Arc<AtomicU64>` because
+    /// the foreground feed pump (in `spawn.rs`) writes it from inside the
+    /// `session.update` closure while the render path reads it here.
     pub dropped_chunks: Arc<std::sync::atomic::AtomicU64>,
+    /// Frame counter used to throttle `set_window_title` calls — updating
+    /// the platform title every frame is wasteful (X11/Wayland round-trip)
+    /// and most frames the count hasn't changed anyway. We refresh every
+    /// 30 frames (~0.5s at 60fps), which is plenty for a status indicator.
+    frame_counter: u32,
+    /// Cached dropped count from the last time we updated the title.
+    /// Compared against the atomic on each frame so we skip the platform
+    /// call entirely when nothing changed.
+    last_title_dropped: u64,
 }
 
 impl TermView {
@@ -192,45 +203,19 @@ impl TermView {
         // picks its own font_id from each TextRun's Font).
         let _ = font_id;
 
-        // Spawn a foreground broadcast consumer. `cx.spawn` runs the future
-        // on gpui's foreground executor so we can synchronously mutate the
-        // session entity on each chunk. `Task::detach()` keeps the pump
-        // running for the view's lifetime without us having to hold the Task.
+        // Spawn the foreground coalescing pump (G-1.5). The pump drains
+        // the PTY broadcast on a 16ms tick, concatenating all chunks
+        // that arrived since the last tick into a single `session.feed`
+        // call. Under a `yes` firehose this collapses ~100k mutations/sec
+        // down to ~60/sec, matching the repaint budget and keeping the
+        // UI responsive. `Lagged` gaps are counted into `dropped_chunks`
+        // and trigger a `mark_all_dirty` so no torn rows survive.
         //
-        // `Context::spawn` signature is `AsyncFnOnce(WeakEntity<T>, &mut
-        // AsyncApp) -> R` — the first param is a weak handle to *self*, which
-        // we don't need here because we already captured `session_for_task`
-        // (a `WeakEntity<TermSession>`, the child entity we want to mutate).
-        let mut rx = pty.subscribe();
-        let session_for_task = session.downgrade();
-        let dropped_for_task = dropped_chunks.clone();
-        cx.spawn(async move |_weak_self, cx| {
-            loop {
-                match rx.recv().await {
-                    Ok(chunk) => {
-                        let _ = session_for_task.update(cx, |s, cx| {
-                            s.feed(&chunk.bytes);
-                            cx.notify();
-                        });
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        dropped_for_task.fetch_add(
-                            n as u64,
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
-                        // Mark everything dirty so the next frame repaints
-                        // from scratch — partial chunks after a Lagged gap
-                        // would otherwise leave torn rows on screen.
-                        let _ = session_for_task.update(cx, |s, cx| {
-                            s.model.mark_all_dirty();
-                            cx.notify();
-                        });
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        })
-        .detach();
+        // See `spawn.rs` for the full backpressure / coalescing story.
+        let rx = pty.subscribe();
+        let session_weak = session.downgrade();
+        crate::term::spawn::spawn_term_feed(cx, session_weak, rx, dropped_chunks.clone())
+            .detach();
 
         Self {
             session,
@@ -244,6 +229,8 @@ impl TermView {
             rows,
             did_focus: false,
             dropped_chunks,
+            frame_counter: 0,
+            last_title_dropped: 0,
         }
     }
 }
@@ -261,6 +248,24 @@ impl Render for TermView {
         if !self.did_focus {
             self.did_focus = true;
             _window.focus(&self.focus, cx);
+        }
+
+        // Surface `dropped_chunks` in the window title for the G-1.5
+        // acceptance test ("run `yes` and observe the count go non-zero").
+        // Refresh every 30 frames OR when the count changes — whichever
+        // comes first. The atomic load is `Relaxed` because we only need
+        // eventual consistency for a status indicator; the title string
+        // is built cheaply from a single integer.
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+        let dropped = self
+            .dropped_chunks
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if dropped != self.last_title_dropped || self.frame_counter.is_multiple_of(30) {
+            self.last_title_dropped = dropped;
+            _window.set_window_title(&format!(
+                "FileTerm GPUI Spike — dropped: {}",
+                dropped
+            ));
         }
 
         let cell_w = self.cell_w;
@@ -308,7 +313,7 @@ impl Render for TermView {
                                 view.rows = new_rows;
                                 cx.notify();
                             });
-                            let _ = session_clone.update(cx, |s, cx| {
+                            session_clone.update(cx, |s, cx| {
                                 s.resize(new_cols, new_rows);
                                 cx.notify();
                             });
@@ -343,6 +348,7 @@ impl Render for TermView {
 /// The `WindowTextSystem` Arc is cloned from `window.text_system()` before
 /// the `read_with` closure so we can call `shape_line` inside it without
 /// borrowing `window` (the closure only has `&App`, not `&Window`).
+#[allow(clippy::too_many_arguments)]
 fn paint_terminal_grid(
     window: &mut Window,
     cx: &mut App,
@@ -551,7 +557,7 @@ fn keystroke_to_bytes(ks: &Keystroke) -> Vec<u8> {
     if mods.control && !mods.platform {
         let lc_key = ks.key.to_ascii_lowercase();
         if let Some(ch) = lc_key.chars().next() {
-            if ('a'..='z').contains(&ch) {
+            if ch.is_ascii_lowercase() {
                 let mut out = Vec::with_capacity(2);
                 if mods.alt {
                     out.push(0x1b);

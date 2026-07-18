@@ -78,6 +78,50 @@ impl PtyHandle {
     /// On Windows the caller should pass `cmd.exe` or `powershell.exe`;
     /// `portable-pty` will pick ConPTY automatically when available.
     pub fn spawn(shell: &str, cols: u16, rows: u16) -> Result<(Self, broadcast::Receiver<TermChunk>)> {
+        let mut cmd = CommandBuilder::new(shell);
+        Self::apply_term_env(&mut cmd);
+        Self::spawn_impl(cmd, shell, cols, rows)
+    }
+
+    /// Spawn `program` with `args` into a new PTY at the given size.
+    ///
+    /// Used by `term_bench` to run `sh -c "<command>"` so the bench can
+    /// drive an arbitrary command line (`yes`, `find /`, `vim`, …)
+    /// without polluting the PTY with a parent interactive shell.
+    pub fn spawn_with_args(
+        program: &str,
+        args: &[&str],
+        cols: u16,
+        rows: u16,
+    ) -> Result<(Self, broadcast::Receiver<TermChunk>)> {
+        let mut cmd = CommandBuilder::new(program);
+        for a in args {
+            cmd.arg(a);
+        }
+        Self::apply_term_env(&mut cmd);
+        Self::spawn_impl(cmd, program, cols, rows)
+    }
+
+    /// Set the standard xterm-256color + truecolor env vars every spawn
+    /// wants. Factored out so [`spawn`] and [`spawn_with_args`] stay in
+    /// sync — we never want a spawn path that forgets `TERM`.
+    fn apply_term_env(cmd: &mut CommandBuilder) {
+        // xterm-256color matches what our vte parser (G-1.3) will assume;
+        // truecolor advertises 24-bit SGR support so shells like fish/zsh
+        // emit RGB escape sequences instead of indexed palette hacks.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+    }
+
+    /// Shared body of [`spawn`] / [`spawn_with_args`]. `cmd_label` is only
+    /// used for error-context strings; the actual command is `cmd`
+    /// (consumed by value because `spawn_command` takes it by value).
+    fn spawn_impl(
+        cmd: CommandBuilder,
+        cmd_label: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(Self, broadcast::Receiver<TermChunk>)> {
         let system = native_pty_system();
         let pair = system
             .openpty(PtySize {
@@ -86,19 +130,12 @@ impl PtyHandle {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .with_context(|| format!("openpty failed for {shell}"))?;
-
-        let mut cmd = CommandBuilder::new(shell);
-        // xterm-256color matches what our vte parser (G-1.3) will assume;
-        // truecolor advertises 24-bit SGR support so shells like fish/zsh
-        // emit RGB escape sequences instead of indexed palette hacks.
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
+            .with_context(|| format!("openpty failed for {cmd_label}"))?;
 
         let child = pair
             .slave
             .spawn_command(cmd)
-            .with_context(|| format!("spawn_command failed for {shell}"))?;
+            .with_context(|| format!("spawn_command failed for {cmd_label}"))?;
 
         // Drop the slave handle now that the child has it; this is the
         // pattern from `portable-pty/examples/whoami.rs`. Holding the slave

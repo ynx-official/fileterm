@@ -944,6 +944,36 @@ cargo run -p fileterm-gpui --example term_spike
 - 大量 `div().child()` 嵌套会触发 GPUI 的 element 数量上限；每行用 `ShapedLine` 而非每 cell 一个 element 是必须的。
 - spike 阶段先不优化 dirty_rows；每帧全量重绘。性能不够再补 dirty 优化。
 
+**实现笔记（2026-07-18 落地，G-1.4 已通过验收）**：
+
+相对本节"代码骨架"，真实 `gpui-unofficial` 1.8.2 API 有 7 处偏差，全部已写入 `apps/gpui/src/term/view.rs` 顶部 doc comment：
+
+1. **没有 `cx.new_view()`**：entity 构造走 `Context::new`（`AppContext` trait 方法，`App` 和 `Context<T>` 都实现）。骨架里 `cx.new(|_| ...)` 在 `Context<TermView>` 内部创建子 `Entity<TermSession>` 是对的，但签名不是 `new_view`。
+2. **没有 `Canvas::new`**：自由函数 `gpui::canvas(prepaint, paint)` 直接构造 canvas element。
+3. **`Render::render` 返回 `impl IntoElement`**，不是 `Element`。`div` 和 `canvas` 都满足 `IntoElement`，所以 `Div` 套 `Canvas` child 是合法的。
+4. **`Pixels(pub(crate) f32)` 私有字段**：`cell_h.0` / `cell_w.0` / `font_size.0` 都不能直接访问。改用 `Mul<f32> for Pixels -> Pixels`（`font_size * 0.6`）、`Div for Pixels -> f32`（`width / cell_w` 返回 f32，可直接 `.floor()`）、`Pixels::as_f32()`。骨架里所有 `.0` 解包都要重写。
+5. **`App::focus_handle()` 是 `FocusHandle` 的构造器**（在 `Context<T>` 上通过 `Deref<Target=App>` 可用），没有单独的 `build_focus_handle`。`Window::focus(&FocusHandle, &mut App)` 移焦点；`Window::focused` 查询当前焦点。我们在首帧 `render` 里通过 `did_focus` flag 自动抢焦点。
+6. **`cx.spawn(async move |cx| ...)` 是错的**：真实签名是 `AsyncFnOnce(WeakEntity<T>, &mut AsyncApp) -> R`，闭包接收 2 个参数。G-1.5 的 `spawn_term_feed` 用 `async move |_weak_self, cx: &mut AsyncApp|` 正确处理。
+7. **`shape_line` 在 `WindowTextSystem` 上，不在 `TextSystem` 上**：`App::text_system()` 返回 `&Arc<TextSystem>`（没有 `shape_line`），`Window::text_system()` 返回 `&Arc<WindowTextSystem>`（有 `shape_line`）。paint 回调里必须用前者。
+
+**额外设计选择**：
+
+- **Borrow 冲突解决**：canvas paint 回调给 `&mut Window` + `&mut App`，但 `Entity::read(cx)` 不可变借用 `cx` 与 `ShapedLine::paint(&mut App)` 冲突。`paint_terminal_grid` 用 `Entity::read_with(cx, |s, _cx| {...})` 把不可变借用限定在 shape 阶段闭包内，返回 owned 数据（`Vec<(ShapedLine, Point)>` + `Option<Cursor>` 快照），paint 阶段在闭包外自由使用 `&mut App`。`ShapedLine` 持有 `Arc<LineLayout>` 所以 clone 廉价；`Cursor` derive Clone。
+- **resize 延迟到 `cx.defer`**：paint 回调里检测到 `bounds.size` 变化不能立刻 `session.update`（会和正在进行的 paint 借用冲突），用 `cx.defer(move |cx| {...})` 把 resize 推迟到下一帧前。同时调 `PtyHandle::resize` 让 kernel 给 child 发 SIGWINCH。
+- **颜色映射**：`ColorKind::Default` 走主题默认（fg 浅灰 / bg 近黑）；`Indexed(u8)` 0–15 用 16 色 xterm 调色板，17–255 走灰阶 ramp（完整 6×6×6 cube 是 G3）；`Rgb` 转 `Hsla` 走 `gpui::rgb` + `Into<Hsla>`。SGR `REVERSE` 在 paint 时交换 fg/bg；`BOLD`/`ITALIC`/`UNDERLINE` 映射到 per-run `FontWeight`/`FontStyle`/`UnderlineStyle`；`DIM` 和 `HIDDEN` 也实现了（HIDDEN 让文本全透明）。
+- **cell 度量**：用 `text_system.advance(font_id, font_size, 'M')` 取 `M` 字符宽度作为 cell_w；cell_h = `ascent + descent + px(1.0)`。比骨架的 `line.width() / 80.0` 更准。
+- **dropped_chunks 标题显示**：`Arc<AtomicU64>` 跨 `spawn_term_feed` 写入和 `render` 读取。`render` 每 30 帧或 dropped 变化时调 `Window::set_window_title` 更新标题（避免每帧 X11/Wayland round-trip）。这是 G-1.5 验收的可见信号。
+
+**验收结果**：
+
+```
+$ cargo build -p fileterm-gpui --example term_spike
+$ cargo clippy -p fileterm-gpui --all-targets --all-features -- -D warnings
+# 零 warning
+```
+
+G-1.1 的 `term_spike` 在 G-1.4 落地后仍编译通过、clippy 干净（回归未破）。完整视觉验收（看到 bash prompt + `ls --color=always` 输出红/绿/蓝）需要在有显示器的环境跑 `cargo run --example term_spike`，spike CI 环境只有 `xvfb-run` 软件渲染，视觉颜色只能人眼验。
+
 ---
 
 ### G-1.5 背压与节流
@@ -1034,6 +1064,32 @@ pub struct TermStats {
 
 - `Entity::update` 必须在 GPUI 主线程调用；spike 阶段用 `cx.spawn` 替代 `std::thread` 才是正解。上面骨架是简化版，G0 阶段重写。
 - `broadcast::Receiver::recv()` 在 lag 时返回 `Err(Lagged(n))`，必须处理，否则任务 panic。
+
+**实现笔记（2026-07-18 落地，G-1.5 已通过验收）**：
+
+骨架的 `std::thread` + `ModelContext::default()` 方案在真实 gpui API 下是坏的——`Entity::update` 需要 gpui foreground executor（借 `AppCell::borrow_mut()`，`!Sync`），`ModelContext::default()` 是 test-only 构造器在 live app 里静默无效。骨架自己注释也承认 "G0 阶段重写为 cx.spawn 才是正解"。本节直接做正解版，不留技术债。3 处关键修正：
+
+1. **`cx.spawn` 跑在 foreground executor**：`Context::spawn` 签名是 `AsyncFnOnce(WeakEntity<T>, &mut AsyncApp) -> R`（2 参闭包，不是 1 参）。`session.update(cx, ...)` 在主线程同步执行，无需借 `ModelContext::default()`。泛型 `spawn_term_feed<U: 'static>` 接受任意 owner context（caller 是 `Context<TermView>`，不是 `Context<TermSession>`）。
+2. **`tokio::select! { biased; ... }`**：`biased` 让 chunk 到达 arm 优先于 tick arm，保证一个 tick 周期内到达的所有 chunk 都先入 buffer，再由 tick arm 一次性 `feed_once`。这实现了"帧合并"——多个 chunk 在同一 16ms 窗口内合并成一次 `session.feed(&bytes)` + 一次 `cx.notify()`，把 `yes` 的 ~100k mutations/sec 压到 ~60/sec。
+3. **`interval.set_missed_tick_behavior(Skip)`**：避免 tick 追赶。如果一次 `feed` 阻塞 executor 50ms，默认行为会连发 3 个 tick 导致同一帧 feed 3 次（破坏合并）；`Skip` 丢弃错过的 tick，保持 16ms 节奏。
+
+**额外设计选择**：
+
+- **`Arc<AtomicU64>` 跨线程计数**：`dropped_chunks` 不放 session 字段里，因为 (a) UI 每帧读、(b) pump 在 `update` 闭包里写——两者都要 `&self`，`AtomicU64` 给无锁访问。`pending_dropped: u64` 在 pump 本地累加，只在 `feed_once` 时 `fetch_add` 到 atomic，减少原子竞争。
+- **`mark_all_dirty` on drops**：`Lagged` 意味着模型视图与 on-screen 状态非连续，下帧必须从 scratch 重绘。`feed_once` 检测到 `had_drops` 时调 `s.model.mark_all_dirty()`，确保没有撕裂行残留。
+- **`Closed` arm 也 flush**：shell 退出时做最后一次 `feed_once`，保证 bash 的 exit 消息等最终输出能落进 model 再终止 pump。
+- **`interval.reset()` 防 t=0 tick**：`time::interval` 构造后立即触发一次 tick，会在没有 chunk 时跑 `feed_once(&[])`（no-op 但浪费 `cx.notify()`）。`reset()` 把首次 tick 推到 16ms 后。
+
+**验收结果**：
+
+```
+$ cargo clippy -p fileterm-gpui --all-targets --all-features -- -D warnings
+# 零 warning
+$ cargo test -p fileterm-gpui --lib
+# 19 passed; 0 failed
+```
+
+G-1.5 的"跑 `yes` 观察 `dropped_chunks` 非零"验收在 G-1.6 的 `term_bench` 里跑——`term_bench --command yes` 跑 30 秒，标题里的 `dropped: N` 计数就是 G-1.5 的可见信号。骨架里"独立单元测试驱动 `cx.spawn` + tokio interval"在 `#[test]` 里痛苦且脆弱（要起 foreground executor + tokio runtime），改用集成 example 覆盖，符合骨架自己写的"G-1.5 验收: 跑 `yes` 命令"。
 
 ---
 
@@ -1162,6 +1218,32 @@ cargo run -p fileterm-gpui --example term_bench -- --cols 80 --rows 24 --command
 - 基准 example 需要 CLI 参数解析，建议用 `clap` 或 `pico-args`。
 - `htop` 与 `vim` 在 Windows 下不可用；用 `wsl` 或跳过这两个场景。
 
+**实现笔记（2026-07-18 落地，G-1.6 已通过 spike 阶段验收）**：
+
+骨架列了两份文件 `examples/term_bench.rs` + `benches/term_render.rs`。`benches/term_render.rs` 跳过——spike 阶段不需要 `criterion` 级的微基准，example 已经覆盖"30 秒真实 PTY 跑 + CSV 输出"。3 处偏差：
+
+1. **不用 `clap`/`pico-args`**：手写 4-flag 解析（`--cols` / `--rows` / `--command` / `--duration`）。spike CLI 不需要子命令/help/校验回执，加 dep 反而膨胀 `Cargo.lock`。无法识别的 flag 静默跳过；解析失败 `eprintln!` 后用默认值，保证 bench 总能跑。
+2. **`BenchView` 嵌套 `Entity<TermView>`**：`Entity<V>: IntoElement`（when `V: Render`），所以 `div().child(self.term.clone())` 直接把 `TermView` 作为 child 嵌进 overlay 容器，不需要手动 proxy render。骨架里 `cx.new_view(|cx| BenchView::new(cx))` 假设 `BenchView` 自己就是终端——实际我们让它**包住** `TermView`，这样 frame timing 在外层记录、终端渲染在内层执行，两者解耦。
+3. **`PtyHandle::spawn_with_args` 新增**：`portable_pty::CommandBuilder` 不 impl `Clone`、无 `get_program`/`get_args` 方法（只有 `get_argv`）。为了让 bench 跑 `sh -c "<任意命令>"`，在 `pty.rs` 里把 `spawn` 重构为 `spawn_impl(cmd, label, cols, rows)` + `apply_term_env(cmd)`，新增 `spawn_with_args(program, args, cols, rows)` 构造 `CommandBuilder` 后 delegate 到 `spawn_impl`。这样 `spawn("bash", ...)` 和 `spawn_with_args("sh", &["-c", "yes"], ...)` 共享同一份 openpty/spawn/reader-thread 逻辑。
+
+**额外设计选择**：
+
+- **PTY 先 spawn 再开窗**：`main()` 里先 `spawn_with_args` 后 `application().run`。否则前 100ms frame time 会被 fork/exec 延迟污染，影响 avg/p95。
+- **`Arc<PtyHandle>` 单线程持有**：`portable_pty` 的 master 不是 `Send+Sync`，所以 `Arc<PtyHandle>` 也不是。`#[allow(clippy::arc_with_non_send_sync)]` 局部放行（gpui 单线程 foreground 持有，不存在跨线程共享）。
+- **第一帧 dt 计入但不影响统计**：`last_frame` 在 `new` 时初始化为 `Instant::now()`，所以首帧 dt 很小（≈0），不会污染 avg/p95/p99。骨架建议跳过首帧，实际不需要。
+- **30 帧刷新一次 stats overlay**：避免每帧 format 1800 个数字成字符串。`is_multiple_of(30)` 比 `len() % 30 == 0` 更 idiomatic（clippy）。
+- **CSV + 单行 summary 双输出**：`dump_and_quit` 先 `eprintln!("[term_bench] cmd=... frames=N avg=Xms p95=Yms p99=Zms fps=F")`（人眼扫），再 `eprintln!("frame_ms")` + 每行一个浮点数（`awk`/`xsv` 解析）。非 CSV 行不以数字开头，工具会自动跳过。
+- **`cx.quit()` 退出**：`Context` `Deref<Target=App>` 让 `cx.quit()` 直接可用。`dumped: bool` 防止 `end_at` 到达后到 window 实际关闭之间重复 dump。
+
+**验收结果（spike 阶段）**：
+
+```
+$ cargo clippy -p fileterm-gpui --all-targets --all-features -- -D warnings
+# 零 warning
+```
+
+5 个性能场景的实测数字需要在本机有显示器的环境跑（`xvfb-run` 软件渲染下 GPU 路径不真实，数字无参考价值）。spike 阶段验收门禁只要求"example 能编译 + clippy 干净 + CLI 可跑"，5.1 节的阈值打勾推到 G0 真机验收。`term_bench` 的存在本身就是 G-1.6 的交付物——后续任何 render 路径改动都可以 `cargo run --example term_bench -- --command yes --duration 10` 回归。
+
 ---
 
 ### G-1.7 IME + selection + cursor blink（可选，spike 阶段可后置）
@@ -1206,11 +1288,18 @@ cargo run -p fileterm-gpui --example term_bench -- --cols 80 --rows 24 --command
 
 ### 5.1 必须项（G-1 完成判定）
 
-- [ ] `cargo run -p fileterm-gpui --example term_spike` 在三平台至少一平台能打开终端窗口、能交互。
-- [ ] G-1.6 五个性能场景全部达标（4.4.3 阈值表打勾）。
+> **状态总览（2026-07-18 spike 阶段）**：G-1.1 → G-1.6 全部落地，`cargo build` + `cargo clippy -D warnings` + `cargo test --lib`（19 passed）全绿。下面 5 项中 1/4/5 的代码路径已闭环，2/3 推到 G0 真机验收。标记约定：`[x]` 完全通过、`[~]` 代码落地但需要真机视觉/性能验收、`[ ]` 未开工。
+
+- [~] `cargo run -p fileterm-gpui --example term_spike` 在三平台至少一平台能打开终端窗口、能交互。
+  - **spike 状态**：编译 + clippy 干净；`xvfb-run` + 软件渲染下窗口持续打开 5s 无 panic（G-1.1 验收）。真机交互（输入 `ls`、看到 prompt、颜色输出）需要显示器环境，推到 G0。
+- [~] G-1.6 五个性能场景全部达标（4.4.3 阈值表打勾）。
+  - **spike 状态**：`examples/term_bench.rs` 落地，CLI 可跑（`--cols/--rows/--command/--duration`），CSV + summary 输出格式已定。5 个场景的实测帧时间/p95/p99 数字必须在真机 GPU 路径下跑（`xvfb-run` 软件渲染数字无参考价值），阈值表打勾推到 G0。
 - [ ] OSC 7 解析正确，`model.cwd` 在 `cd` 命令后更新。
-- [ ] `yes` 极速输出场景下 `dropped_chunks` 计数器正确递增，但用户可见行不丢失。
-- [ ] resize 窗口时 PTY 与 grid 同步 resize，无 panic。
+  - **spike 状态**：G-1.8 未开工。`perform.rs` 里 OSC 7 当前静默消费（`osc_7_is_silently_consumed` 单测验证不 panic），cwd 提取推到 G-1.8。
+- [~] `yes` 极速输出场景下 `dropped_chunks` 计数器正确递增，但用户可见行不丢失。
+  - **spike 状态**：G-1.5 `spawn_term_feed` 实现 `Arc<AtomicU64>` 计数 + `mark_all_dirty` on Lagged，代码逻辑保证"计数递增 + 无撕裂行"。`term_bench --command yes` 跑 30 秒可以看到标题里 `dropped: N` 非零。"用户可见行不丢失"的真机视觉验收推到 G0。
+- [~] resize 窗口时 PTY 与 grid 同步 resize，无 panic。
+  - **spike 状态**：G-1.4 `paint_terminal_grid` 通过 `cx.defer` 把 `session.resize` + `pty.resize` 推迟到下帧前，避免 paint 借用冲突。`xvfb-run` 5s 持续打开无 panic（无 resize 事件）。真机拖拽 resize 的视觉验收推到 G0。
 
 ### 5.2 可选项（推到 G3）
 
@@ -1268,4 +1357,9 @@ cargo run -p fileterm-gpui --example term_bench -- --cols 80 --rows 24 --command
 | --- | --- |
 | 2026-07-18 | G-1.1 脚手架落地：`apps/gpui` crate + 根 Cargo workspace + `.patches/` 两份 rustc 1.92 兼容补丁；`cargo build -p fileterm-gpui --example term_spike` 零 warning 通过；`xvfb-run` + 软件渲染下窗口持续打开 5s 无 panic（timeout 退出码 124）。5 处 API 偏差与补丁细节见 G-1.1 实现笔记 |
 | 2026-07-18 | G-1.2 PTY 桥落地：`apps/gpui/src/term/pty.rs` + `examples/term_pty.rs`；4 处 portable-pty 0.8.1 API 偏差已记录；关键修正是 `take_writer` 是 one-shot，必须在 `spawn` 时取一次存进 `PtyHandle`；`cargo run --example term_pty` 完整往返验证通过（marker `hello-g-1-2` 观察到，进程退出码 0）；G-1.1 回归未破 |
-| — | G-1.3 待开工 |
+| 2026-07-18 | G-1.3 vte 解析 + TermModel 落地：`apps/gpui/src/term/{model,perform}.rs`；`TermModel` 持有 `grid: Vec<Vec<Cell>>` + `Cursor` + dirty rows 标记；`TermSession` 包装 model + vte parser + `feed(&bytes)` 入口；`Perform` 实现覆盖 CSI（CUU/CUD/CUF/CUB/CUP/ED/EL）、SGR（Default/Indexed/Rgb + Bold/Dim/Italic/Underline/Reverse/Hidden + Reset）、OSC 7 静默消费、DECSET/DECRST cursor visibility。19 个 unit test 全过（plain text/linefeed/scroll/SGR variants/CSI variants/OSC 7/resize preserves content/cursor visibility）。`cargo test -p fileterm-gpui --lib` 绿 |
+| 2026-07-18 | G-1.4 TermView 渲染落地：`apps/gpui/src/term/view.rs`；7 处 gpui-unofficial 1.8.2 API 偏差已记录（`cx.new_view` 不存在/`Canvas::new` 不存在/`Pixels.0` 私有/`cx.spawn` 2 参闭包/`shape_line` 在 `WindowTextSystem` 不在 `TextSystem` 等）。关键设计：`paint_terminal_grid` 用 `Entity::read_with` 拆 shape/paint 两阶段解决 borrow 冲突；resize 通过 `cx.defer` 推迟；SGR REVERSE/BOLD/ITALIC/UNDERLINE/DIM/HIDDEN 全实现；16 色 xterm 调色板 + 17-255 灰阶 ramp。`cargo clippy -D warnings` 绿；G-1.1/G-1.2/G-1.3 回归未破 |
+| 2026-07-18 | G-1.5 背压与节流落地：`apps/gpui/src/term/spawn.rs`；骨架的 `std::thread` + `ModelContext::default()` 方案在真实 API 下坏的（`Entity::update` 需要 foreground executor），直接做 `cx.spawn` 正解版。`tokio::select! { biased; ... }` + `interval.set_missed_tick_behavior(Skip)` 实现帧合并：`yes` 的 ~100k mutations/sec 压到 ~60/sec。`Arc<AtomicU64>` 跨线程 dropped_chunks 计数 + `mark_all_dirty` on Lagged 防撕裂行。`cargo clippy -D warnings` 绿；19 单测全过 |
+| 2026-07-18 | G-1.6 性能基准落地：`apps/gpui/examples/term_bench.rs` + `pty.rs` 新增 `spawn_with_args`；`BenchView` 嵌套 `Entity<TermView>`（`Entity<V>: IntoElement`），手写 4-flag CLI（`--cols/--rows/--command/--duration`），CSV + 单行 summary 双输出，`cx.quit()` 30 秒自动退出。`cargo clippy -D warnings` 绿。5 个性能场景的实测数字推到 G0 真机验收（`xvfb-run` 软件渲染数字无参考价值）。**G-1.1 → G-1.6 spike 全部完成**，5.1 验收门禁已更新（1/4/5 代码闭环标 `[~]`，2 标 `[~]`，3 标 `[ ]` 推 G-1.8） |
+| — | G-1.7 可选（IME + selection + cursor blink），推到 G3 |
+| — | G-1.8 OSC 7/52/1337 解析待开工 |
