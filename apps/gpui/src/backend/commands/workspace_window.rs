@@ -7,10 +7,24 @@
 //! line-for-line from the Tauri source so the renderer-side IPC contract
 //! (event names, camelCase payload shapes) is preserved.
 //!
+//! G5 update: `workspace_detach_tab` + `workspace_finish_tab_drag` now
+//! delegate the *bookkeeping* half to [`crate::window::detach`] and
+//! [`crate::window::tab_drag`] (both pure-logic and unit-tested). The
+//! other half — actually opening a GPUI window via `cx.open_window` and
+//! broadcasting the placement change via `broadcast::Sender` — still
+//! requires the bridge to thread `&mut App` through, so those two
+//! commands remain `Err(Unsupported)` from the bridge surface. The
+//! pure-logic helpers are exposed as `pub` so the future view layer
+//! (`view::workspace`) can call them directly with `&mut App` in scope.
+//!
 //! Original: `apps/tauri/src-tauri/src/commands/workspace_window.rs`.
 //! 详见 `docs/plans/active/detachable-session-windows-tauri.md`.
 
 use crate::error::AppError;
+use crate::window::{
+    detach_tab_to_new_window, DragDropTarget, ScreenBounds, SharedWindowRegistry, TabDragState,
+    WorkspaceTabPlacement,
+};
 use serde::Deserialize;
 
 /// 广播 placement 变更的事件名。所有 workspace renderer 监听此事件
@@ -96,10 +110,114 @@ pub fn workspace_list_windows() -> Result<(), AppError> {
 // `(app: AppHandle, state: tauri::State<'_, WorkspaceState>, input: MoveTabInput)`
 // and returned `Vec<WorkspaceTabPlacement>`. After moving the tab it broadcast
 // `PLACEMENTS_CHANGED_EVENT` via `app.emit(...)`.
+//
+// G5: bridge-level call still errors because the GPUI window hasn't been
+// wired to broadcast placement changes (no `cx: &mut App` reaches here).
+// The pure-logic half is exposed as [`move_tab_with_registry`] so the
+// future `view::workspace` layer can call it with `&mut App` in scope.
 pub async fn workspace_move_tab(_input: MoveTabInput) -> Result<(), AppError> {
     Err(AppError::Unsupported(
-        "G2: needs WindowRegistry + G3: needs event system",
+        "G5: bookkeeping logic available via move_tab_with_registry; \
+         bridge-level call needs GPUI window open + placement broadcast",
     ))
+}
+
+/// Pure-logic helper for `workspace_move_tab`.
+///
+/// Updates `registry` bookkeeping for the move (no GPUI window open, no
+/// broadcast). The caller is responsible for:
+/// 1. calling this helper,
+/// 2. updating the source + target windows' views to reflect the moved
+///    tab (close tab in old window, open tab in new window),
+/// 3. broadcasting the returned placement list to all windows via the
+///    placements-changed channel.
+///
+/// `target_window_id = "main"` is the special "move back to main" case;
+/// any other value must be an existing `detached-session-{uuid}` window
+/// id (the caller is responsible for verifying existence — this helper
+/// does not check).
+pub fn move_tab_with_registry(
+    registry: &SharedWindowRegistry,
+    input: &MoveTabInput,
+) -> Vec<WorkspaceTabPlacement> {
+    if input.target_window_id == "main" {
+        registry.return_tab_to_main(&input.tab_id);
+    } else {
+        registry.detach_tab(&input.tab_id, &input.target_window_id);
+    }
+    registry.list_placements()
+}
+
+/// Pure-logic helper for `workspace_detach_tab`.
+///
+/// Generates a fresh `detached-session-{uuid}` window id, updates
+/// `registry` bookkeeping (removes the tab from its current owner,
+/// adds it to the new window), and returns the new placement list.
+/// The caller is responsible for:
+/// 1. calling this helper,
+/// 2. calling `cx.open_window(...)` with the new window id encoded
+///    (the [`crate::window::DetachResult`] returned by the underlying
+///    [`detach_tab_to_new_window`] carries `new_window_id`),
+/// 3. calling `registry.register_handle(new_window_id, handle)` from
+///    the window-open callback,
+/// 4. broadcasting the returned placement list.
+///
+/// Note: this helper discards `screen_x` / `screen_y` / `source_window_id`
+/// — the registry already knows the source via its reverse-lookup map,
+/// and the drop point is only useful to the GPUI window opener (which
+/// the caller is responsible for). They're accepted on the input struct
+/// for IPC contract compatibility with Tauri.
+pub fn detach_tab_with_registry(
+    registry: &SharedWindowRegistry,
+    input: &DetachTabInput,
+) -> Vec<WorkspaceTabPlacement> {
+    let result = detach_tab_to_new_window(registry, &input.tab_id);
+    result.placements
+}
+
+/// Pure-logic helper for `workspace_finish_tab_drag`.
+///
+/// Drives the [`TabDragState`] state machine: marks the drag as
+/// finished, classifies the drop target via the provided window list,
+/// then delegates to [`move_tab_with_registry`] (for `SameWindow` this
+/// is a no-op; for `OtherWindow` / `NewWindow` the registry is updated).
+///
+/// Returns the updated placement list, or `None` if no drag was active.
+/// The caller is responsible for the same post-conditions as
+/// [`move_tab_with_registry`] + [`detach_tab_with_registry`]:
+/// actually opening / re-rendering windows and broadcasting placements.
+pub fn finish_tab_drag_with_registry(
+    drag: &mut TabDragState,
+    registry: &SharedWindowRegistry,
+    screen_x: i32,
+    screen_y: i32,
+    windows_in_z_order: &[(String, ScreenBounds)],
+) -> Option<Vec<WorkspaceTabPlacement>> {
+    // Capture the tab_id *before* calling `drag.finish` — `finish` does
+    // `active.take()` internally, so `active_tab_id()` would return
+    // `None` afterwards.
+    let tab_id = drag.active_tab_id()?.to_string();
+    let target = drag.finish(screen_x, screen_y, windows_in_z_order)?;
+    let placements = match target {
+        DragDropTarget::SameWindow => registry.list_placements(),
+        DragDropTarget::OtherWindow(target_window_id) => {
+            // Reuse move_tab: detach from current owner, attach to target.
+            // target_index is ignored by the registry (in-window ordering
+            // is renderer-side).
+            let input = MoveTabInput {
+                tab_id,
+                target_window_id,
+                target_index: usize::MAX,
+            };
+            move_tab_with_registry(registry, &input)
+        }
+        DragDropTarget::NewWindow => {
+            // Detach to a freshly-minted window id.
+            let result = detach_tab_to_new_window(registry, &tab_id);
+            result.placements
+        }
+    };
+    Some(placements)
 }
 
 /// 记录拖拽开始。同一时间只允许一个进行中的拖拽。
@@ -179,5 +297,157 @@ mod tests {
     fn placements_changed_event_name_is_stable() {
         // renderer 监听此事件名，改名会破坏 contract
         assert_eq!(PLACEMENTS_CHANGED_EVENT, "workspace:placements-changed");
+    }
+
+    // ---- G5 pure-logic helper tests ----
+
+    use crate::window::WindowRegistry;
+    use std::sync::Arc;
+
+    fn fresh_registry() -> SharedWindowRegistry {
+        Arc::new(WindowRegistry::new())
+    }
+
+    #[test]
+    fn detach_tab_with_registry_mints_new_window_id() {
+        let reg = fresh_registry();
+        let input = DetachTabInput {
+            tab_id: "tab-1".into(),
+            source_window_id: "main".into(),
+            screen_x: 1500,
+            screen_y: 200,
+        };
+        let placements = detach_tab_with_registry(&reg, &input);
+        // One detached tab now tracked.
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].tab_id, "tab-1");
+        assert!(
+            placements[0]
+                .window_id
+                .starts_with("detached-session-"),
+            "window_id should be a detached-session-{{uuid}}, got {}",
+            placements[0].window_id
+        );
+        // Drop point is intentionally ignored by the helper.
+        // Source window id is intentionally ignored too — registry already
+        // knows source via its reverse-lookup.
+    }
+
+    #[test]
+    fn move_tab_with_registry_to_main_returns_single_tab() {
+        let reg = fresh_registry();
+        // Start with two tabs detached into the same window.
+        reg.detach_tab("tab-1", "detached-session-A");
+        reg.detach_tab("tab-2", "detached-session-A");
+
+        // Move just tab-1 back to main; tab-2 must stay.
+        let input = MoveTabInput {
+            tab_id: "tab-1".into(),
+            target_window_id: "main".into(),
+            target_index: 0,
+        };
+        let placements = move_tab_with_registry(&reg, &input);
+        // Only tab-2 remains detached.
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].tab_id, "tab-2");
+        assert_eq!(placements[0].window_id, "detached-session-A");
+        assert!(reg.window_for_tab("tab-1").is_none());
+    }
+
+    #[test]
+    fn move_tab_with_registry_to_other_window_swaps_owner() {
+        let reg = fresh_registry();
+        reg.detach_tab("tab-1", "detached-session-A");
+        reg.detach_tab("tab-2", "detached-session-B");
+
+        // Move tab-1 from session-A to session-B.
+        let input = MoveTabInput {
+            tab_id: "tab-1".into(),
+            target_window_id: "detached-session-B".into(),
+            target_index: 0,
+        };
+        let placements = move_tab_with_registry(&reg, &input);
+        // Both tabs now in session-B.
+        assert_eq!(placements.len(), 2);
+        for p in &placements {
+            assert_eq!(p.window_id, "detached-session-B");
+        }
+        assert_eq!(
+            reg.window_for_tab("tab-1").as_deref(),
+            Some("detached-session-B")
+        );
+    }
+
+    #[test]
+    fn finish_tab_drag_with_same_window_target_is_noop() {
+        let reg = fresh_registry();
+        let mut drag = TabDragState::new();
+        assert!(drag.start("tab-1", "main"), "start should succeed");
+
+        // Drop inside the main window — SameWindow target.
+        let windows = vec![("main".to_string(), ScreenBounds::new(0, 0, 1200, 800))];
+        let placements =
+            finish_tab_drag_with_registry(&mut drag, &reg, 100, 100, &windows)
+                .expect("should return Some");
+        // No detach happened, so placements is empty.
+        assert!(placements.is_empty());
+        assert!(reg.window_for_tab("tab-1").is_none());
+        // Drag state is cleared.
+        assert!(!drag.is_active());
+    }
+
+    #[test]
+    fn finish_tab_drag_with_other_window_target_moves_tab() {
+        let reg = fresh_registry();
+        let mut drag = TabDragState::new();
+        assert!(drag.start("tab-1", "main"), "start should succeed");
+
+        // Detached window already exists at (1300, 0, 800, 600).
+        // Drop point (1400, 100) is inside it.
+        let windows = vec![
+            ("detached-session-1".to_string(), ScreenBounds::new(1300, 0, 800, 600)),
+            ("main".to_string(), ScreenBounds::new(0, 0, 1200, 800)),
+        ];
+        let placements =
+            finish_tab_drag_with_registry(&mut drag, &reg, 1400, 100, &windows)
+                .expect("should return Some");
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].tab_id, "tab-1");
+        assert_eq!(placements[0].window_id, "detached-session-1");
+        assert_eq!(
+            reg.window_for_tab("tab-1").as_deref(),
+            Some("detached-session-1")
+        );
+    }
+
+    #[test]
+    fn finish_tab_drag_with_new_window_target_detaches() {
+        let reg = fresh_registry();
+        let mut drag = TabDragState::new();
+        assert!(drag.start("tab-1", "main"), "start should succeed");
+
+        // Drop far away — NewWindow target.
+        let windows = vec![("main".to_string(), ScreenBounds::new(0, 0, 1200, 800))];
+        let placements =
+            finish_tab_drag_with_registry(&mut drag, &reg, 5000, 5000, &windows)
+                .expect("should return Some");
+        assert_eq!(placements.len(), 1);
+        assert_eq!(placements[0].tab_id, "tab-1");
+        assert!(
+            placements[0]
+                .window_id
+                .starts_with("detached-session-"),
+            "drop on empty screen should mint a new detached-session-{{uuid}}, got {}",
+            placements[0].window_id
+        );
+    }
+
+    #[test]
+    fn finish_tab_drag_without_active_drag_returns_none() {
+        let reg = fresh_registry();
+        let mut drag = TabDragState::new();
+        let windows: Vec<(String, ScreenBounds)> = vec![];
+        let result = finish_tab_drag_with_registry(&mut drag, &reg, 0, 0, &windows);
+        assert!(result.is_none(), "finish without start should return None");
     }
 }

@@ -52,6 +52,8 @@ sum_tree = { package = "sum-tree-gpui-unofficial", version = "=1.8.2" }
 media = { package = "media-gpui-unofficial", version = "=1.8.2" }
 vte = "0.13"
 portable-pty = "0.8"
+russh = "0.40"
+russh-sftp = "2"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 thiserror = "1"
