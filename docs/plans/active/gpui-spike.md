@@ -1091,6 +1091,26 @@ $ cargo test -p fileterm-gpui --lib
 
 G-1.5 的"跑 `yes` 观察 `dropped_chunks` 非零"验收在 G-1.6 的 `term_bench` 里跑——`term_bench --command yes` 跑 30 秒，标题里的 `dropped: N` 计数就是 G-1.5 的可见信号。骨架里"独立单元测试驱动 `cx.spawn` + tokio interval"在 `#[test]` 里痛苦且脆弱（要起 foreground executor + tokio runtime），改用集成 example 覆盖，符合骨架自己写的"G-1.5 验收: 跑 `yes` 命令"。
 
+**2026-07-18 端到端回归修复（G-1.6 term_bench 触发）**：
+
+G-1.6 的 `term_bench` 第一次在 xvfb 下端到端跑时立刻 panic：
+
+```
+thread 'main' panicked at tokio-1.53.0/src/time/interval.rs:135:25:
+there is no reactor running, must be called from the context of a Tokio 1.x runtime
+```
+
+根因：`cx.spawn` 的 future 跑在 gpui 的 foreground executor（基于 smol，不是 tokio），而 G-1.5 的 `spawn_term_feed` 在 future 里直接用了 `tokio::time::interval` + `broadcast::Receiver::recv`——两者都需要 tokio reactor 在当前线程可见。之前只跑 `cargo test --lib`（不触发 `cx.spawn`）所以没暴露；G-1.1 的 `term_spike` xvfb 验收是空窗口 5s 无 panic，但当时 `term_spike` 还没接 `TermView`（G-1.1 阶段只有裸窗口），所以也没触发。
+
+**修复方案：tokio / gpui 双半泵**。重构 `spawn.rs` 把 pump 拆成两半，用 `std::sync::mpsc::sync_channel(64)` 连接：
+
+1. **tokio 半**（`tokio::spawn`）：拥有 `broadcast::Receiver` + `time::Interval`，跑在 tokio worker 线程上。`select!` 合并 chunk 到达 + tick，flush 成 `(Vec<u8>, u64)` batch 发到 mpsc。
+2. **gpui 半**（`cx.spawn`）：用 `cx.background_executor().timer(FEED_TICK)`（gpui 自己的 timer，不依赖 tokio）做 16ms tick，`try_recv` 非阻塞 drain mpsc，每个 batch 调 `session.update(cx, |s, cx| { s.feed(&bytes); cx.notify(); })`。
+
+examples 的 `main()` 在 `application().run` 前启动 `tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build()` 并 `enter()`，让 `tokio::spawn` 能找到 runtime。`term_bench.rs` 和 `term_spike.rs` 都加了这段。
+
+**验收**：`xvfb-run timeout 5 ./term_spike` 无 panic（之前 panic 在 `there is no reactor running`）；`xvfb-run timeout 15 ./term_bench --command "echo hi" --duration 3` main 执行到 `application().run` 回调且无 panic（render 循环在 xvfb 软件渲染下不触发，CSV 输出需要真机 GPU，推 G0）。`cargo test --lib` 36 passed；`cargo clippy -D warnings` 绿。
+
 ---
 
 ### G-1.6 性能基准
@@ -1389,5 +1409,6 @@ $ cargo clippy -p fileterm-gpui --all-targets --all-features -- -D warnings
 | 2026-07-18 | G-1.5 背压与节流落地：`apps/gpui/src/term/spawn.rs`；骨架的 `std::thread` + `ModelContext::default()` 方案在真实 API 下坏的（`Entity::update` 需要 foreground executor），直接做 `cx.spawn` 正解版。`tokio::select! { biased; ... }` + `interval.set_missed_tick_behavior(Skip)` 实现帧合并：`yes` 的 ~100k mutations/sec 压到 ~60/sec。`Arc<AtomicU64>` 跨线程 dropped_chunks 计数 + `mark_all_dirty` on Lagged 防撕裂行。`cargo clippy -D warnings` 绿；19 单测全过 |
 | 2026-07-18 | G-1.6 性能基准落地：`apps/gpui/examples/term_bench.rs` + `pty.rs` 新增 `spawn_with_args`；`BenchView` 嵌套 `Entity<TermView>`（`Entity<V>: IntoElement`），手写 4-flag CLI（`--cols/--rows/--command/--duration`），CSV + 单行 summary 双输出，`cx.quit()` 30 秒自动退出。`cargo clippy -D warnings` 绿。5 个性能场景的实测数字推到 G0 真机验收（`xvfb-run` 软件渲染数字无参考价值）。**G-1.1 → G-1.6 spike 全部完成**，5.1 验收门禁已更新（1/4/5 代码闭环标 `[~]`，2 标 `[~]`，3 标 `[ ]` 推 G-1.8） |
 | 2026-07-18 | G-1.8 OSC 7 解析落地：`apps/gpui/src/term/osc.rs` + `perform.rs::osc_dispatch` + `model.rs::TermModel.cwd`。OSC 解析独立到 `osc.rs` 模块（纯函数 `parse_osc7_cwd(&[u8]) -> Option<PathBuf>`，10 个单测），perform.rs 只做 code 路由 + 赋值。OSC code 精确 match 避免 OSC 70 误判。BEL/ST 双终止符 + 跨 feed 持久化 + malformed 静默 + 覆盖式更新全覆盖。`cargo test --lib` 36 passed（原 19 + OSC 7 新增 17）；`cargo clippy -D warnings` 绿。OSC 52/1337 显式推 G3。**G-1.1 → G-1.6 + G-1.8 spike 全部完成**，5.1 验收门禁 5 项全部标 `[~]`（代码闭环，真机视觉验收推 G0） |
+| 2026-07-18 | 端到端回归修复：G-1.6 `term_bench` 在 xvfb 下首次跑暴露 `tokio::time::interval` panic（`there is no reactor running`）。根因是 `cx.spawn` future 跑在 gpui foreground executor（smol）非 tokio，而 `spawn_term_feed` 在 future 里用了 tokio API。重构 `spawn.rs` 为双半泵（tokio 半 `tokio::spawn` + gpui 半 `cx.spawn` + `background_executor().timer` + mpsc 连接），examples main 启动 multi-thread tokio runtime 并 `enter()`。`xvfb-run timeout 5 ./term_spike` 无 panic 验证修复有效。`cargo test --lib` 36 passed；`cargo clippy -D warnings` 绿 |
 | — | G-1.7 可选（IME + selection + cursor blink），推到 G3 |
 | — | G-1.8 OSC 52/1337 推到 G3（OSC 7 已在 spike 完成） |

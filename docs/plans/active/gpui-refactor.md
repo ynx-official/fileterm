@@ -453,6 +453,9 @@ Tauri 端的 ADR-0004 决策是 hooks 方案已足够。GPUI 端的 `Entity<T>` 
 | 日期       | 事件                                                    |
 | ---------- | ------------------------------------------------------- |
 | 2026-07-18 | 创建 `gpui` 分支；v0.3 规划文档拆分为三份，待评审       |
+| 2026-07-18 | G-1 spike 全部完成（G-1.1 → G-1.6 + G-1.8）。`apps/gpui` crate 落地：`term/{pty,model,perform,view,spawn,osc}.rs` + `examples/{term_spike,term_pty,term_bench}.rs`。`cargo build` + `cargo clippy --all-targets --all-features -- -D warnings` + `cargo test --lib`（36 passed）全绿。5.1 验收门禁 5 项全部标 `[~]`（代码闭环，真机视觉/性能验收推 G0）。详见 [gpui-spike.md](./gpui-spike.md) 第 8 节 |
+| 2026-07-18 | G-1.7（IME + selection + cursor blink）与 G-1.8 OSC 52/1337 按 spike 阶段建议推 G3，不在 G-1 完成判定内 |
+| — | G0 真机验收待开工：5.1 门禁 5 项的真机视觉/性能验收（`term_spike` 交互、`term_bench` 5 场景帧时间、OSC 7 `cd` 端到端、`yes` dropped_chunks 可见性、resize 拖拽） |
 
 ---
 

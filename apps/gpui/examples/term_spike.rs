@@ -25,6 +25,13 @@
 //! `Arc<PtyHandle>` and constructs a `TermView` inside the window's root
 //! entity. The view subscribes to PTY output, renders the grid via a
 //! `Canvas`, and forwards keystrokes back to the PTY.
+//!
+//! G-1.5 fix: a multi-threaded tokio runtime must be started and
+//! `enter()`ed on the main thread before `application().run`, because
+//! `TermView::new` → `spawn_term_feed` uses `tokio::spawn` to drive the
+//! broadcast receiver + interval pump on a tokio worker thread. Without
+//! the runtime, the pump panics with "there is no reactor running". See
+//! `src/term/spawn.rs` for the full architecture rationale.
 
 use std::sync::Arc;
 
@@ -36,6 +43,16 @@ use gpui::{
 use fileterm_gpui::term::{PtyHandle, TermView};
 
 fn main() {
+    // Start a multi-threaded tokio runtime so `spawn_term_feed`'s
+    // `tokio::spawn` (broadcast recv + interval tick) has a reactor. See
+    // the G-1.5 note in the module doc above and `src/term/spawn.rs`.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let _rt_guard = rt.enter();
+
     // Use bash for the spike; fall back to sh if bash isn't installed.
     let shell = which_shell();
 

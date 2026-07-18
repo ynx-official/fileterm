@@ -87,6 +87,23 @@ const DEFAULT_COMMAND: &str = "yes";
 fn main() {
     let args = parse_args();
 
+    // Start a multi-threaded tokio runtime and enter its context on the
+    // main thread. `cx.spawn` futures run on gpui's foreground executor
+    // (not a tokio runtime), so without this guard the pump's
+    // `tokio::time::interval` and `broadcast::Receiver::recv` would
+    // panic with "there is no reactor running". The runtime's worker
+    // threads drive the reactor; `enter()` sets the thread-local handle
+    // so tokio APIs invoked from gpui's executor find it.
+    //
+    // The guard lives for the whole process, so the runtime stays
+    // entered inside `application().run(...)` too.
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let _rt_guard = rt.enter();
+
     // Spawn the command via `sh -c` so the user can pass any shell line
     // (`yes`, `find /`, `vim /etc/passwd`, `bash -c '...'`). We do this
     // before opening the window so the PTY is ready when the first frame
