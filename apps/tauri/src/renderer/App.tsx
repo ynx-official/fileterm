@@ -252,6 +252,7 @@ export function App() {
     startTabDrag,
     enterDraggedTab,
     endTabDrag,
+    detachDraggedTab,
     setIsSystemSidebarCollapsed,
     dismissShortcutCloseConfirm,
     activateHomeTab,
@@ -353,6 +354,7 @@ export function App() {
     formWindowProfileId,
     hasLoadedInitialSnapshot,
     isConnectionFormWindow,
+    isDetachedSessionWindow,
     profiles: workspace.profiles || []
   })
 
@@ -1155,6 +1157,9 @@ export function App() {
     onDragEnd: endTabDrag,
     onDragEnter: enterDraggedTab,
     onDragStart: startTabDrag,
+    onDetachTab: (tabKey: string, clientX: number, clientY: number) => {
+      void detachDraggedTab(tabKey, clientX, clientY)
+    },
     onOpenSettings: () => setShowSettings(true),
     onOpenTabContext: (event: React.MouseEvent<HTMLDivElement>, target: TabContextTarget) => {
       openTabContextMenu(event, target)

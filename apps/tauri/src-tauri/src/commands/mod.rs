@@ -745,6 +745,12 @@ fn renderer_approved_close_should_destroy(window_label: &str) -> bool {
     window_label != "main"
 }
 
+/// detached-session 窗口的 label 前缀。这些窗口持有会话标签，
+/// 关闭前需要 renderer 弹确认对话框（与主窗口一致），不能直接 destroy。
+fn is_detached_session_label(window_label: &str) -> bool {
+    window_label.starts_with("detached-")
+}
+
 fn destroy_child_window_after_invoke_reply(window: WebviewWindow) {
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(CHILD_WINDOW_DESTROY_DELAY).await;
@@ -782,7 +788,14 @@ pub async fn app_window_action(
             );
         }
         "close" => {
-            if !renderer_approved_close_should_destroy(window.label()) {
+            if is_detached_session_label(window.label()) {
+                // detached-session 窗口持有会话标签，关闭前需 renderer 弹确认。
+                // emit `app:window-close-request` 给当前窗口，与主窗口一致。
+                let _ = window.emit(
+                    "app:window-close-request",
+                    serde_json::json!({ "isQuit": false }),
+                );
+            } else if !renderer_approved_close_should_destroy(window.label()) {
                 // Match Electron: closing the last workspace item requests a
                 // normal main-window close. The CloseRequested guard decides
                 // whether to hide to tray, quit, or cancel.
@@ -794,6 +807,12 @@ pub async fn app_window_action(
                 crate::resolve_file_editor_close(&app, &window);
                 destroy_child_window_after_invoke_reply(window);
             }
+        }
+        "close-detached" => {
+            // renderer 已确认关闭 detached-session 窗口。直接 destroy 触发
+            // Destroyed 事件 → 标签 owner 归还 main + 广播 placement。
+            // 连接本身由 renderer 在确认时关闭，这里只清理窗口与归属。
+            destroy_child_window_after_invoke_reply(window);
         }
         "hide" => {
             crate::hide_main_window_and_children(&app);
@@ -2372,5 +2391,38 @@ mod external_url_tests {
             assert!(validate_external_url(denied).is_err());
         }
         assert!(validate_external_url("not a url").is_err());
+    }
+}
+
+#[cfg(test)]
+mod detached_window_label_tests {
+    use super::{is_detached_session_label, renderer_approved_close_should_destroy};
+
+    #[test]
+    fn detached_label_prefix_is_recognized() {
+        // detached-<n> 是 registry 注册的独立窗口 label 格式
+        assert!(is_detached_session_label("detached-1"));
+        assert!(is_detached_session_label("detached-42"));
+        // starts_with 匹配：detached- 本身也算（registry 不会生成空后缀，
+        // 但函数只做前缀判断，调用方负责传入合法 label）
+        assert!(is_detached_session_label("detached-"));
+        // 主窗口与其他子窗口不算
+        assert!(!is_detached_session_label("main"));
+        assert!(!is_detached_session_label("connection-manager"));
+        assert!(!is_detached_session_label("file-editor"));
+        assert!(!is_detached_session_label(""));
+    }
+
+    #[test]
+    fn renderer_approved_close_distinguishes_main_and_children() {
+        // 主窗口关闭需经 CloseRequested guard（hide/quit/cancel）
+        assert!(!renderer_approved_close_should_destroy("main"));
+        // 子窗口（form/editor/manager）已由 renderer 批准，直接 destroy
+        assert!(renderer_approved_close_should_destroy("connection-form"));
+        assert!(renderer_approved_close_should_destroy("file-editor"));
+        // detached-session 走独立路径（is_detached_session_label），
+        // 但 renderer_approved_close_should_destroy 仍返回 true：
+        // 调用方需先检查 is_detached_session_label 再判断此函数。
+        assert!(renderer_approved_close_should_destroy("detached-1"));
     }
 }

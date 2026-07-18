@@ -481,13 +481,18 @@ export async function createTauriApi(): Promise<FileTermDesktopApi> {
       subscribe('app:close-active-workspace-item-request', listener),
     onWorkspaceTabPlacementsChanged: (listener: (placements: WorkspaceTabPlacement[]) => void) =>
       subscribe('workspace:placements-changed', listener),
-    confirmCloseWindow: (action: 'quit' | 'hide' | 'cancel') => {
+    confirmCloseWindow: (action: 'quit' | 'hide' | 'cancel' | 'close-detached') => {
       if (action === 'cancel') return Promise.resolve()
       if (action === 'quit') {
         // 'quit' calls app.exit(0) on the Rust side, bypassing the
         // CloseRequested guard so Cmd+Q / tray-quit actually terminates
         // the app instead of looping back through the confirmation dialog.
         return invoke<void>('app_window_action', { action: 'quit' })
+      }
+      if (action === 'close-detached') {
+        // detached-session 窗口已确认关闭：直接 destroy 触发 Destroyed 事件，
+        // 标签 owner 归还 main + 广播 placement。连接由 renderer 在确认时关闭。
+        return invoke<void>('app_window_action', { action: 'close-detached' })
       }
       return invoke<void>('app_window_action', { action: 'hide' })
     }

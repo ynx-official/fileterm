@@ -1,6 +1,6 @@
 # 可拆分会话窗口实施规格（Tauri 架构）
 
-> 状态：第一层完成；第二层 5/6/7 完成（tauri-api + useWorkspaceWindowContext + useWorkspaceTabs placement 过滤），进行第二层第 8 项（TabBar 拖出 + 右键菜单）
+> 状态：第一/二/三层完成（类型 + Rust 基础 + Bridge + Renderer + 窗口创建与生命周期）；第四层测试与回归待补（沙箱缺 glib-2.0 无法运行 cargo clippy/test，需在本地或 CI 验证）
 > 关联：`docs/plans/active/detachable-session-windows.md`（Electron 版历史参考，已实施）
 > 架构：Tauri + Rust（`apps/electron` 仅作历史参考，不参与构建）
 

@@ -1030,13 +1030,28 @@ pub fn open_detached_session_window(
         format!("detached created label={label} windowId={window_id}"),
     );
 
-    // 注册窗口销毁处理器：标签 owner 归还 main + 广播 placement 变更。
-    // 这是崩溃恢复与用户关闭独立窗口的统一清理路径。
+    // 注册窗口事件处理器：
+    // - CloseRequested：阻止原生关闭，emit `app:window-close-request` 给当前
+    //   窗口，让 renderer 弹确认对话框（与主窗口一致）。renderer 确认后调用
+    //   `app_window_action("close-detached")` 真正销毁窗口。
+    // - Destroyed：标签 owner 归还 main + 广播 placement 变更。这是崩溃恢复
+    //   与用户关闭独立窗口的统一清理路径。
     let app_for_destroy = app.clone();
     let window_id_for_destroy = window_id.to_string();
+    let window_for_close = window.clone();
     window.on_window_event(move |event| {
-        if matches!(event, WindowEvent::Destroyed) {
-            handle_detached_window_destroyed(&app_for_destroy, &window_id_for_destroy);
+        match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                api.prevent_close();
+                let _ = window_for_close.emit(
+                    "app:window-close-request",
+                    serde_json::json!({ "isQuit": false }),
+                );
+            }
+            WindowEvent::Destroyed => {
+                handle_detached_window_destroyed(&app_for_destroy, &window_id_for_destroy);
+            }
+            _ => {}
         }
     });
 

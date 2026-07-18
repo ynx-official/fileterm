@@ -21,6 +21,12 @@ type UseWorkspaceModalsOptions = {
   formWindowProfileId: string | null
   hasLoadedInitialSnapshot: boolean
   isConnectionFormWindow: boolean
+  /**
+   * 当前窗口是否为可拆分会话独立窗口。detached-session 窗口关闭时
+   * 走 `close-detached` action（destroy + 标签归还 main），而非主窗口
+   * 的 `hide` action（隐藏到托盘）。
+   */
+  isDetachedSessionWindow: boolean
   profiles: ConnectionProfile[]
 }
 
@@ -55,6 +61,7 @@ export function useWorkspaceModals({
   formWindowProfileId,
   hasLoadedInitialSnapshot,
   isConnectionFormWindow,
+  isDetachedSessionWindow,
   profiles
 }: UseWorkspaceModalsOptions) {
   const [showConnectionForm, setShowConnectionForm] = useState(false)
@@ -161,7 +168,10 @@ export function useWorkspaceModals({
 
   const requestWindowCloseConfirmation = (isQuit: boolean, hasActiveConnections: boolean) => {
     if (desktopApi?.platform === 'darwin' && !isQuit && !hasActiveConnections) {
-      void desktopApi.confirmCloseWindow('hide')
+      // detached-session 窗口无活动连接时直接销毁（标签归还 main）；
+      // 主窗口才走 hide（隐藏到托盘）。
+      const action = isDetachedSessionWindow ? 'close-detached' : 'hide'
+      void desktopApi.confirmCloseWindow(action)
       return
     }
 
@@ -170,6 +180,12 @@ export function useWorkspaceModals({
 
   const resolveWindowCloseConfirmation = (action: 'quit' | 'hide' | 'cancel') => {
     setWindowCloseConfirm(null)
+    // detached-session 窗口没有"隐藏到托盘"语义：确认关闭即销毁窗口，
+    // 标签 owner 归还 main。'quit' 仍走全局退出流程。
+    if (isDetachedSessionWindow && action === 'hide') {
+      void desktopApi?.confirmCloseWindow('close-detached')
+      return
+    }
     void desktopApi?.confirmCloseWindow(action)
   }
 

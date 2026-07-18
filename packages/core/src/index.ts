@@ -1020,7 +1020,7 @@ export interface FileTermDesktopApi {
   onWindowCloseRequest(listener: (event: { isQuit: boolean }) => void): () => void
   onRequestCloseActiveWorkspaceItem(listener: () => void): () => void
   onWorkspaceTabPlacementsChanged(listener: (placements: WorkspaceTabPlacement[]) => void): () => void
-  confirmCloseWindow(action: 'quit' | 'hide' | 'cancel'): Promise<void>
+  confirmCloseWindow(action: 'quit' | 'hide' | 'cancel' | 'close-detached'): Promise<void>
 }
 
 export type AppUpdateState =
