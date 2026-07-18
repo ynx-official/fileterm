@@ -140,6 +140,26 @@ impl AppState {
         });
     }
 
+    pub fn open_session_tab(&mut self, tab_id: String, title: String) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.status = TabStatus::Connecting;
+            self.active_tab_id = tab_id;
+            return;
+        }
+        self.tabs.push(WorkspaceTab {
+            id: tab_id.clone(),
+            title,
+            status: TabStatus::Connecting,
+        });
+        self.active_tab_id = tab_id;
+    }
+
+    pub fn set_tab_status(&mut self, tab_id: &str, status: TabStatus) {
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.status = status;
+        }
+    }
+
     pub fn activate_tab(&mut self, tab_id: &str) {
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab_id = tab_id.to_string();

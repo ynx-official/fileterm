@@ -6,3 +6,4 @@
 
 pub mod logging;
 pub mod profile_ops;
+pub mod ssh_profile;

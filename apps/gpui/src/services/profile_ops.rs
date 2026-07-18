@@ -36,6 +36,35 @@ pub fn read_public_connection_library(
     Ok((public_profiles, folders))
 }
 
+pub fn read_connection_profile(app: &AppHandle, profile_id: &str) -> Result<Value, AppError> {
+    storage::migrate_legacy_data_once(app)?;
+    let profiles = merge_profile_secrets(app, read_raw_array(app, "profiles.json")?)?;
+    profiles
+        .into_iter()
+        .find(|profile| profile.get("id").and_then(Value::as_str) == Some(profile_id))
+        .ok_or_else(|| AppError::Storage(format!("connection profile not found: {profile_id}")))
+}
+
+pub fn update_trusted_host_fingerprint(
+    app: &AppHandle,
+    profile_id: &str,
+    fingerprint: &str,
+) -> Result<(), AppError> {
+    let mut profiles = read_raw_array(app, "profiles.json")?;
+    let profile = profiles
+        .iter_mut()
+        .find(|profile| profile.get("id").and_then(Value::as_str) == Some(profile_id))
+        .ok_or_else(|| AppError::Storage(format!("connection profile not found: {profile_id}")))?;
+    let object = profile
+        .as_object_mut()
+        .ok_or_else(|| AppError::Storage(format!("invalid connection profile: {profile_id}")))?;
+    object.insert(
+        "trustedHostFingerprint".to_string(),
+        Value::String(fingerprint.to_string()),
+    );
+    storage::write_json_array(app, "profiles.json", &profiles)
+}
+
 fn read_raw_array(app: &AppHandle, name: &str) -> Result<Vec<Value>, AppError> {
     let path = storage::workspace_file(app, name)?;
     if !path.exists() {

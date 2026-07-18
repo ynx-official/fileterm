@@ -42,7 +42,18 @@ pub mod storage;
 
 pub use app_handle::AppHandle;
 
-use crate::error::Result;
+use crate::{error::Result, ssh::SshController, term::TermChunk};
+
+pub struct ConnectedSshSession {
+    pub controller: Arc<SshController>,
+    pub output: tokio::sync::broadcast::Receiver<TermChunk>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SshConnectOptions {
+    pub accepted_host_fingerprint: Option<String>,
+    pub save_host_fingerprint: bool,
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ConnectionLibrary {
@@ -83,8 +94,15 @@ pub trait FileTermDesktopApi: Send + Sync {
     // ===== G3 (SSH terminal) — inventory 1.3 =====
     // russh shell channel + TermView + SystemSidebar + CWD 跟随.
 
-    /// Inventory 1.3 stub. Real signature lands in G3 with russh integration.
-    async fn ssh_connect(&self) -> Result<()>;
+    /// Open an authenticated SSH shell for a stored profile. Secrets remain
+    /// inside the backend and are never projected into GPUI view state.
+    async fn ssh_connect(
+        &self,
+        profile_id: &str,
+        cols: u16,
+        rows: u16,
+        options: SshConnectOptions,
+    ) -> Result<ConnectedSshSession>;
 
     // ===== G4 (SFTP + transfer) — inventory 1.4 / 1.5 =====
     // russh-sftp + TransferService + TransferCenter.
@@ -151,10 +169,61 @@ impl FileTermDesktopApi for GpuiDesktopApi {
         ))
     }
 
-    async fn ssh_connect(&self) -> Result<()> {
-        Err(crate::error::AppError::Unsupported(
-            "ssh_connect (G3: russh integration)",
-        ))
+    async fn ssh_connect(
+        &self,
+        profile_id: &str,
+        cols: u16,
+        rows: u16,
+        options: SshConnectOptions,
+    ) -> Result<ConnectedSshSession> {
+        let profile = crate::services::profile_ops::read_connection_profile(&self.app, profile_id)?;
+        let host = profile
+            .get("host")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let port = profile.get("port").and_then(Value::as_u64).unwrap_or(22) as u16;
+        let changed = profile
+            .get("trustedHostFingerprint")
+            .and_then(Value::as_str)
+            .is_some();
+        let mut config =
+            crate::services::ssh_profile::ssh_config_from_profile(&profile, cols, rows)
+                .map_err(|error| crate::error::AppError::Command(error.to_string()))?;
+        if let Some(fingerprint) = options.accepted_host_fingerprint.as_ref() {
+            config.trusted_host_fingerprint = Some(fingerprint.clone());
+        }
+        let (controller, output) = match SshController::connect(config).await {
+            Ok(session) => session,
+            Err(error) => {
+                let message = error.to_string();
+                if let Some(fingerprint) = message
+                    .rsplit_once("server fingerprint: ")
+                    .map(|(_, fingerprint)| fingerprint.trim().to_string())
+                {
+                    return Err(crate::error::AppError::SshHostVerification {
+                        host,
+                        port,
+                        fingerprint,
+                        changed,
+                    });
+                }
+                return Err(crate::error::AppError::Command(message));
+            }
+        };
+        if options.save_host_fingerprint {
+            if let Some(fingerprint) = options.accepted_host_fingerprint.as_deref() {
+                crate::services::profile_ops::update_trusted_host_fingerprint(
+                    &self.app,
+                    profile_id,
+                    fingerprint,
+                )?;
+            }
+        }
+        Ok(ConnectedSshSession {
+            controller: Arc::new(controller),
+            output,
+        })
     }
 
     async fn sftp_list(&self) -> Result<Vec<()>> {
@@ -242,7 +311,10 @@ mod tests {
     async fn remaining_unwired_methods_return_unsupported() {
         let api = GpuiDesktopApi::default();
         assert!(api.workspace_list_windows().await.is_err());
-        assert!(api.ssh_connect().await.is_err());
+        assert!(api
+            .ssh_connect("missing", 80, 24, SshConnectOptions::default())
+            .await
+            .is_err());
         assert!(api.sftp_list().await.is_err());
         assert!(api.transfer_create().await.is_err());
         assert!(api.workspace_detach_tab().await.is_err());

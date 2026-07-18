@@ -58,6 +58,9 @@ pub struct FileManager {
     pub selection: HashSet<String>,
     /// Current sort key + direction.
     pub sort: Option<(SortKey, SortDir)>,
+    pub loading: bool,
+    pub error: Option<String>,
+    last_anchor: Option<String>,
 }
 
 impl FileManager {
@@ -86,10 +89,26 @@ impl FileManager {
         });
     }
 
+    pub fn replace_listing(&mut self, cwd: impl Into<PathBuf>, entries: Vec<RemoteFileEntry>) {
+        self.cwd = cwd.into();
+        self.entries = entries;
+        self.selection.clear();
+        self.last_anchor = None;
+        self.loading = false;
+        self.error = None;
+        self.sort_entries();
+    }
+
+    pub fn fail_loading(&mut self, error: impl Into<String>) {
+        self.loading = false;
+        self.error = Some(error.into());
+    }
+
     /// Select a single entry (replaces prior selection).
     pub fn select_one(&mut self, name: &str) {
         self.selection.clear();
         self.selection.insert(name.to_string());
+        self.last_anchor = Some(name.to_string());
     }
 
     /// Toggle an entry in the selection (Ctrl+click).
@@ -99,18 +118,37 @@ impl FileManager {
         } else {
             self.selection.insert(name.to_string());
         }
+        self.last_anchor = Some(name.to_string());
     }
 
-    /// Select a range from the last-selected to `name` (Shift+click).
-    /// G4 stub — real impl tracks `last_anchor` and selects the
-    /// inclusive range in `entries` order.
-    pub fn select_range(&mut self, _name: &str) {
-        // G4.2 TODO
+    /// Select the inclusive range between the current anchor and `name`.
+    pub fn select_range(&mut self, name: &str) {
+        let Some(anchor) = self.last_anchor.as_deref() else {
+            self.select_one(name);
+            return;
+        };
+        let Some(anchor_index) = self.entries.iter().position(|entry| entry.name == anchor) else {
+            self.select_one(name);
+            return;
+        };
+        let Some(target_index) = self.entries.iter().position(|entry| entry.name == name) else {
+            return;
+        };
+        let (start, end) = if anchor_index <= target_index {
+            (anchor_index, target_index)
+        } else {
+            (target_index, anchor_index)
+        };
+        self.selection = self.entries[start..=end]
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
     }
 
     /// Clear selection.
     pub fn clear_selection(&mut self) {
         self.selection.clear();
+        self.last_anchor = None;
     }
 
     /// Number of entries currently selected.

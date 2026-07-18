@@ -1,158 +1,425 @@
-//! SSH session controller.
-//!
-//! G3 phase of `docs/plans/active/gpui-refactor.md` section 6.4.
-//!
-//! Wraps a `russh` client session and bridges SSH shell output to a
-//! `broadcast::Sender<TermChunk>` (consumed by `TermView`'s feed pump,
-//! same as the local PTY path). Input from `TermView` is written to the
-//! SSH channel's stdin.
-//!
-//! ## Why a controller (not direct russh calls in the view)
-//!
-//! Same reason as `PtyHandle` — isolates the protocol library from the
-//! view layer so:
-//! 1. `TermView` doesn't know whether it's talking to a local PTY or a
-//!    remote SSH shell (both produce `TermChunk` streams).
-//! 2. The controller owns the `russh::client::Handle` lifetime and can
-//!    cleanly disconnect + reap on drop.
-//! 3. Reconnect logic (auth retry, channel re-open after network blip)
-//!    lives here, not in the view.
+//! SSH shell controller used by the GPUI terminal transport.
 
-use anyhow::{Context, Result};
+use std::{sync::Arc, time::Duration};
+
+use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
+use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
+use russh::{client::Handler, ChannelMsg};
+use russh_keys::PublicKeyBase64;
+use russh_sftp::client::SftpSession;
+use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
+use tokio::time::timeout;
 
 use crate::term::TermChunk;
 
-/// Configuration for opening an SSH session.
-///
-/// Mirrors the connection profile fields the user fills in the
-/// connection form. `password` and `private_key` are mutually exclusive
-/// in v1 (form enforces one or the other); both `Some` is a validation
-/// error.
+const SSH_STAGE_TIMEOUT: Duration = Duration::from_secs(30);
+const SHELL_CWD_SETUP: &str = "test -z \"${FISH_VERSION-}\" && eval '__tdcwd() { printf \"\\033]7;file://%s\\007\\033]1337;RemoteUser=%s\\007\" \"$(pwd -P 2>/dev/null)\" \"$(id -un 2>/dev/null)\"; }; if [ -n \"${ZSH_VERSION-}\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook -D precmd __tdcwd 2>/dev/null; add-zsh-hook precmd __tdcwd 2>/dev/null; elif [ -n \"${BASH_VERSION-}\" ]; then case \"${PROMPT_COMMAND-}\" in *\"__tdcwd\"*) ;; *) PROMPT_COMMAND=\"__tdcwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}\" ;; esac; else case \"${PS1-}\" in *\"__tdcwd\"*) ;; *) PS1=\"\\$(__tdcwd)${PS1-}\" ;; esac; fi; __tdcwd'; stty echo 2>/dev/null\n";
+const BUSYBOX_SHELL_CWD_SETUP: &str = "__tdcwd(){ printf '\\033]7;file://%s\\007\\033]1337;RemoteUser=%s\\007' \"$(pwd -P 2>/dev/null)\" \"$(id -un 2>/dev/null)\";};PS1='$(__tdcwd)'\"${PS1-}\";__tdcwd;stty echo 2>/dev/null\n";
+
 #[derive(Debug, Clone)]
 pub struct SshConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
     pub password: Option<String>,
-    /// PEM-encoded private key. The controller passes this to
-    /// `russh::keys::PrivateKey::from_openssh` for parsing.
     pub private_key: Option<String>,
-    /// Initial terminal grid size. The controller sends a `stty rows N
-    /// cols M` after the shell opens so the remote pty matches the
-    /// local view.
+    pub passphrase: Option<String>,
+    pub trusted_host_fingerprint: Option<String>,
     pub cols: u16,
     pub rows: u16,
 }
 
-/// Handle to a running SSH shell session.
-///
-/// Drop to disconnect. The controller spawns a background task that
-/// holds the `russh::client::Handle` and the shell channel; when this
-/// handle drops, the task is cancelled and the session closes.
-///
-/// The output stream is a `broadcast::Sender<TermChunk>` — same shape
-/// as `PtyHandle`'s, so `TermView` can subscribe identically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SshSessionEvent {
+    Connected,
+    Closed,
+    Error(String),
+}
+
 #[derive(Debug)]
+enum SshCommand {
+    Input(Vec<u8>),
+    Resize { cols: u16, rows: u16 },
+}
+
 pub struct SshController {
-    /// Sender for the output broadcast. Subscribed to by `TermView`.
-    /// Kept here so the controller can be cloned to give out new
-    /// receivers (e.g. for a second view on the same session).
     tx: broadcast::Sender<TermChunk>,
-    /// Input channel. `write_input` sends bytes here; the background
-    /// task drains them into the SSH channel's stdin.
-    input_tx: mpsc::UnboundedSender<Vec<u8>>,
-    /// Join handle for the background session task. Aborted on drop.
-    _task: tokio::task::JoinHandle<()>,
+    event_tx: broadcast::Sender<SshSessionEvent>,
+    command_tx: mpsc::UnboundedSender<SshCommand>,
+    handle: Arc<russh::client::Handle<ClientHandler>>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl SshController {
-    /// Open a new SSH session.
-    ///
-    /// Returns the controller plus a receiver for the first subscriber
-    /// (same pattern as `PtyHandle::spawn`).
-    ///
-    /// G3 stub: this method signature is final, but the body is a
-    /// placeholder that returns `Err` immediately. The real russh
-    /// integration (client connect → auth → channel open → shell req →
-    /// pump loop) lands in G3.1.
-    pub async fn connect(_config: SshConfig) -> Result<(Self, broadcast::Receiver<TermChunk>)> {
-        // G3.1 TODO:
-        // 1. let config = Arc::new(russh::client::Config::default());
-        // 2. let handler = ClientHandler { ... };
-        // 3. let mut handle = russh::client::connect(config, (host, port), handler).await?;
-        // 4. authenticate (password or private_key)
-        // 5. let mut channel = handle.channel_open_session().await?;
-        // 6. channel.request_pty(false, "xterm-256color", cols, rows, 0, 0, []).await?;
-        // 7. channel.request_shell(true).await?;
-        // 8. spawn pump task: loop { select! { channel data → broadcast, input_rx → channel } }
-        Err(anyhow::anyhow!("G3 stub: SSH connect not yet implemented"))
+    pub async fn connect(config: SshConfig) -> Result<(Self, broadcast::Receiver<TermChunk>)> {
+        validate_config(&config)?;
+
+        let observed_fingerprint = Arc::new(parking_lot::Mutex::new(None));
+        let handler = ClientHandler {
+            host: config.host.clone(),
+            port: config.port,
+            trusted_fingerprint: config.trusted_host_fingerprint.clone(),
+            observed_fingerprint: observed_fingerprint.clone(),
+        };
+        let client_config = Arc::new(russh::client::Config {
+            inactivity_timeout: Some(Duration::from_secs(300)),
+            ..Default::default()
+        });
+
+        let address = (config.host.as_str(), config.port);
+        let mut handle = timeout(
+            SSH_STAGE_TIMEOUT,
+            russh::client::connect(client_config, address, handler),
+        )
+        .await
+        .context("SSH handshake timed out")?
+        .map_err(|error| {
+            let fingerprint = observed_fingerprint.lock().clone();
+            match fingerprint {
+                Some(fingerprint) => anyhow::anyhow!(
+                    "SSH handshake failed: {error}; server fingerprint: {fingerprint}"
+                ),
+                None => anyhow::anyhow!("SSH handshake failed: {error}"),
+            }
+        })?;
+
+        authenticate(&mut handle, &config).await?;
+        let platform = detect_remote_platform(&handle).await;
+        let handle = Arc::new(handle);
+
+        let cwd_setup = shell_cwd_setup_for_platform(&platform);
+        let mut terminal_modes = vec![
+            (russh::Pty::TTY_OP_ISPEED, 115200),
+            (russh::Pty::TTY_OP_OSPEED, 115200),
+        ];
+        if cwd_setup.is_some() {
+            terminal_modes.push((russh::Pty::ECHO, 0));
+        }
+
+        let mut channel = timeout(SSH_STAGE_TIMEOUT, handle.channel_open_session())
+            .await
+            .context("SSH shell channel timed out")?
+            .context("open SSH shell channel")?;
+        channel
+            .request_pty(
+                true,
+                "xterm-256color",
+                config.cols.into(),
+                config.rows.into(),
+                0,
+                0,
+                &terminal_modes,
+            )
+            .await
+            .context("request SSH pty")?;
+        channel
+            .request_shell(true)
+            .await
+            .context("request SSH shell")?;
+
+        let (tx, rx) = broadcast::channel(256);
+        let (event_tx, _) = broadcast::channel(32);
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let output_tx = tx.clone();
+        let output_event_tx = event_tx.clone();
+        let task_handle = handle.clone();
+
+        let task = tokio::spawn(async move {
+            let mut seq = 0u64;
+            let _ = output_event_tx.send(SshSessionEvent::Connected);
+
+            if let Some(setup) = cwd_setup {
+                let _ = channel.data(setup.as_bytes()).await;
+            }
+
+            loop {
+                tokio::select! {
+                    message = channel.wait() => {
+                        match message {
+                            Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                                seq = seq.wrapping_add(1);
+                                let _ = output_tx.send(TermChunk { seq, bytes: data.to_vec() });
+                            }
+                            Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                                let _ = output_event_tx.send(SshSessionEvent::Closed);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    command = command_rx.recv() => {
+                        let result = match command {
+                            Some(SshCommand::Input(bytes)) => channel.data(bytes.as_slice()).await,
+                            Some(SshCommand::Resize { cols, rows }) => {
+                                channel.window_change(cols.into(), rows.into(), 0, 0).await
+                            }
+                            None => {
+                                let _ = channel.close().await;
+                                break;
+                            }
+                        };
+                        if let Err(error) = result {
+                            let _ = output_event_tx.send(SshSessionEvent::Error(error.to_string()));
+                            break;
+                        }
+                    }
+                }
+            }
+            drop(task_handle);
+        });
+
+        Ok((
+            Self {
+                tx,
+                event_tx,
+                command_tx,
+                handle,
+                task,
+            },
+            rx,
+        ))
     }
 
-    /// Subscribe to the output stream. Each subscriber independently
-    /// tracks its position; a slow subscriber going `Lagged` doesn't
-    /// affect others (same semantics as `PtyHandle::subscribe`).
     pub fn subscribe(&self) -> broadcast::Receiver<TermChunk> {
         self.tx.subscribe()
     }
 
-    /// Write user input (keystrokes, paste) to the SSH channel's stdin.
-    ///
-    /// Non-blocking: enqueues onto `input_tx` and returns immediately.
-    /// The background task drains the queue and writes to the channel.
-    /// Returns `Err` only if the session has closed (input_tx dropped).
-    pub fn write_input(&self, bytes: &[u8]) -> Result<()> {
-        self.input_tx
-            .send(bytes.to_vec())
-            .context("SSH session closed (input channel dropped)")
+    pub fn subscribe_events(&self) -> broadcast::Receiver<SshSessionEvent> {
+        self.event_tx.subscribe()
     }
 
-    /// Resize the remote pty. Sends `window-change` channel request.
-    ///
-    /// G3 stub — real impl calls `channel.window_change(cols, rows, 0, 0)`.
-    pub fn resize(&self, _cols: u16, _rows: u16) -> Result<()> {
-        // G3.1 TODO: send window-change request via the channel handle.
-        Ok(())
+    pub fn write_input(&self, bytes: &[u8]) -> Result<()> {
+        self.command_tx
+            .send(SshCommand::Input(bytes.to_vec()))
+            .context("SSH session closed")
+    }
+
+    pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        self.command_tx
+            .send(SshCommand::Resize { cols, rows })
+            .context("SSH session closed")
+    }
+
+    pub async fn exec(&self, command: &str) -> Result<Vec<u8>> {
+        let mut channel = timeout(SSH_STAGE_TIMEOUT, self.handle.channel_open_session())
+            .await
+            .context("SSH exec channel timed out")?
+            .context("open SSH exec channel")?;
+        channel
+            .exec(true, command)
+            .await
+            .with_context(|| format!("execute remote command: {command}"))?;
+
+        let mut output = Vec::new();
+        loop {
+            match timeout(SSH_STAGE_TIMEOUT, channel.wait()).await {
+                Ok(Some(ChannelMsg::Data { data }))
+                | Ok(Some(ChannelMsg::ExtendedData { data, .. })) => {
+                    output.extend_from_slice(&data);
+                }
+                Ok(Some(ChannelMsg::Eof | ChannelMsg::Close)) | Ok(None) => break,
+                Ok(Some(_)) => {}
+                Err(_) => bail!("remote command timed out: {command}"),
+            }
+        }
+        Ok(output)
+    }
+
+    pub async fn open_sftp(&self) -> Result<SftpSession> {
+        let channel = timeout(SSH_STAGE_TIMEOUT, self.handle.channel_open_session())
+            .await
+            .context("SFTP channel timed out")?
+            .context("open SFTP channel")?;
+        timeout(SSH_STAGE_TIMEOUT, channel.request_subsystem(true, "sftp"))
+            .await
+            .context("SFTP subsystem request timed out")?
+            .context("request SFTP subsystem")?;
+        timeout(SSH_STAGE_TIMEOUT, SftpSession::new(channel.into_stream()))
+            .await
+            .context("SFTP protocol handshake timed out")?
+            .context("initialize SFTP session")
     }
 }
 
 impl Drop for SshController {
     fn drop(&mut self) {
-        // Aborting the task closes the SSH channel + disconnects the
-        // client. The broadcast sender drops here too, so subscribers
-        // see `RecvError::Closed`.
-        self._task.abort();
+        self.task.abort();
     }
 }
 
-/// Internal russh client handler (auth callbacks).
-///
-/// G3 stub — real impl implements `russh::client::Handler` with
-/// `check_server_key` (return Ok to accept any key in spike; real
-/// known-hosts check lands in G3.2).
-#[allow(dead_code)]
+fn validate_config(config: &SshConfig) -> Result<()> {
+    if config.host.trim().is_empty() {
+        bail!("SSH host is required");
+    }
+    if config.username.trim().is_empty() {
+        bail!("SSH username is required");
+    }
+    if config.password.is_some() == config.private_key.is_some() {
+        bail!("configure exactly one SSH authentication method");
+    }
+    Ok(())
+}
+
+async fn authenticate(
+    handle: &mut russh::client::Handle<ClientHandler>,
+    config: &SshConfig,
+) -> Result<()> {
+    let authenticated = if let Some(password) = &config.password {
+        let none_accepted = timeout(
+            SSH_STAGE_TIMEOUT,
+            handle.authenticate_none(config.username.clone()),
+        )
+        .await
+        .context("SSH authentication negotiation timed out")?
+        .context("SSH authentication negotiation")?;
+        if none_accepted {
+            true
+        } else {
+            timeout(
+                SSH_STAGE_TIMEOUT,
+                handle.authenticate_password(config.username.clone(), password.clone()),
+            )
+            .await
+            .context("SSH password authentication timed out")?
+            .context("SSH password authentication")?
+        }
+    } else {
+        let private_key = russh_keys::decode_secret_key(
+            config
+                .private_key
+                .as_deref()
+                .context("SSH private key is missing")?,
+            config.passphrase.as_deref(),
+        )
+        .context("decode SSH private key")?;
+        timeout(
+            SSH_STAGE_TIMEOUT,
+            handle.authenticate_publickey(config.username.clone(), Arc::new(private_key)),
+        )
+        .await
+        .context("SSH public-key authentication timed out")?
+        .context("SSH public-key authentication")?
+    };
+
+    if !authenticated {
+        bail!("SSH authentication rejected");
+    }
+    Ok(())
+}
+
+async fn detect_remote_platform(handle: &russh::client::Handle<ClientHandler>) -> String {
+    let Ok(mut channel) = handle.channel_open_session().await else {
+        return "unknown".to_string();
+    };
+    if channel
+        .exec(
+            true,
+            "uname -s 2>/dev/null; command -v busybox >/dev/null 2>&1 && echo busybox",
+        )
+        .await
+        .is_err()
+    {
+        return "unknown".to_string();
+    }
+
+    let mut output = Vec::new();
+    while let Ok(Some(message)) = timeout(Duration::from_secs(3), channel.wait()).await {
+        match message {
+            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                output.extend_from_slice(&data);
+            }
+            ChannelMsg::Eof | ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    let normalized = String::from_utf8_lossy(&output)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    let lower = normalized.to_ascii_lowercase();
+    if lower.contains("busybox") {
+        "busybox".to_string()
+    } else if lower.contains("linux") {
+        "linux".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn shell_cwd_setup_for_platform(platform: &str) -> Option<&'static str> {
+    match platform {
+        "linux" => Some(SHELL_CWD_SETUP),
+        "busybox" => Some(BUSYBOX_SHELL_CWD_SETUP),
+        _ => None,
+    }
+}
+
+fn fingerprint_sha256(key: &russh_keys::key::PublicKey) -> String {
+    let digest = Sha256::digest(key.public_key_bytes());
+    format!("SHA256:{}", STANDARD_NO_PAD.encode(digest))
+}
+
 struct ClientHandler {
-    username: String,
-    password: Option<String>,
+    host: String,
+    port: u16,
+    trusted_fingerprint: Option<String>,
+    observed_fingerprint: Arc<parking_lot::Mutex<Option<String>>>,
+}
+
+#[async_trait]
+impl Handler for ClientHandler {
+    type Error = anyhow::Error;
+
+    async fn check_server_key(
+        self,
+        server_public_key: &russh_keys::key::PublicKey,
+    ) -> Result<(Self, bool), Self::Error> {
+        let fingerprint = fingerprint_sha256(server_public_key);
+        *self.observed_fingerprint.lock() = Some(fingerprint.clone());
+
+        let accepted = match self.trusted_fingerprint.as_deref() {
+            Some(trusted) => trusted == fingerprint,
+            None => russh_keys::check_known_hosts(&self.host, self.port, server_public_key)
+                .unwrap_or(false),
+        };
+        Ok((self, accepted))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn connect_returns_unimplemented_stub() {
-        let config = SshConfig {
+    fn config() -> SshConfig {
+        SshConfig {
             host: "localhost".into(),
             port: 22,
             username: "user".into(),
             password: Some("pass".into()),
             private_key: None,
+            passphrase: None,
+            trusted_host_fingerprint: None,
             cols: 80,
             rows: 24,
-        };
-        let result = SshController::connect(config).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("G3 stub"));
+        }
+    }
+
+    #[test]
+    fn config_requires_exactly_one_authentication_method() {
+        assert!(validate_config(&config()).is_ok());
+        let mut invalid = config();
+        invalid.private_key = Some("key".into());
+        assert!(validate_config(&invalid).is_err());
+        invalid.password = None;
+        assert!(validate_config(&invalid).is_ok());
+    }
+
+    #[test]
+    fn cwd_setup_is_fail_closed_for_unknown_platforms() {
+        assert!(shell_cwd_setup_for_platform("linux").is_some());
+        assert!(shell_cwd_setup_for_platform("busybox").is_some());
+        assert!(shell_cwd_setup_for_platform("windows").is_none());
+        assert!(shell_cwd_setup_for_platform("unknown").is_none());
     }
 }

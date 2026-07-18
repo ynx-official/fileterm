@@ -17,7 +17,11 @@
 //! `linux` / `busybox` get POSIX shell commands; `windows` gets
 //! PowerShell `Get-Counter` / `Get-Process` via multi-level fallback.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
+
+use super::controller::SshController;
 
 /// One snapshot of remote system state.
 ///
@@ -126,38 +130,156 @@ impl SystemMetrics {
     }
 }
 
-/// Collector that runs commands on the remote host via SSH exec and
-/// parses the output into `SystemMetrics` snapshots.
-///
-/// G3 stub — the actual exec + parse pipeline lands in G3.3. The struct
-/// is here so view code can hold a handle to it today.
-#[allow(dead_code)]
 pub struct SystemSidebarCollector {
-    /// Interval between snapshots, in seconds. Default 5s matches
-    /// Tauri's `system-metrics` worker.
+    controller: Arc<SshController>,
     interval_secs: u64,
-    /// Last collected snapshot. `None` until the first collection
-    /// completes.
     last_snapshot: Option<SystemMetrics>,
+    previous_cpu: Option<(u64, u64)>,
 }
 
 impl SystemSidebarCollector {
-    pub fn new(interval_secs: u64) -> Self {
+    pub fn new(controller: Arc<SshController>, interval_secs: u64) -> Self {
         Self {
-            interval_secs,
+            controller,
+            interval_secs: interval_secs.max(1),
             last_snapshot: None,
+            previous_cpu: None,
         }
     }
 
-    /// Collect one snapshot. G3 stub returns empty metrics.
-    ///
-    /// G3.3 TODO: run `uname -s`, `uname -a`, `free -b`, `cat /proc/loadavg`,
-    /// `ps aux --sort=-%cpu | head -10` via SSH exec, parse each into
-    /// `SystemMetrics` fields.
-    pub async fn collect(&mut self) -> SystemMetrics {
-        // G3.3 stub.
-        SystemMetrics::default()
+    pub fn interval_secs(&self) -> u64 {
+        self.interval_secs
     }
+
+    pub fn last_snapshot(&self) -> Option<&SystemMetrics> {
+        self.last_snapshot.as_ref()
+    }
+
+    pub async fn collect(&mut self) -> SystemMetrics {
+        const COMMAND: &str = "printf '__FT_UNAME_S__\\n'; uname -s 2>/dev/null; printf '__FT_UNAME_A__\\n'; uname -a 2>/dev/null; printf '__FT_CPU_COUNT__\\n'; (getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null); printf '__FT_FREE__\\n'; free -b 2>/dev/null; printf '__FT_LOAD__\\n'; cat /proc/loadavg 2>/dev/null; printf '__FT_CPU__\\n'; head -n 1 /proc/stat 2>/dev/null; printf '__FT_NET__\\n'; cat /proc/net/dev 2>/dev/null; printf '__FT_PS__\\n'; ps -eo pid=,comm=,%cpu=,rss= --sort=-%cpu 2>/dev/null | head -n 10";
+        let Ok(bytes) = self.controller.exec(COMMAND).await else {
+            return self.last_snapshot.clone().unwrap_or_default();
+        };
+        let raw = SystemMetrics::normalize_crlf(&String::from_utf8_lossy(&bytes));
+        let sections = split_sections(&raw);
+        let uname_s = sections.get("UNAME_S").copied().unwrap_or_default();
+        let uname_a = sections.get("UNAME_A").copied().unwrap_or_default();
+        let platform = SystemMetrics::detect_platform(uname_s, uname_a).to_string();
+        let (memory_total, memory_used, swap_total, swap_used) =
+            SystemMetrics::parse_free(sections.get("FREE").copied().unwrap_or_default());
+        let (load_avg_1, load_avg_5, load_avg_15) =
+            SystemMetrics::parse_loadavg(sections.get("LOAD").copied().unwrap_or_default());
+        let cpu_sample = parse_cpu_sample(sections.get("CPU").copied().unwrap_or_default());
+        let cpu_usage = cpu_sample.and_then(|current| {
+            let usage = self
+                .previous_cpu
+                .and_then(|previous| cpu_usage(previous, current));
+            self.previous_cpu = Some(current);
+            usage
+        });
+        let (network_rx_bytes, network_tx_bytes) =
+            parse_network(sections.get("NET").copied().unwrap_or_default());
+        let snapshot = SystemMetrics {
+            platform: Some(platform),
+            cpu_usage,
+            cpu_count: sections
+                .get("CPU_COUNT")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse().ok()),
+            memory_total,
+            memory_used,
+            swap_total,
+            swap_used,
+            load_avg_1,
+            load_avg_5,
+            load_avg_15,
+            network_rx_bytes,
+            network_tx_bytes,
+            top_processes: parse_processes(sections.get("PS").copied().unwrap_or_default()),
+        };
+        self.last_snapshot = Some(snapshot.clone());
+        snapshot
+    }
+}
+
+fn split_sections(raw: &str) -> std::collections::HashMap<&str, &str> {
+    let mut sections = std::collections::HashMap::new();
+    let mut current = None;
+    let mut start = 0;
+    for (offset, _) in raw.match_indices('\n') {
+        let line = &raw[start..offset];
+        if let Some(name) = line
+            .strip_prefix("__FT_")
+            .and_then(|value| value.strip_suffix("__"))
+        {
+            if let Some((previous, content_start)) = current.replace((name, offset + 1)) {
+                sections.insert(previous, raw[content_start..start].trim());
+            }
+        }
+        start = offset + 1;
+    }
+    if let Some((name, content_start)) = current {
+        sections.insert(name, raw[content_start..].trim());
+    }
+    sections
+}
+
+fn parse_cpu_sample(raw: &str) -> Option<(u64, u64)> {
+    let values = raw
+        .split_whitespace()
+        .skip_while(|value| *value == "cpu")
+        .filter_map(|value| value.parse::<u64>().ok())
+        .collect::<Vec<_>>();
+    if values.len() < 4 {
+        return None;
+    }
+    let idle = values[3] + values.get(4).copied().unwrap_or(0);
+    Some((values.iter().sum(), idle))
+}
+
+fn cpu_usage(previous: (u64, u64), current: (u64, u64)) -> Option<f32> {
+    let total = current.0.checked_sub(previous.0)?;
+    let idle = current.1.checked_sub(previous.1)?;
+    (total > 0).then(|| ((total - idle) as f32 / total as f32) * 100.0)
+}
+
+fn parse_network(raw: &str) -> (Option<u64>, Option<u64>) {
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    let mut found = false;
+    for line in raw.lines().filter(|line| line.contains(':')) {
+        let Some((_, values)) = line.split_once(':') else {
+            continue;
+        };
+        let values = values.split_whitespace().collect::<Vec<_>>();
+        if values.len() < 9 {
+            continue;
+        }
+        if let (Ok(received), Ok(sent)) = (values[0].parse::<u64>(), values[8].parse::<u64>()) {
+            rx = rx.saturating_add(received);
+            tx = tx.saturating_add(sent);
+            found = true;
+        }
+    }
+    if found {
+        (Some(rx), Some(tx))
+    } else {
+        (None, None)
+    }
+}
+
+fn parse_processes(raw: &str) -> Vec<ProcessInfo> {
+    raw.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            Some(ProcessInfo {
+                pid: fields.next()?.parse().ok()?,
+                name: fields.next()?.to_string(),
+                cpu: fields.next()?.parse().ok()?,
+                memory: fields.next()?.parse::<u64>().ok()?.saturating_mul(1024),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -223,5 +345,21 @@ mod tests {
         let output = "0.52 0.41 0.35 1/234 5678\r\n";
         let (a, _b, _c) = SystemMetrics::parse_loadavg(output);
         assert_eq!(a, Some(0.52));
+    }
+
+    #[test]
+    fn tagged_sections_and_linux_samples_are_parsed() {
+        let raw = "__FT_CPU__\ncpu  100 0 50 850 0\n__FT_NET__\neth0: 10 0 0 0 0 0 0 0 20 0\n__FT_PS__\n7 sshd 2.5 100\n";
+        let sections = split_sections(raw);
+        assert_eq!(parse_cpu_sample(sections["CPU"]), Some((1000, 850)));
+        assert_eq!(parse_network(sections["NET"]), (Some(10), Some(20)));
+        let processes = parse_processes(sections["PS"]);
+        assert_eq!(processes[0].pid, 7);
+        assert_eq!(processes[0].memory, 102_400);
+    }
+
+    #[test]
+    fn cpu_usage_uses_sample_delta() {
+        assert_eq!(cpu_usage((100, 80), (200, 140)), Some(40.0));
     }
 }

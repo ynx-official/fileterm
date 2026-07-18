@@ -51,7 +51,10 @@ use gpui::{
     Styled, TextAlign, Window,
 };
 
-use crate::term::{CellFlags, Color, ColorKind, Cursor, CursorStyle, PtyHandle, TermSession};
+use crate::term::{
+    local_transport, CellFlags, Color, ColorKind, Cursor, CursorStyle, PtyHandle, TermSession,
+    TerminalTransport,
+};
 
 /// Light-gray on near-black, matching the spike's `#0c0c0c` background.
 /// Constructed as struct literals (not via `hsla(...)`) because `hsla` is
@@ -207,11 +210,11 @@ fn color_to_hsla(c: Color, is_fg: bool) -> Hsla {
     }
 }
 
-/// The terminal view: owns a child `Entity<TermSession>`, an `Arc<PtyHandle>`
-/// for input writes, and the font metrics used to map grid cells ↔ pixels.
+/// The terminal view owns the terminal model and a protocol-independent
+/// transport for input, output subscription, and resize requests.
 pub struct TermView {
     pub session: Entity<TermSession>,
-    pub pty: Arc<PtyHandle>,
+    pub transport: Arc<dyn TerminalTransport>,
     font: gpui::Font,
     font_size: Pixels,
     cell_w: Pixels,
@@ -250,6 +253,26 @@ impl TermView {
     /// `cols` and `rows` are the initial grid dimensions; they will be
     /// re-derived from the actual canvas bounds on the first paint.
     pub fn new(cx: &mut Context<Self>, pty: Arc<PtyHandle>, cols: usize, rows: usize) -> Self {
+        Self::from_transport(cx, local_transport(pty), cols, rows)
+    }
+
+    pub fn from_transport(
+        cx: &mut Context<Self>,
+        transport: Arc<dyn TerminalTransport>,
+        cols: usize,
+        rows: usize,
+    ) -> Self {
+        let rx = transport.subscribe();
+        Self::from_transport_receiver(cx, transport, rx, cols, rows)
+    }
+
+    pub fn from_transport_receiver(
+        cx: &mut Context<Self>,
+        transport: Arc<dyn TerminalTransport>,
+        rx: tokio::sync::broadcast::Receiver<crate::term::TermChunk>,
+        cols: usize,
+        rows: usize,
+    ) -> Self {
         let session = cx.new(|_cx| TermSession::new(cols, rows));
         let focus = cx.focus_handle();
         let dropped_chunks = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -285,13 +308,12 @@ impl TermView {
         // and trigger a `mark_all_dirty` so no torn rows survive.
         //
         // See `spawn.rs` for the full backpressure / coalescing story.
-        let rx = pty.subscribe();
         let session_weak = session.downgrade();
         crate::term::spawn::spawn_term_feed(cx, session_weak, rx, dropped_chunks.clone()).detach();
 
         Self {
             session,
-            pty,
+            transport,
             font,
             font_size,
             cell_w,
@@ -304,6 +326,10 @@ impl TermView {
             frame_counter: 0,
             last_title_dropped: 0,
         }
+    }
+
+    pub fn session(&self) -> Entity<TermSession> {
+        self.session.clone()
     }
 }
 
@@ -342,7 +368,7 @@ impl Render for TermView {
         let font = self.font.clone();
         let font_size = self.font_size;
         let session = self.session.clone();
-        let pty = self.pty.clone();
+        let transport = self.transport.clone();
         let weak_self = cx.weak_entity();
         let cols = self.cols;
         let rows = self.rows;
@@ -350,8 +376,8 @@ impl Render for TermView {
         let on_key_down = cx.listener(move |view, event: &KeyDownEvent, _window, _cx| {
             let bytes = keystroke_to_bytes(&event.keystroke);
             if !bytes.is_empty() {
-                if let Err(e) = view.pty.write_input(&bytes) {
-                    eprintln!("[term-view] pty write error: {e:#}");
+                if let Err(e) = view.transport.write_input(&bytes) {
+                    eprintln!("[term-view] terminal write error: {e:#}");
                 }
             }
         });
@@ -374,7 +400,7 @@ impl Render for TermView {
                     let new_rows = ((bounds.size.height / cell_h).floor() as usize).max(1);
                     if new_cols != cols || new_rows != rows {
                         let session_clone = session.clone();
-                        let pty_clone = pty.clone();
+                        let transport_clone = transport.clone();
                         let weak_self_clone = weak_self.clone();
                         cx.defer(move |cx| {
                             let _ = weak_self_clone.update(cx, |view, cx| {
@@ -386,7 +412,7 @@ impl Render for TermView {
                                 s.resize(new_cols, new_rows);
                                 cx.notify();
                             });
-                            let _ = pty_clone.resize(new_cols as u16, new_rows as u16);
+                            let _ = transport_clone.resize(new_cols as u16, new_rows as u16);
                         });
                     }
                 },

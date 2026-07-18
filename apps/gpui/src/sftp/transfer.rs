@@ -198,65 +198,175 @@ impl TransferService {
         }
     }
 
-    /// Load the journal from disk. Tasks marked `Running` are downgraded
-    /// to `Paused` so the user explicitly resumes or cancels.
-    ///
-    /// G4 stub — returns an empty task list.
     pub fn load(&mut self) -> Result<()> {
-        // G4.3 TODO: read journal_path, deserialize, downgrade Running → Paused.
-        self.tasks.clear();
-        Ok(())
+        if !self.journal_path.exists() {
+            self.tasks.clear();
+            return Ok(());
+        }
+        let bytes = std::fs::read(&self.journal_path)
+            .map_err(|error| AppError::Storage(format!("read transfer journal: {error}")))?;
+        let mut journal: TransferJournal = serde_json::from_slice(&bytes)
+            .map_err(|error| AppError::Serialization(format!("parse transfer journal: {error}")))?;
+        if journal.version != JOURNAL_VERSION {
+            return Err(AppError::Storage(format!(
+                "unsupported transfer journal version: {}",
+                journal.version
+            )));
+        }
+        for task in &mut journal.transfers {
+            if task.status.active() {
+                task.status = TransferTaskStatus::Paused;
+                task.message = Some("应用重启后等待恢复".to_string());
+                task.updated_at = Some(now_secs());
+            }
+        }
+        self.tasks = journal.transfers;
+        self.flush()
     }
 
-    /// Flush the in-memory task list to disk atomically.
-    ///
-    /// G4 stub.
     pub fn flush(&self) -> Result<()> {
-        // G4.3 TODO: serialize to JSON, write to {journal_path}.tmp, rename.
-        Ok(())
+        if let Some(parent) = self.journal_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                AppError::Storage(format!("create transfer journal directory: {error}"))
+            })?;
+        }
+        let journal = TransferJournal {
+            version: JOURNAL_VERSION,
+            transfers: self.tasks.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&journal).map_err(|error| {
+            AppError::Serialization(format!("serialize transfer journal: {error}"))
+        })?;
+        let temporary = self.journal_path.with_extension("json.tmp");
+        std::fs::write(&temporary, bytes)
+            .map_err(|error| AppError::Storage(format!("write transfer journal: {error}")))?;
+        std::fs::rename(&temporary, &self.journal_path)
+            .map_err(|error| AppError::Storage(format!("replace transfer journal: {error}")))
     }
 
-    /// Enqueue a new transfer task. Returns the new task id.
-    ///
-    /// G4 stub — returns `AppError::Unsupported`.
     pub fn enqueue(
         &mut self,
-        _direction: TransferDirection,
-        _source_path: &str,
-        _destination_path: &str,
-        _tab_id: Option<&str>,
+        direction: TransferDirection,
+        source_path: &str,
+        destination_path: &str,
+        tab_id: Option<&str>,
     ) -> Result<TransferTaskId> {
-        Err(AppError::Unsupported(
-            "G4: TransferService::enqueue not yet wired up",
-        ))
+        if source_path.trim().is_empty() || destination_path.trim().is_empty() {
+            return Err(AppError::Command(
+                "transfer source and destination are required".to_string(),
+            ));
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let name = source_path
+            .trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|value| !value.is_empty())
+            .unwrap_or(source_path)
+            .to_string();
+        let now = now_secs();
+        let partial_path = format!("{destination_path}{PARTIAL_SUFFIX}");
+        self.tasks.push(TransferTask {
+            id: id.clone(),
+            direction,
+            name,
+            progress: 0.0,
+            status: TransferTaskStatus::Queued,
+            message: None,
+            speed: None,
+            transferred_bytes: Some(0),
+            total_bytes: None,
+            tab_id: tab_id.map(ToOwned::to_owned),
+            profile_id: None,
+            session_type: Some("ssh".to_string()),
+            file_access_mode: Some("sftp".to_string()),
+            target_type: Some("file".to_string()),
+            source_path: Some(source_path.to_string()),
+            destination_path: Some(destination_path.to_string()),
+            partial_path: Some(partial_path),
+            staging_path: None,
+            source_identity: None,
+            manifest: None,
+            resumable: true,
+            retry_attempt: Some(0),
+            cleanup_pending: false,
+            created_at: Some(now),
+            updated_at: Some(now),
+        });
+        self.flush()?;
+        Ok(id)
     }
 
-    /// Pause a running task. Keeps the partial file + journal entry.
-    ///
-    /// G4 stub.
-    pub fn pause(&mut self, _id: &str) -> Result<()> {
-        Err(AppError::Unsupported(
-            "G4: TransferService::pause not yet wired up",
-        ))
+    pub fn pause(&mut self, id: &str) -> Result<()> {
+        let task = self.task_mut(id)?;
+        if !matches!(
+            task.status,
+            TransferTaskStatus::Queued
+                | TransferTaskStatus::Running
+                | TransferTaskStatus::Verifying
+                | TransferTaskStatus::Finalizing
+        ) {
+            return Err(AppError::Command(format!(
+                "transfer cannot be paused from {:?}",
+                task.status
+            )));
+        }
+        task.status = TransferTaskStatus::Paused;
+        task.message = Some("已暂停".to_string());
+        task.updated_at = Some(now_secs());
+        self.flush()
     }
 
-    /// Resume a paused task. Stats the partial file and seeks both ends
-    /// to that offset before continuing the I/O loop.
-    ///
-    /// G4 stub.
-    pub fn resume(&mut self, _id: &str) -> Result<()> {
-        Err(AppError::Unsupported(
-            "G4: TransferService::resume not yet wired up",
-        ))
+    pub fn resume(&mut self, id: &str) -> Result<()> {
+        let task = self.task_mut(id)?;
+        if !matches!(
+            task.status,
+            TransferTaskStatus::Paused | TransferTaskStatus::Failed
+        ) {
+            return Err(AppError::Command(format!(
+                "transfer cannot be resumed from {:?}",
+                task.status
+            )));
+        }
+        task.status = TransferTaskStatus::Queued;
+        task.message = None;
+        task.retry_attempt = Some(task.retry_attempt.unwrap_or(0).saturating_add(1));
+        task.updated_at = Some(now_secs());
+        self.flush()
     }
 
-    /// Cancel a task. Deletes the partial file + removes the journal entry.
-    ///
-    /// G4 stub.
-    pub fn cancel(&mut self, _id: &str) -> Result<()> {
-        Err(AppError::Unsupported(
-            "G4: TransferService::cancel not yet wired up",
-        ))
+    pub fn cancel(&mut self, id: &str) -> Result<()> {
+        let task = self.task_mut(id)?;
+        if task.status.terminal() {
+            return Err(AppError::Command(format!(
+                "transfer is already terminal: {:?}",
+                task.status
+            )));
+        }
+        task.status = TransferTaskStatus::Canceled;
+        task.message = Some("已取消".to_string());
+        task.updated_at = Some(now_secs());
+        self.flush()
+    }
+
+    pub fn discard(&mut self, id: &str) -> Result<()> {
+        let Some(index) = self.tasks.iter().position(|task| task.id == id) else {
+            return Err(AppError::Command(format!("transfer not found: {id}")));
+        };
+        if !self.tasks[index].status.terminal() {
+            return Err(AppError::Command(
+                "only terminal transfers can be discarded".to_string(),
+            ));
+        }
+        self.tasks.remove(index);
+        self.flush()
+    }
+
+    fn task_mut(&mut self, id: &str) -> Result<&mut TransferTask> {
+        self.tasks
+            .iter_mut()
+            .find(|task| task.id == id)
+            .ok_or_else(|| AppError::Command(format!("transfer not found: {id}")))
     }
 
     /// Snapshot all tasks (for `TransferCenter` view rendering).
@@ -283,6 +393,13 @@ impl TransferService {
     pub fn journal_version() -> u8 {
         JOURNAL_VERSION
     }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[cfg(test)]
@@ -316,51 +433,77 @@ mod tests {
         assert!(!TransferTaskStatus::Paused.terminal());
     }
 
-    #[test]
-    fn service_load_returns_empty_stub() {
-        let mut svc = TransferService::new(PathBuf::from("/tmp/nonexistent-journal.json"));
-        // G4 stub: load always returns Ok with an empty task list.
-        svc.load().expect("stub load should not error");
-        assert!(svc.list().is_empty());
+    fn temporary_journal() -> PathBuf {
+        std::env::temp_dir()
+            .join(format!("fileterm-transfer-{}", uuid::Uuid::new_v4()))
+            .join("transfer-journal.json")
     }
 
     #[test]
-    fn service_enqueue_returns_unsupported() {
-        let mut svc = TransferService::new(PathBuf::from("/tmp/nonexistent-journal.json"));
-        let result = svc.enqueue(
-            TransferDirection::Upload,
-            "/local/path",
-            "/remote/path",
-            Some("tab-1"),
-        );
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(err, AppError::Unsupported(msg) if msg.contains("enqueue")),
-            "expected Unsupported(enqueue), got {:?}",
-            err
-        );
+    fn missing_journal_loads_empty() {
+        let mut service = TransferService::new(temporary_journal());
+        service.load().unwrap();
+        assert!(service.list().is_empty());
     }
 
     #[test]
-    fn service_pause_resume_cancel_return_unsupported() {
-        let mut svc = TransferService::new(PathBuf::from("/tmp/nonexistent-journal.json"));
-        for op in ["pause", "resume", "cancel"] {
-            let result = match op {
-                "pause" => svc.pause("any"),
-                "resume" => svc.resume("any"),
-                "cancel" => svc.cancel("any"),
-                _ => unreachable!(),
-            };
-            assert!(result.is_err(), "{} should error", op);
-            let err = result.unwrap_err();
-            assert!(
-                matches!(err, AppError::Unsupported(msg) if msg.contains(op)),
-                "expected Unsupported({}), got {:?}",
-                op,
-                err
-            );
-        }
+    fn enqueue_pause_resume_cancel_and_discard_are_persisted() {
+        let journal = temporary_journal();
+        let mut service = TransferService::new(journal.clone());
+        let id = service
+            .enqueue(
+                TransferDirection::Upload,
+                "/local/path.txt",
+                "/remote/path.txt",
+                Some("tab-1"),
+            )
+            .unwrap();
+        assert_eq!(service.get(&id).unwrap().status, TransferTaskStatus::Queued);
+        service.pause(&id).unwrap();
+        assert_eq!(service.get(&id).unwrap().status, TransferTaskStatus::Paused);
+        service.resume(&id).unwrap();
+        assert_eq!(service.get(&id).unwrap().status, TransferTaskStatus::Queued);
+        service.cancel(&id).unwrap();
+        assert_eq!(
+            service.get(&id).unwrap().status,
+            TransferTaskStatus::Canceled
+        );
+
+        let mut restored = TransferService::new(journal);
+        restored.load().unwrap();
+        assert_eq!(
+            restored.get(&id).unwrap().status,
+            TransferTaskStatus::Canceled
+        );
+        restored.discard(&id).unwrap();
+        assert!(restored.list().is_empty());
+    }
+
+    #[test]
+    fn active_tasks_are_paused_after_restart() {
+        let journal = temporary_journal();
+        let mut service = TransferService::new(journal.clone());
+        let id = service
+            .enqueue(
+                TransferDirection::Download,
+                "/remote/path.txt",
+                "/local/path.txt",
+                Some("tab-1"),
+            )
+            .unwrap();
+        service.tasks[0].status = TransferTaskStatus::Running;
+        service.flush().unwrap();
+
+        let mut restored = TransferService::new(journal);
+        restored.load().unwrap();
+        assert_eq!(
+            restored.get(&id).unwrap().status,
+            TransferTaskStatus::Paused
+        );
+        assert_eq!(
+            restored.get(&id).unwrap().message.as_deref(),
+            Some("应用重启后等待恢复")
+        );
     }
 
     #[test]

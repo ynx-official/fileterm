@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
     div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, IntoElement, Render,
@@ -6,9 +6,10 @@ use gpui::{
 };
 
 use crate::{
-    backend::FileTermDesktopApi,
+    backend::{FileTermDesktopApi, SshConnectOptions},
     state::{AppState, DataLoadState, NavigationSection, TabStatus},
     theme::{ThemeMode, ThemePalette},
+    view::SessionWorkspace,
     window::menu::ToggleTheme,
 };
 
@@ -16,7 +17,19 @@ pub struct RootView {
     api: Arc<dyn FileTermDesktopApi>,
     state: Entity<AppState>,
     focus: FocusHandle,
+    sessions: HashMap<String, Entity<SessionWorkspace>>,
+    pending_host_verification: Option<PendingHostVerification>,
     _state_subscription: Subscription,
+}
+
+#[derive(Clone)]
+struct PendingHostVerification {
+    profile_id: String,
+    title: String,
+    host: String,
+    port: u16,
+    fingerprint: String,
+    changed: bool,
 }
 
 impl RootView {
@@ -41,6 +54,8 @@ impl RootView {
             api,
             state,
             focus: cx.focus_handle(),
+            sessions: HashMap::new(),
+            pending_host_verification: None,
             _state_subscription: state_subscription,
         }
     }
@@ -88,6 +103,219 @@ impl RootView {
             });
         })
         .detach();
+    }
+
+    fn open_ssh_profile(&mut self, profile_id: String, title: String, cx: &mut Context<Self>) {
+        self.connect_ssh_profile(profile_id, title, SshConnectOptions::default(), cx);
+    }
+
+    fn connect_ssh_profile(
+        &mut self,
+        profile_id: String,
+        title: String,
+        options: SshConnectOptions,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_id = format!("ssh:{profile_id}");
+        if self.sessions.contains_key(&tab_id) {
+            self.update_state(cx, |state| state.activate_tab(&tab_id));
+            return;
+        }
+
+        self.update_state(cx, |state| {
+            state.open_session_tab(tab_id.clone(), title.clone())
+        });
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api.ssh_connect(&profile_id, 80, 24, options).await;
+            let _ = this.update(cx, |root, cx| match result {
+                Ok(session) => {
+                    let workspace = cx.new(|cx| {
+                        SessionWorkspace::new(
+                            tab_id.clone(),
+                            session.controller,
+                            session.output,
+                            root.state.clone(),
+                            cx,
+                        )
+                    });
+                    root.sessions.insert(tab_id.clone(), workspace);
+                    root.update_state(cx, |state| {
+                        state.set_tab_status(&tab_id, TabStatus::Connected)
+                    });
+                }
+                Err(crate::error::AppError::SshHostVerification {
+                    host,
+                    port,
+                    fingerprint,
+                    changed,
+                }) => {
+                    root.pending_host_verification = Some(PendingHostVerification {
+                        profile_id: profile_id.clone(),
+                        title: title.clone(),
+                        host,
+                        port,
+                        fingerprint,
+                        changed,
+                    });
+                    root.update_state(cx, |state| {
+                        state.set_tab_status(&tab_id, TabStatus::Error);
+                        state.data_error = None;
+                    });
+                    cx.notify();
+                }
+                Err(error) => {
+                    root.update_state(cx, |state| {
+                        state.set_tab_status(&tab_id, TabStatus::Error);
+                        state.data_error = Some(error.to_string());
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
+        self.sessions.remove(tab_id);
+        self.update_state(cx, |state| state.close_tab(tab_id));
+    }
+
+    fn accept_host_key(&mut self, save: bool, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_host_verification.take() else {
+            return;
+        };
+        self.connect_ssh_profile(
+            pending.profile_id,
+            pending.title,
+            SshConnectOptions {
+                accepted_host_fingerprint: Some(pending.fingerprint),
+                save_host_fingerprint: save,
+            },
+            cx,
+        );
+    }
+
+    fn reject_host_key(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.pending_host_verification.take() {
+            self.close_tab(&format!("ssh:{}", pending.profile_id), cx);
+        }
+        cx.notify();
+    }
+
+    fn render_host_verification(
+        &self,
+        pending: &PendingHostVerification,
+        palette: ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::black().opacity(0.65))
+            .child(
+                div()
+                    .w(px(520.0))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(palette.surface)
+                    .border_1()
+                    .border_color(if pending.changed {
+                        palette.danger
+                    } else {
+                        palette.border_strong
+                    })
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(palette.text)
+                            .child(if pending.changed {
+                                "远端主机密钥已变化"
+                            } else {
+                                "验证远端主机密钥"
+                            }),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.text_muted)
+                            .child(format!("{}:{}", pending.host, pending.port)),
+                    )
+                    .child(
+                        div()
+                            .p_3()
+                            .rounded_md()
+                            .bg(palette.background)
+                            .text_xs()
+                            .text_color(palette.text)
+                            .child(pending.fingerprint.clone()),
+                    )
+                    .when(pending.changed, |view| {
+                        view.child(div().text_sm().text_color(palette.danger).child(
+                            "保存的指纹与当前服务器不一致。继续前请确认服务器密钥确实已更换。",
+                        ))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("reject-host-key")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .text_color(palette.text_muted)
+                                    .hover(move |style| style.bg(palette.surface_hover))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.reject_host_key(cx)),
+                                    )
+                                    .child("拒绝"),
+                            )
+                            .child(
+                                div()
+                                    .id("accept-host-key-once")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .text_color(palette.accent)
+                                    .hover(move |style| style.bg(palette.accent_surface))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.accept_host_key(false, cx)
+                                        }),
+                                    )
+                                    .child("仅本次接受"),
+                            )
+                            .child(
+                                div()
+                                    .id("accept-host-key-save")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(palette.accent)
+                                    .text_sm()
+                                    .text_color(palette.background)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.accept_host_key(true, cx)
+                                        }),
+                                    )
+                                    .child("接受并保存"),
+                            ),
+                    ),
+            )
     }
 
     fn render_sidebar(
@@ -285,7 +513,7 @@ impl RootView {
                                     .rounded_sm()
                                     .hover(move |style| style.bg(palette.surface_active))
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.update_state(cx, |state| state.close_tab(&close_id));
+                                        this.close_tab(&close_id, cx);
                                     }))
                                     .child("×"),
                             )
@@ -407,8 +635,22 @@ impl RootView {
                 .flex_col()
                 .children(state.connections.iter().take(8).enumerate().map(
                     |(index, connection)| {
+                        let profile_id = connection.id.clone();
+                        let title = connection.name.clone();
+                        let is_ssh = connection.protocol == "ssh";
                         div()
                             .id(("connection-summary", index))
+                            .when(is_ssh, |view| {
+                                view.cursor_pointer().on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.open_ssh_profile(
+                                            profile_id.clone(),
+                                            title.clone(),
+                                            cx,
+                                        );
+                                    },
+                                ))
+                            })
                             .h(px(52.0))
                             .flex()
                             .items_center()
@@ -669,6 +911,8 @@ impl Focusable for RootView {
 impl Render for RootView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state.read(cx).clone();
+        let active_session = self.sessions.get(&state.active_tab_id).cloned();
+        let pending_host_verification = self.pending_host_verification.clone();
         let palette = ThemePalette::for_mode(state.theme);
 
         div()
@@ -677,6 +921,7 @@ impl Render for RootView {
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::toggle_theme))
             .size_full()
+            .relative()
             .flex()
             .bg(palette.background)
             .text_color(palette.text)
@@ -690,12 +935,18 @@ impl Render for RootView {
                     .flex_col()
                     .child(self.render_tabbar(&state, palette, cx))
                     .child(
-                        div()
-                            .min_h(px(0.0))
-                            .flex_1()
-                            .overflow_hidden()
-                            .child(self.render_section(&state, state.navigation, palette, cx)),
+                        div().min_h(px(0.0)).flex_1().overflow_hidden().child(
+                            match active_session {
+                                Some(session) => session.into_any_element(),
+                                None => self
+                                    .render_section(&state, state.navigation, palette, cx)
+                                    .into_any_element(),
+                            },
+                        ),
                     ),
             )
+            .when_some(pending_host_verification, |view, pending| {
+                view.child(self.render_host_verification(&pending, palette, cx))
+            })
     }
 }

@@ -40,6 +40,14 @@ pub enum AppError {
     #[error("window error: {0}")]
     Window(String),
 
+    #[error("SSH host verification required for {host}:{port}: {fingerprint}")]
+    SshHostVerification {
+        host: String,
+        port: u16,
+        fingerprint: String,
+        changed: bool,
+    },
+
     #[error("command error: {0}")]
     Command(String),
 }
