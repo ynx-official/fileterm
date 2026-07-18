@@ -1,7 +1,12 @@
-//! Terminal subsystem: PTY bridge, model, view.
-//!
-//! Phase G-1.2 wires up `pty`; later phases add model/view/perform/osc.
+//! Terminal subsystem: PTY bridge, model, view (G-1.x).
 
+pub mod model;
+pub mod perform;
 pub mod pty;
+pub mod view;
 
+pub use model::{
+    Cell, CellFlags, Color, ColorKind, Cursor, CursorStyle, TermModel, TermSession,
+};
 pub use pty::{PtyHandle, TermChunk};
+pub use view::TermView;
