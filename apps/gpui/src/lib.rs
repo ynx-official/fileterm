@@ -25,6 +25,7 @@
 
 pub mod backend;
 pub mod error;
+pub mod ftp;
 pub mod services;
 pub mod sftp;
 pub mod ssh;

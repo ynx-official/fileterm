@@ -11,8 +11,8 @@ use crate::{
     state::{AppState, DataLoadState, NavigationSection, TabStatus},
     theme::{ThemeMode, ThemePalette},
     view::{
-        DetachedSessionContent, DetachedSessionWindow, LocalSessionWorkspace, SessionWorkspace,
-        StreamSessionWorkspace,
+        DetachedSessionContent, DetachedSessionWindow, FtpWorkspace, LocalSessionWorkspace,
+        SessionWorkspace, StreamSessionWorkspace,
     },
     window::{
         detach_tab_to_new_window,
@@ -27,6 +27,7 @@ pub struct RootView {
     state: Entity<AppState>,
     focus: FocusHandle,
     sessions: HashMap<String, Entity<SessionWorkspace>>,
+    ftp_sessions: HashMap<String, Entity<FtpWorkspace>>,
     local_sessions: HashMap<String, Entity<LocalSessionWorkspace>>,
     stream_sessions: HashMap<String, Entity<StreamSessionWorkspace>>,
     pending_host_verification: Option<PendingHostVerification>,
@@ -129,6 +130,7 @@ impl RootView {
             state,
             focus: cx.focus_handle(),
             sessions: HashMap::new(),
+            ftp_sessions: HashMap::new(),
             local_sessions: HashMap::new(),
             stream_sessions: HashMap::new(),
             pending_host_verification: None,
@@ -260,6 +262,8 @@ impl RootView {
         }
         let content = if let Some(session) = self.sessions.get(tab_id) {
             DetachedSessionContent::Ssh(session.clone())
+        } else if let Some(session) = self.ftp_sessions.get(tab_id) {
+            DetachedSessionContent::Ftp(session.clone())
         } else if let Some(session) = self.local_sessions.get(tab_id) {
             DetachedSessionContent::Local(session.clone())
         } else if let Some(session) = self.stream_sessions.get(tab_id) {
@@ -532,6 +536,45 @@ impl RootView {
         .detach();
     }
 
+    fn open_ftp_profile(
+        &mut self,
+        profile_id: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
+        let tab_id = format!("ftp:{profile_id}");
+        if self.ftp_sessions.contains_key(&tab_id) {
+            self.update_state(cx, |state| state.activate_tab(&tab_id));
+            return;
+        }
+        self.update_state(cx, |state| state.open_session_tab(tab_id.clone(), title));
+        let api = self.api.clone();
+        cx.spawn(async move |this, cx| {
+            let result = api.ftp_connect(&profile_id).await;
+            let _ = this.update(cx, |root, cx| match result {
+                Ok(connected) => {
+                    let workspace = cx.new(|cx| {
+                        FtpWorkspace::new(
+                            tab_id.clone(),
+                            connected.session,
+                            connected.remote_path,
+                            connected.transfer_journal_path,
+                            root.state.clone(),
+                            cx,
+                        )
+                    });
+                    root.ftp_sessions.insert(tab_id.clone(), workspace);
+                    root.update_state(cx, |state| state.set_tab_status(&tab_id, TabStatus::Connected));
+                }
+                Err(error) => root.update_state(cx, |state| {
+                    state.set_tab_status(&tab_id, TabStatus::Error);
+                    state.data_error = Some(error.to_string());
+                }),
+            });
+        })
+        .detach();
+    }
+
     fn open_ssh_profile(&mut self, profile_id: String, title: String, cx: &mut Context<Self>) {
         self.connect_ssh_profile(profile_id, title, SshConnectOptions::default(), cx);
     }
@@ -637,6 +680,9 @@ impl RootView {
     fn close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
         if let Some(session) = self.sessions.remove(tab_id) {
             session.update(cx, |workspace, _| workspace.close());
+        }
+        if let Some(session) = self.ftp_sessions.remove(tab_id) {
+            session.update(cx, |workspace, cx| workspace.close(cx));
         }
         if let Some(session) = self.local_sessions.remove(tab_id) {
             session.update(cx, |workspace, _| workspace.close());
@@ -1509,7 +1555,8 @@ impl RootView {
                         let profile_id = connection.id.clone();
                         let title = connection.name.clone();
                         let protocol = connection.protocol.clone();
-                        let connectable = matches!(protocol.as_str(), "ssh" | "telnet" | "serial");
+                        let connectable =
+                            matches!(protocol.as_str(), "ssh" | "ftp" | "telnet" | "serial");
                         div()
                             .id(("connection-summary", index))
                             .when(connectable, |view| {
@@ -1517,6 +1564,12 @@ impl RootView {
                                     move |this, _, _, cx| {
                                         if protocol == "ssh" {
                                             this.open_ssh_profile(
+                                                profile_id.clone(),
+                                                title.clone(),
+                                                cx,
+                                            );
+                                        } else if protocol == "ftp" {
+                                            this.open_ftp_profile(
                                                 profile_id.clone(),
                                                 title.clone(),
                                                 cx,

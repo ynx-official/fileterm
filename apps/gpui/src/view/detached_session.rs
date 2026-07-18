@@ -5,12 +5,13 @@ use gpui::{
 use crate::{
     state::AppState,
     theme::ThemePalette,
-    view::{LocalSessionWorkspace, SessionWorkspace, StreamSessionWorkspace},
+    view::{FtpWorkspace, LocalSessionWorkspace, SessionWorkspace, StreamSessionWorkspace},
 };
 
 #[derive(Clone)]
 pub enum DetachedSessionContent {
     Ssh(Entity<SessionWorkspace>),
+    Ftp(Entity<FtpWorkspace>),
     Local(Entity<LocalSessionWorkspace>),
     Stream(Entity<StreamSessionWorkspace>),
 }
@@ -53,6 +54,7 @@ impl Render for DetachedSessionWindow {
         let tab_id = self.tab_id.clone();
         let content = match &self.content {
             DetachedSessionContent::Ssh(session) => session.clone().into_any_element(),
+            DetachedSessionContent::Ftp(session) => session.clone().into_any_element(),
             DetachedSessionContent::Local(session) => session.clone().into_any_element(),
             DetachedSessionContent::Stream(session) => session.clone().into_any_element(),
         };

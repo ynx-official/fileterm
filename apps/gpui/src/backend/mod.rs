@@ -45,6 +45,7 @@ pub use commands::{UiPreferences, UiPreferencesInput};
 
 use crate::{
     error::Result,
+    ftp::{FtpProfile, FtpSession},
     ssh::SshController,
     term::{SerialConfig, StreamController, TermChunk},
 };
@@ -74,6 +75,12 @@ pub struct ConnectedStreamSession {
     pub controller: Arc<StreamController>,
     pub protocol: String,
     pub endpoint: String,
+}
+
+pub struct ConnectedFtpSession {
+    pub session: Arc<FtpSession>,
+    pub remote_path: String,
+    pub transfer_journal_path: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -182,6 +189,10 @@ pub trait FileTermDesktopApi: Send + Sync {
 
     /// Open a stored Telnet or Serial profile as a terminal byte stream.
     async fn stream_connect(&self, profile_id: &str) -> Result<ConnectedStreamSession>;
+
+    /// Open a stored FTP/FTPS profile as a file session. The control channel
+    /// stays session-scoped; transfers open dedicated authenticated channels.
+    async fn ftp_connect(&self, profile_id: &str) -> Result<ConnectedFtpSession>;
 
     // SFTP and transfer operations are session-scoped services. Their API
     // accepts a live `SshController`/`SftpClient`; keeping parameterless bridge
@@ -447,6 +458,26 @@ impl FileTermDesktopApi for GpuiDesktopApi {
             controller: Arc::new(controller),
             protocol,
             endpoint,
+        })
+    }
+
+    async fn ftp_connect(&self, profile_id: &str) -> Result<ConnectedFtpSession> {
+        let profile = crate::services::profile_ops::read_connection_profile(&self.app, profile_id)?;
+        if profile.get("type").and_then(Value::as_str) != Some("ftp") {
+            return Err(crate::error::AppError::Command(format!(
+                "profile {profile_id} is not an FTP profile"
+            )));
+        }
+        let profile = FtpProfile::from_value(&profile)
+            .map_err(|error| crate::error::AppError::Command(error.to_string()))?;
+        let remote_path = profile.remote_path.clone();
+        let session = FtpSession::connect(profile)
+            .await
+            .map_err(|error| crate::error::AppError::Command(error.to_string()))?;
+        Ok(ConnectedFtpSession {
+            session,
+            remote_path,
+            transfer_journal_path: self.app.app_data_dir().join("transfer-journal.json"),
         })
     }
 }

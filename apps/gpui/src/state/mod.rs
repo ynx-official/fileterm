@@ -267,6 +267,7 @@ impl AppState {
 
 fn is_terminal_tab(tab_id: &str) -> bool {
     tab_id.starts_with("ssh:")
+        || tab_id.starts_with("ftp:")
         || tab_id.starts_with("local:")
         || tab_id.starts_with("telnet:")
         || tab_id.starts_with("serial:")
