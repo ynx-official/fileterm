@@ -10,6 +10,10 @@ publish = false
 name = "fileterm_gpui"
 path = "src/lib.rs"
 
+[[bin]]
+name = "fileterm-gpui"
+path = "src/main.rs"
+
 # GPUI runtime dependencies.
 #
 # `gpui-unofficial` is the crates.io mirror of Zed's gpui crate, maintained by
@@ -50,6 +54,7 @@ vte = "0.13"
 portable-pty = "0.8"
 tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
+thiserror = "1"
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

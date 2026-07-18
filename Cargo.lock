@@ -1626,6 +1626,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sum-tree-gpui-unofficial",
+ "thiserror 1.0.69",
  "tokio",
  "util-macros-gpui-unofficial",
  "vte",
