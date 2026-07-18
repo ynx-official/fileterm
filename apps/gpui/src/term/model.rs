@@ -9,6 +9,7 @@
 //! `Color` into `gpui::Hsla` at paint time.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 
 use vte::Parser;
 
@@ -122,6 +123,13 @@ pub struct TermModel {
     /// Per-row dirty flag. Set by `print` / `execute` / `csi_dispatch` /
     /// `erase_*` / `line_feed` (when scrolling). View reads + clears.
     pub dirty_rows: Vec<bool>,
+    /// Current working directory, updated by OSC 7 (`file://host/path`).
+    /// `None` until the shell emits its first OSC 7 (bash via
+    /// `PROMPT_COMMAND`, zsh via `precmd`, fish natively). The view / host
+    /// can read this to drive a file manager's CWD sync — see AGENTS.md
+    /// "CWD 目录跟随" hard boundary: CWD must come from the session stream,
+    /// not from UI-layer polling.
+    pub cwd: Option<PathBuf>,
 }
 
 /// A terminal session: a model paired with its own vte parser. The parser
@@ -189,6 +197,7 @@ impl TermModel {
             sgr_bg: Color::default(),
             sgr_flags: CellFlags::empty(),
             dirty_rows: vec![true; rows],
+            cwd: None,
         }
     }
 
@@ -458,11 +467,94 @@ mod tests {
     }
 
     #[test]
-    fn osc_7_is_silently_consumed() {
-        // OSC 7 should not crash and should not pollute the grid.
+    fn osc_7_updates_cwd() {
+        // OSC 7 with `file://localhost/tmp` should set cwd to `/tmp`.
         let mut s = session_of(10, 3);
+        assert!(s.model.cwd.is_none());
         s.feed(b"\x1b]7;file://localhost/tmp\x07X");
+        assert_eq!(s.model.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+        // Grid is not polluted: `X` after the OSC sequence prints normally.
         assert_eq!(cell_at(&s, 0, 0).ch, 'X');
+    }
+
+    #[test]
+    fn osc_7_triple_slash_empty_host() {
+        // `file:///home/user` (empty host) is the "localhost omitted" form.
+        let mut s = session_of(10, 3);
+        s.feed(b"\x1b]7;file:///home/user\x07");
+        assert_eq!(
+            s.model.cwd.as_deref(),
+            Some(std::path::Path::new("/home/user"))
+        );
+    }
+
+    #[test]
+    fn osc_7_remote_host_path_kept() {
+        // Remote hostname is ignored; only the path matters for CWD sync.
+        let mut s = session_of(10, 3);
+        s.feed(b"\x1b]7;file://example.com/var/log\x07");
+        assert_eq!(
+            s.model.cwd.as_deref(),
+            Some(std::path::Path::new("/var/log"))
+        );
+    }
+
+    #[test]
+    fn osc_7_overwrites_previous_cwd() {
+        // Each OSC 7 replaces the previous cwd — shells emit one per prompt.
+        let mut s = session_of(10, 3);
+        s.feed(b"\x1b]7;file://localhost/tmp\x07");
+        assert_eq!(s.model.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+        s.feed(b"\x1b]7;file://localhost/home/user\x07");
+        assert_eq!(
+            s.model.cwd.as_deref(),
+            Some(std::path::Path::new("/home/user"))
+        );
+    }
+
+    #[test]
+    fn osc_7_malformed_leaves_cwd_untouched() {
+        let mut s = session_of(10, 3);
+        s.feed(b"\x1b]7;file://localhost/tmp\x07");
+        let cwd_before = s.model.cwd.clone();
+        // Malformed payload (not a file:// URL) — cwd must stay unchanged.
+        s.feed(b"\x1b]7;not-a-url\x07");
+        assert_eq!(s.model.cwd, cwd_before);
+        // Missing payload entirely — also a no-op.
+        s.feed(b"\x1b]7;\x07");
+        assert_eq!(s.model.cwd, cwd_before);
+    }
+
+    #[test]
+    fn osc_7_st_terminator_also_works() {
+        // Some shells use ST (ESC \) instead of BEL as the terminator.
+        // vte abstracts this away — both should land in osc_dispatch.
+        let mut s = session_of(10, 3);
+        s.feed(b"\x1b]7;file://localhost/etc\x1b\\");
+        assert_eq!(
+            s.model.cwd.as_deref(),
+            Some(std::path::Path::new("/etc"))
+        );
+    }
+
+    #[test]
+    fn osc_unknown_does_not_pollute_grid_or_cwd() {
+        // Unknown OSC codes (0=title, 8=hyperlink, etc.) must be silently
+        // dropped — no grid writes, no cwd changes.
+        let mut s = session_of(10, 3);
+        s.feed(b"\x1b]0;some title\x07X");
+        assert_eq!(cell_at(&s, 0, 0).ch, 'X');
+        assert!(s.model.cwd.is_none());
+    }
+
+    #[test]
+    fn osc_7_split_across_feeds() {
+        // OSC 7 split across two feed() calls must still parse — proves
+        // the vte parser persists OSC state across byte boundaries.
+        let mut s = session_of(10, 3);
+        s.feed(b"\x1b]7;file://local");
+        s.feed(b"host/tmp\x07");
+        assert_eq!(s.model.cwd.as_deref(), Some(std::path::Path::new("/tmp")));
     }
 
     #[test]

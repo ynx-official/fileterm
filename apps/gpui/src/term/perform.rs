@@ -1,6 +1,7 @@
 //! vte::Perform implementation: translates parser callbacks into model mutations.
 //!
-//! Phase G-1.3 of `docs/plans/active/gpui-spike.md`.
+//! Phase G-1.3 of `docs/plans/active/gpui-spike.md` (CSI/SGR/execute) +
+//! Phase G-1.8 (OSC 7 CWD parsing).
 //!
 //! Deviations from the spike skeleton:
 //!   * SGR 38/48 handling. The skeleton used `p.get(1)` / `p.get(2)` on a
@@ -13,7 +14,11 @@
 //!   * `osc_dispatch` uses `params: &[&[u8]]` (vte 0.13 API). The skeleton
 //!     had `params[0].starts_with(b"7")` which would treat OSC 7, OSC 70,
 //!     OSC 700 etc. all as "OSC 7". Fixed to match the leading number
-//!     precisely.
+//!     precisely via `str::from_utf8` + exact `match`.
+//!   * OSC 7 payload parsing lives in `crate::term::osc` (not inline here)
+//!     so it can be unit-tested in isolation without constructing a
+//!     `TermModel` + `Parser`. `osc_dispatch` is a thin dispatcher: parse
+//!     code, delegate to `osc::parse_osc7_cwd`, assign to `model.cwd`.
 //!   * Cursor movement clamps to `rows - 1` / `cols - 1` only when the
 //!     dimension is non-zero; otherwise saturating math would underflow.
 
@@ -146,14 +151,37 @@ impl<'a> Perform for TermPerform<'a> {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         // OSC sequences arrive as `params: &[&[u8]]` where params[0] is the
         // OSC code (e.g. b"7") and subsequent entries are the payload
-        // split on `;`. spike phase: silently consume 7 / 52 / 1337 so
-        // they don't pollute the grid; everything else is also dropped.
+        // split on `;`. Match the leading number precisely so OSC 7, OSC 70,
+        // OSC 700 etc. don't all alias to "OSC 7".
         if params.is_empty() {
             return;
         }
-        let _code = std::str::from_utf8(params[0]).unwrap_or("");
-        // Future: match on code to handle OSC 7 (CWD), 52 (clipboard),
-        // 1337 (RemoteUser/RemoteCwd). For spike, do nothing.
+        let code = std::str::from_utf8(params[0]).unwrap_or("");
+        match code {
+            "7" => {
+                // OSC 7: CWD 跟随. Payload is `file://host/path`; vte splits
+                // on `;` so params[1] is the URL. If the shell omitted the
+                // `;` separator (non-conformant but seen in the wild), or
+                // sent extra fields, we still try params[1] only.
+                if let Some(payload) = params.get(1) {
+                    if let Some(cwd) = crate::term::osc::parse_osc7_cwd(payload) {
+                        self.model.cwd = Some(cwd);
+                    }
+                    // Parse failure leaves `cwd` untouched — see osc.rs
+                    // "Robustness" section for rationale.
+                }
+            }
+            "52" | "1337" => {
+                // OSC 52 (clipboard) / 1337 (RemoteUser/RemoteCwd) — spike
+                // explicitly defers these to G3 per G-1.8 step 1. Silently
+                // consume so they don't pollute the grid.
+            }
+            _ => {
+                // Unknown OSC: drop. Common ones we ignore: 0 (title),
+                // 1 (icon title), 2 (set title), 8 (hyperlink), 9 (iTerm
+                // growl), 104/110/111/112 (color resets).
+            }
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 //! Terminal subsystem: PTY bridge, model, view (G-1.x).
 
 pub mod model;
+pub mod osc;
 pub mod perform;
 pub mod pty;
 pub mod spawn;

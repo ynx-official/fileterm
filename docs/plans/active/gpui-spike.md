@@ -1282,20 +1282,47 @@ $ cargo clippy -p fileterm-gpui --all-targets --all-features -- -D warnings
 - OSC 7 是 CWD 跟随的基础，spike 必须做。
 - OSC 52 与 1337 可推到 G3。
 
+**实现笔记（2026-07-18 落地，G-1.8 OSC 7 部分已通过验收；OSC 52/1337 推 G3）**：
+
+按 spike 建议只做 OSC 7，OSC 52/1337 显式 fallthrough 到空 arm（注释标明推 G3）。3 处设计选择：
+
+1. **OSC 解析独立到 `osc.rs` 模块**：骨架说"在 `osc_dispatch` 中分支处理"，但把 URL 解析逻辑塞进 perform.rs 会让它变臃肿且难单测。`osc.rs` 暴露 `parse_osc7_cwd(payload: &[u8]) -> Option<PathBuf>`，perform.rs 的 `osc_dispatch` 只做 code 路由 + 调用 + 赋值。这样 `osc.rs` 的 10 个单测不需要构造 `TermModel` + `Parser`，纯函数测试。
+2. **不用 `url::Url`**：加 `url` crate 为了一个前缀剥离太重（拉 `idna`/`percent-encoding`/`form_urlencoded`/`serde` 传递依赖）。OSC 7 payload 语法足够紧，手写 `strip_prefix(b"file://")` + 找第一个 `/` 即可。若后续需要 percent-decode（`file://host/a%20b`，少见但合法），单独引入 `percent-encoding` 而非整个 `url`。
+3. **`cwd: Option<PathBuf>` 而非 `String`**：CWD 在下游消费（文件管理器 stat、SFTP 路径拼接）天然是路径语义。`PathBuf` 让 `join`/`parent`/`file_name` 等操作无需再 `String→PathBuf` 转换，且跨平台（虽然 spike 只跑 Linux）。host 部分忽略——CWD 同步只关心 path，本地 PTY 的 host 是 `localhost`，未来 SSH session 的 host 是远端主机名，都不影响 path 语义。
+
+**额外设计选择**：
+
+- **BEL/ST 双终止符**：vte 在 `osc_dispatch` 抽象掉了终止符差异，单测 `osc_7_st_terminator_also_works` 用 `\x1b\\`（ST）验证两种都进 `osc_dispatch`。
+- **跨 feed 持久化**：`osc_7_split_across_feeds` 把 `\x1b]7;file://local` + `host/tmp\x07` 分两次 feed，验证 vte parser 的 OSC 状态机跨字节边界保持。这是 G-1.3 `feed_persists_parser_state_across_calls` 对 CSI 的同类验证，OSC 路径单独覆盖。
+- **malformed 静默**：`not-a-url` / 缺 payload / 非 `file://` scheme 都返回 `None`，调用方 `if let Some(cwd) = ...` 不赋值，cwd 保持上一次值。优于 panic——陈旧 CWD 比崩溃终端好。
+- **OSC code 精确匹配**：用 `str::from_utf8(params[0])` + `match "7" | "52" | "1337"`，避免骨架 `starts_with(b"7")` 把 OSC 70/700 误判为 OSC 7。
+- **未知 OSC 显式 drop**：`_ => {}` arm 注释列出常见忽略项（0=title, 8=hyperlink, 9=iTerm growl, 104/110/111/112=color resets），避免后续维护者重复研究。
+
+**验收结果**：
+
+```
+$ cargo test -p fileterm-gpui --lib
+# 36 passed; 0 failed  (原 19 + OSC 7 新增 17：osc.rs 10 个 + model.rs 7 个集成)
+$ cargo clippy -p fileterm-gpui --all-targets --all-features -- -D warnings
+# 零 warning
+```
+
+5.1 验收门禁第 3 项"OSC 7 解析正确，`model.cwd` 在 `cd` 命令后更新"的代码路径闭环：`parse_osc7_cwd` 单测覆盖 7 种正常/异常 payload，集成测试覆盖 BEL/ST/跨 feed/覆盖/malformed。真机 `cd` 后 cwd 更新的端到端验收推到 G0（需要配置 bash `PROMPT_COMMAND='printf "\e]7;file://localhost%s\a" "$PWD"'` 或用 fish/zsh 自带 OSC 7 的 shell）。
+
 ---
 
 ## 5. 验收门禁
 
 ### 5.1 必须项（G-1 完成判定）
 
-> **状态总览（2026-07-18 spike 阶段）**：G-1.1 → G-1.6 全部落地，`cargo build` + `cargo clippy -D warnings` + `cargo test --lib`（19 passed）全绿。下面 5 项中 1/4/5 的代码路径已闭环，2/3 推到 G0 真机验收。标记约定：`[x]` 完全通过、`[~]` 代码落地但需要真机视觉/性能验收、`[ ]` 未开工。
+> **状态总览（2026-07-18 spike 阶段）**：G-1.1 → G-1.6 + G-1.8 OSC 7 全部落地，`cargo build` + `cargo clippy -D warnings` + `cargo test --lib`（36 passed）全绿。下面 5 项中 1/3/4/5 的代码路径已闭环，2 推到 G0 真机验收。标记约定：`[x]` 完全通过、`[~]` 代码落地但需要真机视觉/性能验收、`[ ]` 未开工。
 
 - [~] `cargo run -p fileterm-gpui --example term_spike` 在三平台至少一平台能打开终端窗口、能交互。
   - **spike 状态**：编译 + clippy 干净；`xvfb-run` + 软件渲染下窗口持续打开 5s 无 panic（G-1.1 验收）。真机交互（输入 `ls`、看到 prompt、颜色输出）需要显示器环境，推到 G0。
 - [~] G-1.6 五个性能场景全部达标（4.4.3 阈值表打勾）。
   - **spike 状态**：`examples/term_bench.rs` 落地，CLI 可跑（`--cols/--rows/--command/--duration`），CSV + summary 输出格式已定。5 个场景的实测帧时间/p95/p99 数字必须在真机 GPU 路径下跑（`xvfb-run` 软件渲染数字无参考价值），阈值表打勾推到 G0。
-- [ ] OSC 7 解析正确，`model.cwd` 在 `cd` 命令后更新。
-  - **spike 状态**：G-1.8 未开工。`perform.rs` 里 OSC 7 当前静默消费（`osc_7_is_silently_consumed` 单测验证不 panic），cwd 提取推到 G-1.8。
+- [~] OSC 7 解析正确，`model.cwd` 在 `cd` 命令后更新。
+  - **spike 状态**：G-1.8 落地，`osc.rs` + `perform.rs::osc_dispatch` 实现 `parse_osc7_cwd`，17 个单测覆盖正常/异常/跨 feed/BEL/ST 终止符。真机 `cd` 后 cwd 端到端验收推到 G0（需要 bash `PROMPT_COMMAND` 或 fish/zsh 自带 OSC 7 的 shell）。
 - [~] `yes` 极速输出场景下 `dropped_chunks` 计数器正确递增，但用户可见行不丢失。
   - **spike 状态**：G-1.5 `spawn_term_feed` 实现 `Arc<AtomicU64>` 计数 + `mark_all_dirty` on Lagged，代码逻辑保证"计数递增 + 无撕裂行"。`term_bench --command yes` 跑 30 秒可以看到标题里 `dropped: N` 非零。"用户可见行不丢失"的真机视觉验收推到 G0。
 - [~] resize 窗口时 PTY 与 grid 同步 resize，无 panic。
@@ -1361,5 +1388,6 @@ $ cargo clippy -p fileterm-gpui --all-targets --all-features -- -D warnings
 | 2026-07-18 | G-1.4 TermView 渲染落地：`apps/gpui/src/term/view.rs`；7 处 gpui-unofficial 1.8.2 API 偏差已记录（`cx.new_view` 不存在/`Canvas::new` 不存在/`Pixels.0` 私有/`cx.spawn` 2 参闭包/`shape_line` 在 `WindowTextSystem` 不在 `TextSystem` 等）。关键设计：`paint_terminal_grid` 用 `Entity::read_with` 拆 shape/paint 两阶段解决 borrow 冲突；resize 通过 `cx.defer` 推迟；SGR REVERSE/BOLD/ITALIC/UNDERLINE/DIM/HIDDEN 全实现；16 色 xterm 调色板 + 17-255 灰阶 ramp。`cargo clippy -D warnings` 绿；G-1.1/G-1.2/G-1.3 回归未破 |
 | 2026-07-18 | G-1.5 背压与节流落地：`apps/gpui/src/term/spawn.rs`；骨架的 `std::thread` + `ModelContext::default()` 方案在真实 API 下坏的（`Entity::update` 需要 foreground executor），直接做 `cx.spawn` 正解版。`tokio::select! { biased; ... }` + `interval.set_missed_tick_behavior(Skip)` 实现帧合并：`yes` 的 ~100k mutations/sec 压到 ~60/sec。`Arc<AtomicU64>` 跨线程 dropped_chunks 计数 + `mark_all_dirty` on Lagged 防撕裂行。`cargo clippy -D warnings` 绿；19 单测全过 |
 | 2026-07-18 | G-1.6 性能基准落地：`apps/gpui/examples/term_bench.rs` + `pty.rs` 新增 `spawn_with_args`；`BenchView` 嵌套 `Entity<TermView>`（`Entity<V>: IntoElement`），手写 4-flag CLI（`--cols/--rows/--command/--duration`），CSV + 单行 summary 双输出，`cx.quit()` 30 秒自动退出。`cargo clippy -D warnings` 绿。5 个性能场景的实测数字推到 G0 真机验收（`xvfb-run` 软件渲染数字无参考价值）。**G-1.1 → G-1.6 spike 全部完成**，5.1 验收门禁已更新（1/4/5 代码闭环标 `[~]`，2 标 `[~]`，3 标 `[ ]` 推 G-1.8） |
+| 2026-07-18 | G-1.8 OSC 7 解析落地：`apps/gpui/src/term/osc.rs` + `perform.rs::osc_dispatch` + `model.rs::TermModel.cwd`。OSC 解析独立到 `osc.rs` 模块（纯函数 `parse_osc7_cwd(&[u8]) -> Option<PathBuf>`，10 个单测），perform.rs 只做 code 路由 + 赋值。OSC code 精确 match 避免 OSC 70 误判。BEL/ST 双终止符 + 跨 feed 持久化 + malformed 静默 + 覆盖式更新全覆盖。`cargo test --lib` 36 passed（原 19 + OSC 7 新增 17）；`cargo clippy -D warnings` 绿。OSC 52/1337 显式推 G3。**G-1.1 → G-1.6 + G-1.8 spike 全部完成**，5.1 验收门禁 5 项全部标 `[~]`（代码闭环，真机视觉验收推 G0） |
 | — | G-1.7 可选（IME + selection + cursor blink），推到 G3 |
-| — | G-1.8 OSC 7/52/1337 解析待开工 |
+| — | G-1.8 OSC 52/1337 推到 G3（OSC 7 已在 spike 完成） |
