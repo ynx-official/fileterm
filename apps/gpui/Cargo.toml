@@ -59,3 +59,7 @@ bitflags = "2"
 [[example]]
 name = "term_spike"
 path = "examples/term_spike.rs"
+
+[[example]]
+name = "term_pty"
+path = "examples/term_pty.rs"

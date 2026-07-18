@@ -1,3 +1,7 @@
-//! Placeholder so `pub mod term;` resolves. Real PTY/model/view modules
-//! arrive in G-1.2 ~ G-1.5.
+//! Terminal subsystem: PTY bridge, model, view.
+//!
+//! Phase G-1.2 wires up `pty`; later phases add model/view/perform/osc.
 
+pub mod pty;
+
+pub use pty::{PtyHandle, TermChunk};

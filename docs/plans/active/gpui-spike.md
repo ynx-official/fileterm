@@ -278,15 +278,51 @@ impl PtyHandle {
 **验收**：
 
 ```bash
-cargo run -p fileterm-gpui --example term_spike
+cargo run -p fileterm-gpui --example term_pty
 ```
 
-启动后能在 stdout 看到 bash 的 prompt 字节（`$ ` 或 `% `）。可以用 `eprintln!("chunk: {:?}", chunk.bytes);` 临时打印验证。
+启动后能在 stdout 看到 bash 的 prompt 字节（`$ ` 或 `% ` 或 `# `）。可以用 `eprintln!("chunk: {:?}", chunk.bytes);` 临时打印验证。
+
+> 注：G-1.2 的验收示例从原草案的 `term_spike` 改为独立的 `term_pty`。原因：G-1.1 的 `term_spike` 验收只要求"打开窗口"，而 G-1.2 要看 PTY 字节流——把两者放一起会让 G-1.1 的无显示器环境验证复杂化。`term_pty` 不开窗口、不需要 GPU，纯 stdout 即可验收，CI 友好。
 
 **风险**：
 
 - `portable_pty` 在 Windows 下默认用 ConPTY，需要 Windows 10 18362+；旧版用 winpty fallback。
 - `take_writer()` 在某些版本返回 `Result`，可能需要 `?`。查 `cargo doc -p portable-pty`。
+
+**实现笔记（2026-07-18 落地，G-1.2 已通过验收）**：
+
+相对本节"代码骨架"，真实 `portable-pty` 0.8.1 API 有 4 处偏差，全部已写入 `apps/gpui/src/term/pty.rs` 顶部 doc comment：
+
+1. trait 名是 `MasterPty`，不是 `Master`。
+2. reader API 是 `try_clone_reader()`，不是 `take_reader()`。master 仍持有读端，我们只 clone 一份 handle。
+3. `SlavePty` 没有 `close()` 方法。官方模式（见 `portable-pty/examples/whoami.rs`）是 `drop(pair.slave)` 后让 child 自然 EOF。
+4. **`take_writer()` 是 one-shot**：每个 master 实例只能调用一次，第二次调直接 `bail!("cannot take writer more than once")`（见 `portable-pty` 的 `unix.rs:319` / `serial.rs:229`）。骨架里 `write_input` 每次都调 `take_writer()` 是错的——必须在 `spawn()` 时调一次，把 writer 存在 `PtyHandle` 上，后续 `write_input` 复用。`PtyHandle` 用 `Mutex<Option<Box<dyn Write + Send>>>` 持有 writer，因为 `Write::write_all` 要 `&mut self`。
+5. `SlavePty` / `PtySystem` trait 不需要显式 `use`——Rust 通过 `pair.slave.spawn_command()` 和 `system.openpty()` 的具体类型就能解析 trait 方法。显式 import 反而会触发 `unused_imports` warning。
+
+**额外设计选择**：
+
+- 读 pump 用 `std::thread` 不用 `tokio::task`：reader 是阻塞 `Read`，放进 async worker 会占住一个 worker 线程做永不 yield 的 syscall。
+- 输出通道用 `tokio::sync::broadcast`（容量 256）：subscriber 可来去自由，慢 subscriber 触发 `Lagged` 不影响其他人，零 subscriber 时 send 静默丢弃。
+- `TermChunk` 带 `seq: u64`：让 receiver 检测 Lagged 间隙后能决定全量重排还是跳过。
+
+**验收结果**：
+
+```
+$ cargo run -p fileterm-gpui --example term_pty
+[term_pty] spawning shell: /usr/bin/bash
+[term_pty] spawned, waiting for first chunk...
+[term_pty] first chunk: seq=1 76 bytes
+chunk: \u{1b}[?2004h\u{1b}]0;root@host: ~\u{7}root@host:~#
+chunk: echo hello-g-1-2\r\n
+chunk: \u{1b}[?2004l\r
+chunk: hello-g-1-2\r\n                ← marker 观察到
+chunk: \u{1b}[?2004h\u{1b}]0;root@host: ~\u{7}root@host:~#
+chunk: exit\r\n\u{1b}[?2004l\rexit\r\n
+[term_pty] ACCEPTANCE: marker 'hello-g-1-2' observed in output
+```
+
+完整往返验证：spawn → 收到 prompt → 写入 `echo hello-g-1-2\n` → shell 回显 marker → 写入 `exit\n` → shell 退出 → 进程退出码 0。同时 G-1.1 的 `term_spike` 在 `xvfb-run` + 软件渲染下仍持续打开 4s 无 panic（回归未破）。
 
 ---
 
@@ -1231,4 +1267,5 @@ cargo run -p fileterm-gpui --example term_bench -- --cols 80 --rows 24 --command
 | 日期 | 事件 |
 | --- | --- |
 | 2026-07-18 | G-1.1 脚手架落地：`apps/gpui` crate + 根 Cargo workspace + `.patches/` 两份 rustc 1.92 兼容补丁；`cargo build -p fileterm-gpui --example term_spike` 零 warning 通过；`xvfb-run` + 软件渲染下窗口持续打开 5s 无 panic（timeout 退出码 124）。5 处 API 偏差与补丁细节见 G-1.1 实现笔记 |
-| — | G-1.2 待开工 |
+| 2026-07-18 | G-1.2 PTY 桥落地：`apps/gpui/src/term/pty.rs` + `examples/term_pty.rs`；4 处 portable-pty 0.8.1 API 偏差已记录；关键修正是 `take_writer` 是 one-shot，必须在 `spawn` 时取一次存进 `PtyHandle`；`cargo run --example term_pty` 完整往返验证通过（marker `hello-g-1-2` 观察到，进程退出码 0）；G-1.1 回归未破 |
+| — | G-1.3 待开工 |
