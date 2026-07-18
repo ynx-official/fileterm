@@ -1,0 +1,61 @@
+[package]
+name = "fileterm-gpui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lib]
+name = "fileterm_gpui"
+path = "src/lib.rs"
+
+# GPUI runtime dependencies.
+#
+# `gpui-unofficial` is the crates.io mirror of Zed's gpui crate, maintained by
+# iamnbutler/gpui-unofficial. Lock the same minor across `gpui` and
+# `gpui_platform` so platform backends stay in sync with the core types.
+#
+# Spike doc (`docs/plans/active/gpui-spike.md` section 3) originally listed
+# `gpui-text-gpui-unofficial` and version `1.9`; that crate does not exist on
+# crates.io and 1.9 has not been released. Real latest stable as of
+# 2026-07-18 is 1.8.2. Text shaping APIs live inside the `gpui` crate itself
+# (`gpui::ShapedLine` / `gpui::TextSystem`), so no separate text crate is
+# needed. This deviation is recorded here so the spike doc can be reconciled
+# in the next plan pass.
+[dependencies]
+gpui = { package = "gpui-unofficial", version = "=1.8.2" }
+gpui_platform = { package = "gpui-platform-gpui-unofficial", version = "=1.8.2", features = ["font-kit", "wayland", "x11"] }
+# `gpui-unofficial` 1.8.2 declares loose `^1.8.2` requirements on its own
+# sub-crates (collections / gpui-util / etc.), so cargo's default "pick the
+# latest matching" resolver pulls their 1.11.3 line. The 1.11.x line uses the
+# unstable `slice_as_array` feature, which stable rustc 1.92 rejects. Pin
+# every transitive sub-crate to =1.8.2 here so the lockfile resolves to a
+# self-consistent 1.8.2 graph. These entries act as version anchors only;
+# the code never imports them directly.
+collections = { package = "collections-gpui-unofficial", version = "=1.8.2" }
+gpui_util = { package = "gpui-util-gpui-unofficial", version = "=1.8.2" }
+gpui_macros = { package = "gpui-macros-gpui-unofficial", version = "=1.8.2" }
+gpui_shared_string = { package = "gpui-shared-string-gpui-unofficial", version = "=1.8.2" }
+derive_refineable = { package = "derive-refineable-gpui-unofficial", version = "=1.8.2" }
+refineable = { package = "refineable-gpui-unofficial", version = "=1.8.2" }
+gpui_wgpu = { package = "gpui-wgpu-gpui-unofficial", version = "=1.8.2" }
+util_macros = { package = "util-macros-gpui-unofficial", version = "=1.8.2" }
+perf = { package = "perf-gpui-unofficial", version = "=1.8.2" }
+http_client = { package = "http-client-gpui-unofficial", version = "=1.8.2" }
+scheduler = { package = "scheduler-gpui-unofficial", version = "=1.8.2" }
+sum_tree = { package = "sum-tree-gpui-unofficial", version = "=1.8.2" }
+media = { package = "media-gpui-unofficial", version = "=1.8.2" }
+vte = "0.13"
+portable-pty = "0.8"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+bitflags = "2"
+
+[[example]]
+name = "term_spike"
+path = "examples/term_spike.rs"

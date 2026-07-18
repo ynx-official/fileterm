@@ -12,6 +12,8 @@ apps/electron/release/
 apps/tauri/src-tauri/target/
 apps/tauri/src-tauri/gen/
 .github/fixtures/tauri-socket-lifecycle/target/
+apps/gpui/target/
+target/
 
 .DS_Store
 npm-debug.log*
