@@ -363,12 +363,12 @@ impl Render for FtpWorkspace {
         div().size_full().flex().flex_col().bg(palette.background).text_color(palette.text)
             .child(
                 div().h(px(44.0)).flex().items_center().gap_2().px_3().bg(palette.surface).border_b_1().border_color(palette.border)
-                    .child(div().px_2().cursor_pointer().text_color(palette.accent).on_click(cx.listener(move |this, _, _, cx| this.load_path(parent.clone(), cx))).child("上级"))
+                    .child(div().id("ftp-parent").px_2().cursor_pointer().text_color(palette.accent).on_click(cx.listener(move |this, _, _, cx| this.load_path(parent.clone(), cx))).child("上级"))
                     .child(div().min_w(px(0.0)).flex_1().truncate().text_sm().child(self.files.cwd.to_string_lossy().to_string()))
                     .child(div().text_xs().text_color(palette.text_soft).child(format!("FTP · {}", self.session.endpoint())))
-                    .child(div().px_2().cursor_pointer().text_color(palette.accent).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))).child("刷新"))
-                    .child(div().px_2().cursor_pointer().text_color(palette.accent).on_click(cx.listener(|this, _, _, cx| this.create_directory(cx))).child("新建目录"))
-                    .child(div().px_2().cursor_pointer().text_color(palette.accent).on_click(cx.listener(|this, _, _, cx| this.upload(cx))).child("上传")),
+                    .child(div().id("ftp-refresh").px_2().cursor_pointer().text_color(palette.accent).on_click(cx.listener(|this, _, _, cx| this.refresh(cx))).child("刷新"))
+                    .child(div().id("ftp-mkdir").px_2().cursor_pointer().text_color(palette.accent).on_click(cx.listener(|this, _, _, cx| this.create_directory(cx))).child("新建目录"))
+                    .child(div().id("ftp-upload").px_2().cursor_pointer().text_color(palette.accent).on_click(cx.listener(|this, _, _, cx| this.upload(cx))).child("上传")),
             )
             .when(self.files.loading, |view| view.child(div().p_3().text_sm().text_color(palette.text_soft).child("正在读取远端目录…")))
             .child(self.render_files(palette, cx))

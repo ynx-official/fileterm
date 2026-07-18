@@ -90,6 +90,7 @@ regex = "1"
 arboard = "3.6.1"
 open = "5.4.0"
 url = "2.5.8"
+tray-icon = "0.24.0"
 
 [[example]]
 name = "term_spike"

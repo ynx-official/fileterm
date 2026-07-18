@@ -465,6 +465,85 @@ fn strip_secret_fields_public(profile: &Value) -> Value {
     public
 }
 
+pub fn read_profiles_for_sync(app: &AppHandle) -> Result<Vec<Value>, AppError> {
+    storage::migrate_legacy_data_once(app)?;
+    let folders = storage::read_json_array(app, "folders.json")?;
+    let mut profiles = merge_profile_secrets(app, read_raw_array(app, "profiles.json")?)?;
+    if heal_profiles(&mut profiles, &folders) {
+        reconcile_profile_secrets(app, &profiles)?;
+        let stripped = profiles.iter().map(strip_secret_fields).collect::<Vec<_>>();
+        storage::write_json_array(app, "profiles.json", &stripped)?;
+    }
+    Ok(profiles)
+}
+
+pub fn merge_synced_profiles(
+    app: &AppHandle,
+    incoming: Vec<Value>,
+) -> Result<(u64, u64, u64), AppError> {
+    let folders = storage::read_json_array(app, "folders.json")?;
+    let mut profiles = read_profiles_for_sync(app)?;
+    let mut imported = 0_u64;
+    let mut updated = 0_u64;
+    let mut skipped = 0_u64;
+
+    for incoming in incoming {
+        let Some(fingerprint) = profile_fingerprint(&incoming) else {
+            skipped += 1;
+            continue;
+        };
+        if let Some(index) = profiles
+            .iter()
+            .position(|profile| profile_fingerprint(profile).as_ref() == Some(&fingerprint))
+        {
+            let previous = profiles[index].as_object().cloned().unwrap_or_default();
+            let Some(mut next) = incoming.as_object().cloned() else {
+                skipped += 1;
+                continue;
+            };
+            for key in ["id", "parentId", "order", "lastUsedAt"] {
+                if let Some(value) = previous.get(key) {
+                    next.insert(key.to_string(), value.clone());
+                } else {
+                    next.remove(key);
+                }
+            }
+            profiles[index] = Value::Object(next);
+            updated += 1;
+        } else {
+            let Some(mut next) = incoming.as_object().cloned() else {
+                skipped += 1;
+                continue;
+            };
+            next.insert(
+                "id".to_string(),
+                Value::String(format!("profile-{}", uuid::Uuid::new_v4())),
+            );
+            next.insert("order".to_string(), Value::Number(now_millis().into()));
+            next.remove("parentId");
+            next.remove("lastUsedAt");
+            profiles.insert(0, Value::Object(next));
+            imported += 1;
+        }
+    }
+
+    heal_profiles(&mut profiles, &folders);
+    reconcile_profile_secrets(app, &profiles)?;
+    let stripped = profiles.iter().map(strip_secret_fields).collect::<Vec<_>>();
+    storage::write_json_array(app, "profiles.json", &stripped)?;
+    Ok((imported, updated, skipped))
+}
+
+fn profile_fingerprint(profile: &Value) -> Option<(String, String, String, u64, String)> {
+    Some((
+        profile.get("type")?.as_str()?.to_ascii_lowercase(),
+        profile.get("name")?.as_str()?.trim().to_string(),
+        profile.get("host").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
+        profile.get("port").and_then(Value::as_u64).unwrap_or(0),
+        profile.get("username").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
+    ))
+}
+
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

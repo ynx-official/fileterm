@@ -170,6 +170,12 @@ pub trait FileTermDesktopApi: Send + Sync {
     /// Delete one command template.
     async fn app_delete_command_template(&self, command_id: String) -> Result<()>;
 
+    /// Read and persist WebDAV profile-bundle synchronization settings.
+    async fn webdav_get_config(&self) -> Result<Value>;
+    async fn webdav_save_config(&self, input: Value) -> Result<Value>;
+    async fn webdav_upload(&self) -> Result<Value>;
+    async fn webdav_download(&self) -> Result<Value>;
+
     // Window creation and tab placement deliberately stay in the GPUI view
     // layer because they require `&mut App`; protocol/file operations remain
     // behind session-scoped services with the concrete controller they need.
@@ -279,6 +285,22 @@ impl FileTermDesktopApi for GpuiDesktopApi {
 
     async fn app_delete_command_template(&self, command_id: String) -> Result<()> {
         crate::services::profile_ops::delete_command_template(&self.app, &command_id)
+    }
+
+    async fn webdav_get_config(&self) -> Result<Value> {
+        crate::services::webdav::get_config(&self.app)
+    }
+
+    async fn webdav_save_config(&self, input: Value) -> Result<Value> {
+        crate::services::webdav::save_config(&self.app, input)
+    }
+
+    async fn webdav_upload(&self) -> Result<Value> {
+        crate::services::webdav::upload(&self.app).await
+    }
+
+    async fn webdav_download(&self) -> Result<Value> {
+        crate::services::webdav::download(&self.app).await
     }
 
     async fn ssh_connect(

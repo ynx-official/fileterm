@@ -29,6 +29,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
+use super::tab_drag::ScreenBounds;
+
 /// Where a tab currently lives.
 ///
 /// Serialized to JSON and broadcast to all windows on every change so
@@ -61,6 +63,9 @@ pub struct WindowRegistry {
     /// window_id → live GPUI window id. Keeping the registry view-agnostic
     /// avoids coupling tab ownership to a particular root view type.
     handles: RwLock<HashMap<String, gpui::WindowId>>,
+    /// Last observed global screen bounds for every live workspace window.
+    /// Drag hit-testing reads this snapshot without depending on a view type.
+    bounds: RwLock<HashMap<String, ScreenBounds>>,
 }
 
 impl WindowRegistry {
@@ -74,6 +79,32 @@ impl WindowRegistry {
     /// Register the live GPUI window id after `open_window` succeeds.
     pub fn register_handle(&self, window_id: &str, handle: gpui::WindowId) {
         self.handles.write().insert(window_id.to_string(), handle);
+    }
+
+    /// Update global screen bounds used for cross-window drop hit-testing.
+    pub fn update_bounds(&self, window_id: &str, bounds: ScreenBounds) {
+        self.bounds.write().insert(window_id.to_string(), bounds);
+    }
+
+    /// Return a stable snapshot of live workspace bounds. Detached windows
+    /// are listed before the main window so an overlapping detached window
+    /// wins hit-testing.
+    pub fn bounds_snapshot(&self) -> Vec<(String, ScreenBounds)> {
+        let bounds = self.bounds.read();
+        let mut windows: Vec<_> = bounds
+            .iter()
+            .map(|(window_id, bounds)| (window_id.clone(), *bounds))
+            .collect();
+        windows.sort_by_key(|(window_id, _)| window_id == "main");
+        windows
+    }
+
+    /// Whether a detached window currently owns no tabs.
+    pub fn is_window_empty(&self, window_id: &str) -> bool {
+        self.detached_tabs
+            .read()
+            .get(window_id)
+            .map_or(true, Vec::is_empty)
     }
 
     /// Detach a tab from its current window into a target window.
@@ -103,6 +134,10 @@ impl WindowRegistry {
         detached
             .entry(target_window_id.to_string())
             .or_default()
+            .retain(|existing| existing != tab_id);
+        detached
+            .entry(target_window_id.to_string())
+            .or_default()
             .push(tab_id.to_string());
         owner.insert(tab_id.to_string(), target_window_id.to_string());
     }
@@ -123,6 +158,7 @@ impl WindowRegistry {
             owner.remove(tab_id);
         }
         handles.remove(window_id);
+        self.bounds.write().remove(window_id);
         tabs
     }
 

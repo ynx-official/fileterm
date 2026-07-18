@@ -5,7 +5,7 @@ mod root;
 mod session;
 mod stream_session;
 
-pub use detached_session::{DetachedSessionContent, DetachedSessionWindow};
+pub use detached_session::{DetachedSessionContent, DetachedSessionTab, DetachedSessionWindow};
 pub use ftp_workspace::FtpWorkspace;
 pub use local_session::LocalSessionWorkspace;
 pub use root::RootView;

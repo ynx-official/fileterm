@@ -73,6 +73,7 @@ fn main() {
             )
             .expect("open FileTerm main window");
         let main_window_id = main_handle.window_id();
+        window_registry.register_handle("main", main_window_id);
         cx.on_window_closed(move |cx, window_id| {
             if window_id == main_window_id {
                 cx.quit();
