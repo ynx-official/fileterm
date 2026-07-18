@@ -1,8 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
 use gpui::{
-    div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, IntoElement, Render,
-    Subscription, Window,
+    div, prelude::*, px, App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyDownEvent,
+    Render, Subscription, Window,
 };
 
 use crate::{
@@ -19,6 +19,7 @@ pub struct RootView {
     focus: FocusHandle,
     sessions: HashMap<String, Entity<SessionWorkspace>>,
     pending_host_verification: Option<PendingHostVerification>,
+    pending_authentication: Option<PendingAuthentication>,
     _state_subscription: Subscription,
 }
 
@@ -30,6 +31,25 @@ struct PendingHostVerification {
     port: u16,
     fingerprint: String,
     changed: bool,
+    options: SshConnectOptions,
+}
+
+#[derive(Clone)]
+struct PendingAuthentication {
+    profile_id: String,
+    title: String,
+    prompts: Vec<crate::error::SshAuthenticationPrompt>,
+    answers: Vec<String>,
+    input: String,
+    options: SshConnectOptions,
+}
+
+impl Drop for PendingAuthentication {
+    fn drop(&mut self) {
+        self.input.clear();
+        self.answers.clear();
+        self.options.clear_transient_secrets();
+    }
 }
 
 impl RootView {
@@ -56,6 +76,7 @@ impl RootView {
             focus: cx.focus_handle(),
             sessions: HashMap::new(),
             pending_host_verification: None,
+            pending_authentication: None,
             _state_subscription: state_subscription,
         }
     }
@@ -126,6 +147,7 @@ impl RootView {
             state.open_session_tab(tab_id.clone(), title.clone())
         });
         let api = self.api.clone();
+        let retry_options = options.clone();
         cx.spawn(async move |this, cx| {
             let result = api.ssh_connect(&profile_id, 80, 24, options).await;
             let _ = this.update(cx, |root, cx| match result {
@@ -135,6 +157,7 @@ impl RootView {
                             tab_id.clone(),
                             session.controller,
                             session.output,
+                            session.transfer_journal_path,
                             root.state.clone(),
                             cx,
                         )
@@ -157,9 +180,39 @@ impl RootView {
                         port,
                         fingerprint,
                         changed,
+                        options: retry_options.clone(),
                     });
                     root.update_state(cx, |state| {
                         state.set_tab_status(&tab_id, TabStatus::Error);
+                        state.data_error = None;
+                    });
+                    cx.notify();
+                }
+                Err(crate::error::AppError::SshAuthenticationRequired { prompts }) => {
+                    let mut options = retry_options.clone();
+                    for prompt in &prompts {
+                        match prompt.kind {
+                            crate::error::SshAuthenticationPromptKind::Password => {
+                                options.transient_password = None;
+                            }
+                            crate::error::SshAuthenticationPromptKind::PrivateKeyPassphrase => {
+                                options.transient_passphrase = None;
+                            }
+                            crate::error::SshAuthenticationPromptKind::KeyboardInteractive => {
+                                options.keyboard_interactive_answers.clear();
+                            }
+                        }
+                    }
+                    root.pending_authentication = Some(PendingAuthentication {
+                        profile_id: profile_id.clone(),
+                        title: title.clone(),
+                        prompts,
+                        answers: Vec::new(),
+                        input: String::new(),
+                        options,
+                    });
+                    root.update_state(cx, |state| {
+                        state.set_tab_status(&tab_id, TabStatus::Connecting);
                         state.data_error = None;
                     });
                     cx.notify();
@@ -177,6 +230,20 @@ impl RootView {
 
     fn close_tab(&mut self, tab_id: &str, cx: &mut Context<Self>) {
         self.sessions.remove(tab_id);
+        if self
+            .pending_authentication
+            .as_ref()
+            .is_some_and(|pending| format!("ssh:{}", pending.profile_id) == tab_id)
+        {
+            self.pending_authentication = None;
+        }
+        if self
+            .pending_host_verification
+            .as_ref()
+            .is_some_and(|pending| format!("ssh:{}", pending.profile_id) == tab_id)
+        {
+            self.pending_host_verification = None;
+        }
         self.update_state(cx, |state| state.close_tab(tab_id));
     }
 
@@ -184,15 +251,10 @@ impl RootView {
         let Some(pending) = self.pending_host_verification.take() else {
             return;
         };
-        self.connect_ssh_profile(
-            pending.profile_id,
-            pending.title,
-            SshConnectOptions {
-                accepted_host_fingerprint: Some(pending.fingerprint),
-                save_host_fingerprint: save,
-            },
-            cx,
-        );
+        let mut options = pending.options;
+        options.accepted_host_fingerprint = Some(pending.fingerprint);
+        options.save_host_fingerprint = save;
+        self.connect_ssh_profile(pending.profile_id, pending.title, options, cx);
     }
 
     fn reject_host_key(&mut self, cx: &mut Context<Self>) {
@@ -200,6 +262,197 @@ impl RootView {
             self.close_tab(&format!("ssh:{}", pending.profile_id), cx);
         }
         cx.notify();
+    }
+
+    fn cancel_authentication(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.pending_authentication.take() {
+            self.close_tab(&format!("ssh:{}", pending.profile_id), cx);
+        }
+        cx.notify();
+    }
+
+    fn advance_authentication(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.pending_authentication.as_mut() else {
+            return;
+        };
+        pending.answers.push(std::mem::take(&mut pending.input));
+        if pending.answers.len() < pending.prompts.len() {
+            cx.notify();
+            return;
+        }
+
+        let mut pending = self
+            .pending_authentication
+            .take()
+            .expect("authentication pending");
+        let prompts = pending.prompts.clone();
+        let mut answers = std::mem::take(&mut pending.answers);
+        let mut options = std::mem::take(&mut pending.options);
+        for (prompt, answer) in prompts.iter().zip(answers.drain(..)) {
+            match prompt.kind {
+                crate::error::SshAuthenticationPromptKind::Password => {
+                    options.transient_password = Some(answer);
+                }
+                crate::error::SshAuthenticationPromptKind::PrivateKeyPassphrase => {
+                    options.transient_passphrase = Some(answer);
+                }
+                crate::error::SshAuthenticationPromptKind::KeyboardInteractive => {
+                    options.keyboard_interactive_answers.push(answer);
+                }
+            }
+        }
+        options.authentication_attempts = options.authentication_attempts.saturating_add(1);
+        let profile_id = std::mem::take(&mut pending.profile_id);
+        let title = std::mem::take(&mut pending.title);
+        self.connect_ssh_profile(profile_id, title, options, cx);
+    }
+
+    fn handle_authentication_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(pending) = self.pending_authentication.as_mut() else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => self.cancel_authentication(cx),
+            "enter" | "return" => self.advance_authentication(cx),
+            "backspace" => {
+                pending.input.pop();
+                cx.notify();
+            }
+            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
+                if let Some(text) = event.keystroke.key_char.as_deref() {
+                    pending.input.push_str(text);
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn render_authentication(
+        &self,
+        pending: &PendingAuthentication,
+        palette: ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let prompt_index = pending
+            .answers
+            .len()
+            .min(pending.prompts.len().saturating_sub(1));
+        let prompt = pending.prompts.get(prompt_index);
+        let value = match prompt {
+            Some(prompt) if prompt.echo => pending.input.clone(),
+            Some(_) => "•".repeat(pending.input.chars().count()),
+            None => String::new(),
+        };
+
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::black().opacity(0.65))
+            .child(
+                div()
+                    .w(px(480.0))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(palette.surface)
+                    .border_1()
+                    .border_color(palette.border_strong)
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(palette.text)
+                            .child("SSH 身份验证"),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(palette.text_muted)
+                            .child(format!(
+                                "步骤 {} / {} · 凭据仅用于本次连接",
+                                prompt_index + 1,
+                                pending.prompts.len()
+                            )),
+                    )
+                    .child(
+                        div().text_sm().text_color(palette.text).child(
+                            prompt
+                                .map(|prompt| prompt.label.clone())
+                                .unwrap_or_default(),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .h(px(40.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .bg(palette.background)
+                            .border_1()
+                            .border_color(palette.accent)
+                            .text_color(palette.text)
+                            .child(if value.is_empty() {
+                                "输入后按 Enter".to_string()
+                            } else {
+                                value
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("cancel-ssh-authentication")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .text_color(palette.text_muted)
+                                    .hover(move |style| style.bg(palette.surface_hover))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.cancel_authentication(cx)
+                                        }),
+                                    )
+                                    .child("取消"),
+                            )
+                            .child(
+                                div()
+                                    .id("submit-ssh-authentication")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(palette.accent)
+                                    .text_sm()
+                                    .text_color(palette.background)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| {
+                                            this.advance_authentication(cx)
+                                        }),
+                                    )
+                                    .child(if prompt_index + 1 == pending.prompts.len() {
+                                        "连接"
+                                    } else {
+                                        "下一步"
+                                    }),
+                            ),
+                    ),
+            )
     }
 
     fn render_host_verification(
@@ -913,12 +1166,14 @@ impl Render for RootView {
         let state = self.state.read(cx).clone();
         let active_session = self.sessions.get(&state.active_tab_id).cloned();
         let pending_host_verification = self.pending_host_verification.clone();
+        let pending_authentication = self.pending_authentication.clone();
         let palette = ThemePalette::for_mode(state.theme);
 
         div()
             .id("fileterm-root")
             .key_context("FileTerm")
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::handle_authentication_key))
             .on_action(cx.listener(Self::toggle_theme))
             .size_full()
             .relative()
@@ -947,6 +1202,9 @@ impl Render for RootView {
             )
             .when_some(pending_host_verification, |view, pending| {
                 view.child(self.render_host_verification(&pending, palette, cx))
+            })
+            .when_some(pending_authentication, |view, pending| {
+                view.child(self.render_authentication(&pending, palette, cx))
             })
     }
 }

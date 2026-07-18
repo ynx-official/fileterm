@@ -60,12 +60,24 @@ pub struct FileManager {
     pub sort: Option<(SortKey, SortDir)>,
     pub loading: bool,
     pub error: Option<String>,
+    /// Effective terminal identity reported by OSC 1337. SFTP remains bound
+    /// to the original SSH account, so terminal elevation is tracked
+    /// separately and never grants file operations implicitly.
+    pub terminal_user: Option<String>,
+    pub terminal_elevated: bool,
+    pub file_access_elevated: bool,
     last_anchor: Option<String>,
 }
 
 impl FileManager {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn update_terminal_identity(&mut self, user: Option<String>, elevated: bool) {
+        self.terminal_user = user;
+        self.terminal_elevated = elevated;
+        self.file_access_elevated = false;
     }
 
     /// Sort `entries` by the current sort key + direction. Called after
@@ -178,6 +190,15 @@ mod tests {
             owner: None,
             group: None,
         }
+    }
+
+    #[test]
+    fn terminal_root_does_not_implicitly_elevate_sftp() {
+        let mut fm = FileManager::new();
+        fm.update_terminal_identity(Some("root".into()), true);
+        assert_eq!(fm.terminal_user.as_deref(), Some("root"));
+        assert!(fm.terminal_elevated);
+        assert!(!fm.file_access_elevated);
     }
 
     #[test]

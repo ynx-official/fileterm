@@ -130,6 +130,10 @@ pub struct TermModel {
     /// "CWD 目录跟随" hard boundary: CWD must come from the session stream,
     /// not from UI-layer polling.
     pub cwd: Option<PathBuf>,
+    /// Effective user reported by the shell prompt hook. This tracks terminal
+    /// privilege transitions such as `sudo -s` without polling the remote OS.
+    pub remote_user: Option<String>,
+    pub terminal_elevated: bool,
 }
 
 /// A terminal session: a model paired with its own vte parser. The parser
@@ -198,6 +202,8 @@ impl TermModel {
             sgr_flags: CellFlags::empty(),
             dirty_rows: vec![true; rows],
             cwd: None,
+            remote_user: None,
+            terminal_elevated: false,
         }
     }
 
@@ -269,6 +275,18 @@ mod tests {
     /// Helper: read a cell from the session's underlying model.
     fn cell_at(s: &TermSession, row: usize, col: usize) -> Cell {
         s.model.grid[row][col]
+    }
+
+    #[test]
+    fn osc1337_updates_terminal_privilege_state() {
+        let mut session = session_of(20, 3);
+        session.feed(b"\x1b]1337;RemoteUser=root\x07");
+        assert_eq!(session.remote_user.as_deref(), Some("root"));
+        assert!(session.terminal_elevated);
+
+        session.feed(b"\x1b]1337;RemoteUser=deploy\x07");
+        assert_eq!(session.remote_user.as_deref(), Some("deploy"));
+        assert!(!session.terminal_elevated);
     }
 
     #[test]

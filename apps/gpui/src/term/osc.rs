@@ -87,6 +87,16 @@ pub fn parse_osc7_cwd(payload: &[u8]) -> Option<PathBuf> {
     Some(PathBuf::from(path_str))
 }
 
+pub fn parse_osc1337_remote_user(payload: &[u8]) -> Option<String> {
+    let value = payload.strip_prefix(b"RemoteUser=")?;
+    let user = std::str::from_utf8(value).ok()?.trim();
+    if user.is_empty() {
+        None
+    } else {
+        Some(user.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +166,20 @@ mod tests {
     fn invalid_utf8_rejected() {
         // 0xFF is not valid UTF-8 start byte.
         assert_eq!(parse_osc7_cwd(b"file://localhost/\xFF"), None);
+    }
+
+    #[test]
+    fn parses_remote_user_and_rejects_other_osc1337_payloads() {
+        assert_eq!(
+            parse_osc1337_remote_user(b"RemoteUser=root"),
+            Some("root".to_string())
+        );
+        assert_eq!(
+            parse_osc1337_remote_user("RemoteUser=运维".as_bytes()),
+            Some("运维".to_string())
+        );
+        assert_eq!(parse_osc1337_remote_user(b"RemoteUser="), None);
+        assert_eq!(parse_osc1337_remote_user(b"RemoteCwd=/tmp"), None);
     }
 
     #[test]

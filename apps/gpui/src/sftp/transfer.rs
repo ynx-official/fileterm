@@ -29,9 +29,16 @@
 //! cancels the in-flight I/O `CancellationToken` but keeps the partial
 //! file + journal entry so resume can pick up.
 
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+};
 
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{AppError, Result};
 
@@ -41,6 +48,87 @@ use crate::error::{AppError, Result};
 pub enum TransferDirection {
     Upload,
     Download,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferIoOutcome {
+    Completed,
+    Paused,
+    Canceled,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TransferProgress {
+    pub transferred_bytes: u64,
+    pub total_bytes: u64,
+}
+
+#[derive(Clone, Default)]
+pub struct TransferControl {
+    state: Arc<AtomicU8>,
+}
+
+impl TransferControl {
+    const RUNNING: u8 = 0;
+    const PAUSED: u8 = 1;
+    const CANCELED: u8 = 2;
+
+    pub fn pause(&self) {
+        self.state.store(Self::PAUSED, Ordering::Release);
+    }
+
+    pub fn cancel(&self) {
+        self.state.store(Self::CANCELED, Ordering::Release);
+    }
+
+    pub fn reset(&self) {
+        self.state.store(Self::RUNNING, Ordering::Release);
+    }
+
+    fn outcome(&self) -> Option<TransferIoOutcome> {
+        match self.state.load(Ordering::Acquire) {
+            Self::PAUSED => Some(TransferIoOutcome::Paused),
+            Self::CANCELED => Some(TransferIoOutcome::Canceled),
+            _ => None,
+        }
+    }
+}
+
+pub async fn copy_with_progress<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    initial_offset: u64,
+    total_bytes: u64,
+    control: &TransferControl,
+    progress: &tokio::sync::watch::Sender<TransferProgress>,
+) -> std::io::Result<TransferIoOutcome>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut transferred = initial_offset;
+    let _ = progress.send(TransferProgress {
+        transferred_bytes: transferred,
+        total_bytes,
+    });
+    let mut buffer = vec![0u8; 128 * 1024];
+    loop {
+        if let Some(outcome) = control.outcome() {
+            writer.flush().await?;
+            return Ok(outcome);
+        }
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            writer.flush().await?;
+            return Ok(TransferIoOutcome::Completed);
+        }
+        writer.write_all(&buffer[..read]).await?;
+        transferred = transferred.saturating_add(read as u64);
+        let _ = progress.send(TransferProgress {
+            transferred_bytes: transferred,
+            total_bytes,
+        });
+    }
 }
 
 /// Stable identifier for a transfer task. Same shape as Tauri (UUID v4
@@ -244,6 +332,100 @@ impl TransferService {
             .map_err(|error| AppError::Storage(format!("replace transfer journal: {error}")))
     }
 
+    pub fn prepare_running(
+        &mut self,
+        id: &str,
+        identity: TransferFileIdentity,
+        offset: u64,
+    ) -> Result<()> {
+        let task = self.task_mut(id)?;
+        if let Some(expected) = task.source_identity.as_ref() {
+            if expected.size != identity.size || expected.modified_at != identity.modified_at {
+                return Err(AppError::Command(
+                    "transfer source changed since the partial file was created".to_string(),
+                ));
+            }
+        } else {
+            task.source_identity = Some(identity.clone());
+        }
+        let total_bytes = identity.size;
+        if !matches!(
+            task.status,
+            TransferTaskStatus::Queued | TransferTaskStatus::Paused
+        ) {
+            return Err(AppError::Command(format!(
+                "transfer cannot start from {:?}",
+                task.status
+            )));
+        }
+        task.status = TransferTaskStatus::Running;
+        task.total_bytes = Some(total_bytes);
+        task.transferred_bytes = Some(offset);
+        task.progress = progress_ratio(offset, total_bytes);
+        task.message = None;
+        task.updated_at = Some(now_secs());
+        self.flush()
+    }
+
+    pub fn update_progress(&mut self, id: &str, progress: TransferProgress) -> Result<()> {
+        let task = self.task_mut(id)?;
+        if task.status != TransferTaskStatus::Running {
+            return Ok(());
+        }
+        let previous = task.transferred_bytes.unwrap_or(0);
+        task.transferred_bytes = Some(progress.transferred_bytes);
+        task.total_bytes = Some(progress.total_bytes);
+        task.progress = progress_ratio(progress.transferred_bytes, progress.total_bytes);
+        task.updated_at = Some(now_secs());
+        let crossed_checkpoint =
+            previous / (1024 * 1024) != progress.transferred_bytes / (1024 * 1024);
+        if crossed_checkpoint || progress.transferred_bytes >= progress.total_bytes {
+            self.flush()
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn finish_io(&mut self, id: &str, outcome: TransferIoOutcome) -> Result<()> {
+        let task = self.task_mut(id)?;
+        match outcome {
+            TransferIoOutcome::Completed => {
+                task.status = TransferTaskStatus::Finalizing;
+                task.message = Some("正在完成写入".to_string());
+            }
+            TransferIoOutcome::Paused => {
+                task.status = TransferTaskStatus::Paused;
+                task.message = Some("已暂停".to_string());
+            }
+            TransferIoOutcome::Canceled => {
+                task.status = TransferTaskStatus::Canceled;
+                task.message = Some("已取消".to_string());
+                task.cleanup_pending = false;
+            }
+        }
+        task.updated_at = Some(now_secs());
+        self.flush()
+    }
+
+    pub fn complete(&mut self, id: &str) -> Result<()> {
+        let task = self.task_mut(id)?;
+        task.status = TransferTaskStatus::Done;
+        task.progress = 1.0;
+        task.transferred_bytes = task.total_bytes;
+        task.message = None;
+        task.cleanup_pending = false;
+        task.updated_at = Some(now_secs());
+        self.flush()
+    }
+
+    pub fn fail(&mut self, id: &str, message: impl Into<String>) -> Result<()> {
+        let task = self.task_mut(id)?;
+        task.status = TransferTaskStatus::Failed;
+        task.message = Some(message.into());
+        task.updated_at = Some(now_secs());
+        self.flush()
+    }
+
     pub fn enqueue(
         &mut self,
         direction: TransferDirection,
@@ -395,6 +577,14 @@ impl TransferService {
     }
 }
 
+fn progress_ratio(transferred: u64, total: u64) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        (transferred as f64 / total as f64).clamp(0.0, 1.0)
+    }
+}
+
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -405,6 +595,56 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn copy_stream_reports_real_bytes_and_honors_cancel() {
+        let directory =
+            std::env::temp_dir().join(format!("fileterm-transfer-copy-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        let source_path = directory.join("source.bin");
+        let destination_path = directory.join("destination.bin");
+        let bytes = vec![0x5a; 300_000];
+        tokio::fs::write(&source_path, &bytes).await.unwrap();
+        let mut source = tokio::fs::File::open(&source_path).await.unwrap();
+        let mut destination = tokio::fs::File::create(&destination_path).await.unwrap();
+        let control = TransferControl::default();
+        let (progress_tx, progress_rx) = tokio::sync::watch::channel(TransferProgress {
+            transferred_bytes: 0,
+            total_bytes: bytes.len() as u64,
+        });
+
+        let outcome = copy_with_progress(
+            &mut source,
+            &mut destination,
+            0,
+            bytes.len() as u64,
+            &control,
+            &progress_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TransferIoOutcome::Completed);
+        assert_eq!(progress_rx.borrow().transferred_bytes, bytes.len() as u64);
+        assert_eq!(tokio::fs::read(&destination_path).await.unwrap(), bytes);
+
+        control.cancel();
+        let mut source = tokio::fs::File::open(&source_path).await.unwrap();
+        let canceled_path = directory.join("canceled.bin");
+        let mut destination = tokio::fs::File::create(&canceled_path).await.unwrap();
+        let outcome = copy_with_progress(
+            &mut source,
+            &mut destination,
+            0,
+            300_000,
+            &control,
+            &progress_tx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, TransferIoOutcome::Canceled);
+        assert_eq!(tokio::fs::metadata(canceled_path).await.unwrap().len(), 0);
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
 
     #[test]
     fn status_active_and_terminal_partitions() {
@@ -477,6 +717,41 @@ mod tests {
         );
         restored.discard(&id).unwrap();
         assert!(restored.list().is_empty());
+    }
+
+    #[test]
+    fn resume_rejects_a_changed_source_identity() {
+        let journal = temporary_journal();
+        let mut service = TransferService::new(journal);
+        let id = service
+            .enqueue(
+                TransferDirection::Upload,
+                "/local/path.txt",
+                "/remote/path.txt",
+                Some("tab-1"),
+            )
+            .unwrap();
+        service
+            .prepare_running(
+                &id,
+                TransferFileIdentity {
+                    size: 10,
+                    modified_at: Some(1),
+                },
+                0,
+            )
+            .unwrap();
+        service.pause(&id).unwrap();
+        service.resume(&id).unwrap();
+        let result = service.prepare_running(
+            &id,
+            TransferFileIdentity {
+                size: 11,
+                modified_at: Some(2),
+            },
+            5,
+        );
+        assert!(result.is_err());
     }
 
     #[test]

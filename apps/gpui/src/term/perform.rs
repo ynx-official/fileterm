@@ -171,10 +171,17 @@ impl<'a> Perform for TermPerform<'a> {
                     // "Robustness" section for rationale.
                 }
             }
-            "52" | "1337" => {
-                // OSC 52 (clipboard) / 1337 (RemoteUser/RemoteCwd) — spike
-                // explicitly defers these to G3 per G-1.8 step 1. Silently
-                // consume so they don't pollute the grid.
+            "52" => {
+                // Clipboard transport remains intentionally disabled until it
+                // can be gated by an explicit user action.
+            }
+            "1337" => {
+                if let Some(payload) = params.get(1) {
+                    if let Some(user) = crate::term::osc::parse_osc1337_remote_user(payload) {
+                        self.model.terminal_elevated = user == "root";
+                        self.model.remote_user = Some(user);
+                    }
+                }
             }
             _ => {
                 // Unknown OSC: drop. Common ones we ignore: 0 (title),

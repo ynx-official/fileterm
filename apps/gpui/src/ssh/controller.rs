@@ -19,16 +19,28 @@ const SHELL_CWD_SETUP: &str = "test -z \"${FISH_VERSION-}\" && eval '__tdcwd() {
 const BUSYBOX_SHELL_CWD_SETUP: &str = "__tdcwd(){ printf '\\033]7;file://%s\\007\\033]1337;RemoteUser=%s\\007' \"$(pwd -P 2>/dev/null)\" \"$(id -un 2>/dev/null)\";};PS1='$(__tdcwd)'\"${PS1-}\";__tdcwd;stty echo 2>/dev/null\n";
 
 #[derive(Debug, Clone)]
+pub struct PrivateKeyCredential {
+    pub private_key: String,
+    pub passphrase: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct SshConfig {
     pub host: String,
     pub port: u16,
     pub username: String,
     pub password: Option<String>,
-    pub private_key: Option<String>,
-    pub passphrase: Option<String>,
+    pub private_keys: Vec<PrivateKeyCredential>,
+    pub keyboard_interactive_answers: Vec<String>,
     pub trusted_host_fingerprint: Option<String>,
     pub cols: u16,
     pub rows: u16,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("SSH keyboard-interactive input required")]
+pub struct SshAuthenticationChallenge {
+    pub prompts: Vec<crate::error::SshAuthenticationPrompt>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -256,8 +268,8 @@ fn validate_config(config: &SshConfig) -> Result<()> {
     if config.username.trim().is_empty() {
         bail!("SSH username is required");
     }
-    if config.password.is_some() == config.private_key.is_some() {
-        bail!("configure exactly one SSH authentication method");
+    if config.password.is_none() && config.private_keys.is_empty() {
+        bail!("configure at least one SSH authentication method");
     }
     Ok(())
 }
@@ -266,47 +278,165 @@ async fn authenticate(
     handle: &mut russh::client::Handle<ClientHandler>,
     config: &SshConfig,
 ) -> Result<()> {
-    let authenticated = if let Some(password) = &config.password {
-        let none_accepted = timeout(
-            SSH_STAGE_TIMEOUT,
-            handle.authenticate_none(config.username.clone()),
-        )
-        .await
-        .context("SSH authentication negotiation timed out")?
-        .context("SSH authentication negotiation")?;
-        if none_accepted {
-            true
-        } else {
-            timeout(
-                SSH_STAGE_TIMEOUT,
-                handle.authenticate_password(config.username.clone(), password.clone()),
-            )
-            .await
-            .context("SSH password authentication timed out")?
-            .context("SSH password authentication")?
-        }
-    } else {
-        let private_key = russh_keys::decode_secret_key(
-            config
-                .private_key
-                .as_deref()
-                .context("SSH private key is missing")?,
-            config.passphrase.as_deref(),
-        )
-        .context("decode SSH private key")?;
-        timeout(
+    let none_accepted = timeout(
+        SSH_STAGE_TIMEOUT,
+        handle.authenticate_none(config.username.clone()),
+    )
+    .await
+    .context("SSH authentication negotiation timed out")?
+    .context("SSH authentication negotiation")?;
+    if none_accepted {
+        return Ok(());
+    }
+
+    let mut key_decode_errors = Vec::new();
+    for credential in &config.private_keys {
+        let private_key = match russh_keys::decode_secret_key(
+            &credential.private_key,
+            credential.passphrase.as_deref(),
+        ) {
+            Ok(private_key) => private_key,
+            Err(error) => {
+                key_decode_errors.push(error.to_string());
+                continue;
+            }
+        };
+        let accepted = timeout(
             SSH_STAGE_TIMEOUT,
             handle.authenticate_publickey(config.username.clone(), Arc::new(private_key)),
         )
         .await
         .context("SSH public-key authentication timed out")?
-        .context("SSH public-key authentication")?
-    };
-
-    if !authenticated {
-        bail!("SSH authentication rejected");
+        .context("SSH public-key authentication")?;
+        if accepted {
+            return Ok(());
+        }
     }
-    Ok(())
+
+    if let Some(password) = config.password.as_deref() {
+        let accepted = timeout(
+            SSH_STAGE_TIMEOUT,
+            handle.authenticate_password(config.username.clone(), password),
+        )
+        .await
+        .context("SSH password authentication timed out")?
+        .context("SSH password authentication")?;
+        if accepted {
+            return Ok(());
+        }
+    }
+
+    if try_keyboard_interactive(
+        handle,
+        &config.username,
+        config.password.as_deref().unwrap_or_default(),
+        &config.keyboard_interactive_answers,
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
+    if config.password.is_none() && !key_decode_errors.is_empty() {
+        bail!(
+            "could not decode any SSH private key: {}",
+            key_decode_errors.join("; ")
+        );
+    }
+    bail!("SSH authentication rejected")
+}
+
+async fn try_keyboard_interactive(
+    handle: &mut russh::client::Handle<ClientHandler>,
+    username: &str,
+    password: &str,
+    supplied_answers: &[String],
+) -> Result<bool> {
+    use russh::client::KeyboardInteractiveAuthResponse;
+
+    let mut response = timeout(
+        SSH_STAGE_TIMEOUT,
+        handle.authenticate_keyboard_interactive_start(username, None),
+    )
+    .await
+    .context("SSH keyboard-interactive authentication timed out")?
+    .context("start SSH keyboard-interactive authentication")?;
+    let mut supplied_answers = supplied_answers.iter();
+    let mut password_used = false;
+    let mut last_prompts = Vec::new();
+
+    for _ in 0..16 {
+        match response {
+            KeyboardInteractiveAuthResponse::Success => return Ok(true),
+            KeyboardInteractiveAuthResponse::Failure => {
+                if last_prompts.is_empty() {
+                    return Ok(false);
+                }
+                return Err(anyhow::Error::new(SshAuthenticationChallenge {
+                    prompts: last_prompts,
+                }));
+            }
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                last_prompts = prompts
+                    .iter()
+                    .map(|prompt| crate::error::SshAuthenticationPrompt {
+                        kind: crate::error::SshAuthenticationPromptKind::KeyboardInteractive,
+                        label: prompt.prompt.clone(),
+                        echo: prompt.echo,
+                    })
+                    .collect();
+                let mut answers = Vec::with_capacity(prompts.len());
+                let mut missing = Vec::new();
+                for prompt in prompts {
+                    if !password_used && !password.is_empty() && is_password_prompt(&prompt.prompt)
+                    {
+                        answers.push(password.to_string());
+                        password_used = true;
+                    } else if let Some(answer) = supplied_answers.next() {
+                        answers.push(answer.clone());
+                    } else {
+                        missing.push(crate::error::SshAuthenticationPrompt {
+                            kind: crate::error::SshAuthenticationPromptKind::KeyboardInteractive,
+                            label: prompt.prompt,
+                            echo: prompt.echo,
+                        });
+                    }
+                }
+                if !missing.is_empty() {
+                    return Err(anyhow::Error::new(SshAuthenticationChallenge {
+                        prompts: missing,
+                    }));
+                }
+                response = timeout(
+                    SSH_STAGE_TIMEOUT,
+                    handle.authenticate_keyboard_interactive_respond(answers),
+                )
+                .await
+                .context("SSH keyboard-interactive response timed out")?
+                .context("respond to SSH keyboard-interactive authentication")?;
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn is_password_prompt(prompt: &str) -> bool {
+    let normalized = prompt.to_ascii_lowercase();
+    ![
+        "code",
+        "otp",
+        "mfa",
+        "2fa",
+        "factor",
+        "duo",
+        "verification",
+        "token",
+        "验证码",
+        "动态码",
+    ]
+    .iter()
+    .any(|marker| normalized.contains(marker))
+        && (normalized.contains("password") || normalized.contains("密码"))
 }
 
 async fn detect_remote_platform(handle: &russh::client::Handle<ClientHandler>) -> String {
@@ -397,8 +527,8 @@ mod tests {
             port: 22,
             username: "user".into(),
             password: Some("pass".into()),
-            private_key: None,
-            passphrase: None,
+            private_keys: Vec::new(),
+            keyboard_interactive_answers: Vec::new(),
             trusted_host_fingerprint: None,
             cols: 80,
             rows: 24,
@@ -406,13 +536,26 @@ mod tests {
     }
 
     #[test]
-    fn config_requires_exactly_one_authentication_method() {
+    fn config_requires_at_least_one_authentication_method() {
         assert!(validate_config(&config()).is_ok());
-        let mut invalid = config();
-        invalid.private_key = Some("key".into());
-        assert!(validate_config(&invalid).is_err());
-        invalid.password = None;
-        assert!(validate_config(&invalid).is_ok());
+        let mut fallback = config();
+        fallback.private_keys.push(PrivateKeyCredential {
+            private_key: "key".into(),
+            passphrase: None,
+        });
+        assert!(validate_config(&fallback).is_ok());
+        fallback.password = None;
+        assert!(validate_config(&fallback).is_ok());
+        fallback.private_keys.clear();
+        assert!(validate_config(&fallback).is_err());
+    }
+
+    #[test]
+    fn password_prompt_detection_rejects_mfa_prompts() {
+        assert!(is_password_prompt("Password:"));
+        assert!(is_password_prompt("请输入密码"));
+        assert!(!is_password_prompt("Verification code:"));
+        assert!(!is_password_prompt("Duo MFA token:"));
     }
 
     #[test]

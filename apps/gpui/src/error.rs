@@ -48,8 +48,27 @@ pub enum AppError {
         changed: bool,
     },
 
+    #[error("SSH authentication input required")]
+    SshAuthenticationRequired {
+        prompts: Vec<SshAuthenticationPrompt>,
+    },
+
     #[error("command error: {0}")]
     Command(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SshAuthenticationPromptKind {
+    Password,
+    PrivateKeyPassphrase,
+    KeyboardInteractive,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SshAuthenticationPrompt {
+    pub kind: SshAuthenticationPromptKind,
+    pub label: String,
+    pub echo: bool,
 }
 
 /// Convenience alias so bridge signatures read as `Result<T>`.

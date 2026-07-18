@@ -44,15 +44,49 @@ pub use app_handle::AppHandle;
 
 use crate::{error::Result, ssh::SshController, term::TermChunk};
 
+const MAX_SSH_AUTHENTICATION_ATTEMPTS: u8 = 3;
+
+fn authentication_challenge(
+    prompts: Vec<crate::error::SshAuthenticationPrompt>,
+    attempts: u8,
+) -> crate::error::AppError {
+    if attempts >= MAX_SSH_AUTHENTICATION_ATTEMPTS {
+        crate::error::AppError::Command(format!(
+            "SSH authentication failed after {MAX_SSH_AUTHENTICATION_ATTEMPTS} attempts"
+        ))
+    } else {
+        crate::error::AppError::SshAuthenticationRequired { prompts }
+    }
+}
+
 pub struct ConnectedSshSession {
     pub controller: Arc<SshController>,
     pub output: tokio::sync::broadcast::Receiver<TermChunk>,
+    pub transfer_journal_path: std::path::PathBuf,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SshConnectOptions {
     pub accepted_host_fingerprint: Option<String>,
     pub save_host_fingerprint: bool,
+    pub transient_password: Option<String>,
+    pub transient_passphrase: Option<String>,
+    pub keyboard_interactive_answers: Vec<String>,
+    pub authentication_attempts: u8,
+}
+
+impl SshConnectOptions {
+    pub(crate) fn clear_transient_secrets(&mut self) {
+        self.transient_password = None;
+        self.transient_passphrase = None;
+        self.keyboard_interactive_answers.clear();
+    }
+}
+
+impl Drop for SshConnectOptions {
+    fn drop(&mut self) {
+        self.clear_transient_secrets();
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -176,7 +210,37 @@ impl FileTermDesktopApi for GpuiDesktopApi {
         rows: u16,
         options: SshConnectOptions,
     ) -> Result<ConnectedSshSession> {
-        let profile = crate::services::profile_ops::read_connection_profile(&self.app, profile_id)?;
+        let mut profile =
+            crate::services::profile_ops::read_connection_profile(&self.app, profile_id)?;
+        let auth_type = profile
+            .get("authType")
+            .and_then(Value::as_str)
+            .unwrap_or("password")
+            .to_string();
+        if matches!(auth_type.as_str(), "password" | "keyboard-interactive")
+            && profile
+                .get("password")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            && options.transient_password.is_none()
+        {
+            return Err(authentication_challenge(
+                vec![crate::error::SshAuthenticationPrompt {
+                    kind: crate::error::SshAuthenticationPromptKind::Password,
+                    label: "Password".to_string(),
+                    echo: false,
+                }],
+                options.authentication_attempts,
+            ));
+        }
+        if let Some(object) = profile.as_object_mut() {
+            if let Some(password) = options.transient_password.as_ref() {
+                object.insert("password".to_string(), Value::String(password.clone()));
+            }
+            if let Some(passphrase) = options.transient_passphrase.as_ref() {
+                object.insert("passphrase".to_string(), Value::String(passphrase.clone()));
+            }
+        }
         let host = profile
             .get("host")
             .and_then(Value::as_str)
@@ -188,14 +252,39 @@ impl FileTermDesktopApi for GpuiDesktopApi {
             .and_then(Value::as_str)
             .is_some();
         let mut config =
-            crate::services::ssh_profile::ssh_config_from_profile(&profile, cols, rows)
+            crate::services::ssh_profile::ssh_config_from_profile(&self.app, &profile, cols, rows)
                 .map_err(|error| crate::error::AppError::Command(error.to_string()))?;
+        if auth_type == "privateKey"
+            && config.private_keys.iter().any(|credential| {
+                credential.passphrase.is_none()
+                    && russh_keys::decode_secret_key(&credential.private_key, None).is_err()
+            })
+            && options.transient_passphrase.is_none()
+        {
+            return Err(authentication_challenge(
+                vec![crate::error::SshAuthenticationPrompt {
+                    kind: crate::error::SshAuthenticationPromptKind::PrivateKeyPassphrase,
+                    label: "Private key passphrase".to_string(),
+                    echo: false,
+                }],
+                options.authentication_attempts,
+            ));
+        }
+        config.keyboard_interactive_answers = options.keyboard_interactive_answers.clone();
         if let Some(fingerprint) = options.accepted_host_fingerprint.as_ref() {
             config.trusted_host_fingerprint = Some(fingerprint.clone());
         }
         let (controller, output) = match SshController::connect(config).await {
             Ok(session) => session,
             Err(error) => {
+                if let Some(challenge) =
+                    error.downcast_ref::<crate::ssh::controller::SshAuthenticationChallenge>()
+                {
+                    return Err(authentication_challenge(
+                        challenge.prompts.clone(),
+                        options.authentication_attempts,
+                    ));
+                }
                 let message = error.to_string();
                 if let Some(fingerprint) = message
                     .rsplit_once("server fingerprint: ")
@@ -223,6 +312,7 @@ impl FileTermDesktopApi for GpuiDesktopApi {
         Ok(ConnectedSshSession {
             controller: Arc::new(controller),
             output,
+            transfer_journal_path: self.app.app_data_dir().join("transfer-journal.json"),
         })
     }
 

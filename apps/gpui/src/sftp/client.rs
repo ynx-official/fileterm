@@ -1,10 +1,17 @@
-use std::sync::Arc;
+use std::{io::SeekFrom, path::Path, sync::Arc};
 
-use anyhow::{Context, Result};
-use russh_sftp::{client::SftpSession, protocol::FileAttributes};
+use anyhow::{bail, Context, Result};
+use russh_sftp::{
+    client::SftpSession,
+    protocol::{FileAttributes, OpenFlags},
+};
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 
-use crate::ssh::SshController;
+use crate::{
+    sftp::transfer::{copy_with_progress, TransferControl, TransferIoOutcome, TransferProgress},
+    ssh::SshController,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteFileEntry {
@@ -136,6 +143,193 @@ impl SftpClient {
             .with_context(|| format!("change remote permissions {path}"))
     }
 
+    pub async fn upload_file(
+        &self,
+        local_path: &Path,
+        remote_partial_path: &str,
+        control: &TransferControl,
+        progress: &tokio::sync::watch::Sender<TransferProgress>,
+    ) -> Result<TransferIoOutcome> {
+        let mut source = tokio::fs::File::open(local_path)
+            .await
+            .with_context(|| format!("open local upload source {}", local_path.display()))?;
+        let total = source
+            .metadata()
+            .await
+            .with_context(|| format!("stat local upload source {}", local_path.display()))?
+            .len();
+        let offset = match self.session.metadata(remote_partial_path).await {
+            Ok(metadata) => metadata.size.unwrap_or(0),
+            Err(_) => 0,
+        };
+        if offset > total {
+            bail!("remote partial file is larger than local source: {offset} > {total}");
+        }
+        source.seek(SeekFrom::Start(offset)).await?;
+        let flags = if offset == 0 {
+            OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::WRITE
+        } else {
+            OpenFlags::CREATE | OpenFlags::WRITE
+        };
+        let mut destination = self
+            .session
+            .open_with_flags(remote_partial_path, flags)
+            .await
+            .with_context(|| format!("open remote upload partial {remote_partial_path}"))?;
+        destination.seek(SeekFrom::Start(offset)).await?;
+        let outcome = copy_with_progress(
+            &mut source,
+            &mut destination,
+            offset,
+            total,
+            control,
+            progress,
+        )
+        .await
+        .context("stream upload bytes")?;
+        destination.shutdown().await?;
+        Ok(outcome)
+    }
+
+    pub async fn finalize_upload(
+        &self,
+        remote_partial_path: &str,
+        destination_path: &str,
+        overwrite: bool,
+    ) -> Result<()> {
+        if self.session.try_exists(destination_path).await? {
+            if !overwrite {
+                bail!("remote destination already exists: {destination_path}");
+            }
+            self.session
+                .remove_file(destination_path)
+                .await
+                .with_context(|| format!("replace remote destination {destination_path}"))?;
+        }
+        self.session
+            .rename(remote_partial_path, destination_path)
+            .await
+            .with_context(|| {
+                format!("finalize remote upload {remote_partial_path} to {destination_path}")
+            })
+    }
+
+    pub async fn download_file(
+        &self,
+        remote_path: &str,
+        local_partial_path: &Path,
+        control: &TransferControl,
+        progress: &tokio::sync::watch::Sender<TransferProgress>,
+    ) -> Result<TransferIoOutcome> {
+        let mut source = self
+            .session
+            .open(remote_path)
+            .await
+            .with_context(|| format!("open remote download source {remote_path}"))?;
+        let total = source.metadata().await?.size.unwrap_or(0);
+        let offset = match tokio::fs::metadata(local_partial_path).await {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error).context("stat local download partial"),
+        };
+        if offset > total {
+            bail!("local partial file is larger than remote source: {offset} > {total}");
+        }
+        source.seek(SeekFrom::Start(offset)).await?;
+        if let Some(parent) = local_partial_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("create local download directory {}", parent.display()))?;
+        }
+        let mut destination = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(offset == 0)
+            .open(local_partial_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "open local download partial {}",
+                    local_partial_path.display()
+                )
+            })?;
+        destination.seek(SeekFrom::Start(offset)).await?;
+        let outcome = copy_with_progress(
+            &mut source,
+            &mut destination,
+            offset,
+            total,
+            control,
+            progress,
+        )
+        .await
+        .context("stream download bytes")?;
+        destination.shutdown().await?;
+        Ok(outcome)
+    }
+
+    pub async fn finalize_download(
+        &self,
+        local_partial_path: &Path,
+        destination_path: &Path,
+        overwrite: bool,
+    ) -> Result<()> {
+        if tokio::fs::try_exists(destination_path).await? {
+            if !overwrite {
+                bail!(
+                    "local destination already exists: {}",
+                    destination_path.display()
+                );
+            }
+            tokio::fs::remove_file(destination_path)
+                .await
+                .with_context(|| {
+                    format!("replace local destination {}", destination_path.display())
+                })?;
+        }
+        tokio::fs::rename(local_partial_path, destination_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "finalize local download {} to {}",
+                    local_partial_path.display(),
+                    destination_path.display()
+                )
+            })
+    }
+
+    pub async fn remove_file_if_exists(&self, path: &str) -> Result<()> {
+        if self.session.try_exists(path).await? {
+            self.session
+                .remove_file(path)
+                .await
+                .with_context(|| format!("remove remote partial file {path}"))?;
+        }
+        Ok(())
+    }
+
+    pub async fn remote_file_size_if_exists(&self, path: &str) -> Result<u64> {
+        if !self.session.try_exists(path).await? {
+            return Ok(0);
+        }
+        Ok(self.session.metadata(path).await?.size.unwrap_or(0))
+    }
+
+    pub async fn remote_file_identity(
+        &self,
+        path: &str,
+    ) -> Result<crate::sftp::transfer::TransferFileIdentity> {
+        let metadata = self
+            .session
+            .metadata(path)
+            .await
+            .with_context(|| format!("stat remote transfer source {path}"))?;
+        Ok(crate::sftp::transfer::TransferFileIdentity {
+            size: metadata.size.unwrap_or(0),
+            modified_at: metadata.mtime.map(u64::from),
+        })
+    }
+
     pub fn cwd(&self) -> String {
         self.cwd.read().clone()
     }
@@ -195,8 +389,6 @@ fn parent_remote_path(path: &str) -> String {
         Some((parent, _)) => parent.to_string(),
     }
 }
-
-use tokio::io::AsyncWriteExt;
 
 #[cfg(test)]
 mod tests {
