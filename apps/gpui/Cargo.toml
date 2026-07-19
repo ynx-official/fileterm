@@ -1,6 +1,6 @@
 [package]
 name = "fileterm-gpui"
-version = "0.1.0"
+version = "2.0.2"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -91,6 +91,7 @@ arboard = "3.6.1"
 open = "5.4.0"
 url = "2.5.8"
 tray-icon = "0.24.0"
+zeroize = "1.9.0"
 
 [[example]]
 name = "term_spike"
@@ -103,3 +104,6 @@ path = "examples/term_bench.rs"
 [[example]]
 name = "term_pty"
 path = "examples/term_pty.rs"
+
+[build-dependencies]
+winresource = "0.1.31"

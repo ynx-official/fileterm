@@ -1,9 +1,10 @@
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Debug)]
+#[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalFileItem {
     pub path: String,
@@ -15,11 +16,19 @@ pub struct LocalFileItem {
     pub owner_group: String,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Clone, Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectorySnapshot {
     pub path: String,
     pub items: Vec<LocalFileItem>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalTextFile {
+    pub content: String,
+    pub size: u64,
+    pub modified_nanos: u128,
+    pub sha256: String,
 }
 
 #[derive(Clone, Copy, Deserialize, Debug, PartialEq, Eq)]
@@ -246,6 +255,102 @@ pub fn app_read_local_file(
         format!("read file bytes={} encoding={enc}", bytes.len()),
     );
     Ok(decode_bytes(&bytes, &enc))
+}
+
+pub fn app_read_local_text_file(
+    file_path: &str,
+    max_bytes: u64,
+) -> Result<LocalTextFile, AppError> {
+    let path = Path::new(file_path);
+    let metadata = fs::metadata(path).map_err(|error| AppError::Storage(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(AppError::Storage("目标不是普通文件".to_string()));
+    }
+    if metadata.len() > max_bytes {
+        return Err(AppError::Storage(format!(
+            "文件超过编辑器上限 {max_bytes} 字节"
+        )));
+    }
+    let bytes = fs::read(path).map_err(|error| AppError::Storage(error.to_string()))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(AppError::Storage(format!(
+            "文件超过编辑器上限 {max_bytes} 字节"
+        )));
+    }
+    let content = String::from_utf8(bytes.clone())
+        .map_err(|_| AppError::Storage("文件不是 UTF-8 文本".to_string()))?;
+    Ok(LocalTextFile {
+        content,
+        size: metadata.len(),
+        modified_nanos: modified_nanos(&metadata),
+        sha256: sha256_hex(&bytes),
+    })
+}
+
+pub fn app_write_local_text_file_if_unchanged(
+    file_path: &str,
+    expected_size: u64,
+    expected_modified_nanos: u128,
+    expected_sha256: &str,
+    content: &str,
+    max_bytes: u64,
+) -> Result<LocalTextFile, AppError> {
+    if content.len() as u64 > max_bytes {
+        return Err(AppError::Storage(format!(
+            "文件超过编辑器上限 {max_bytes} 字节"
+        )));
+    }
+    let current = app_read_local_text_file(file_path, max_bytes)?;
+    if current.size != expected_size
+        || current.modified_nanos != expected_modified_nanos
+        || current.sha256 != expected_sha256
+    {
+        return Err(AppError::Storage(
+            "本地文件已被其他进程修改，请重新打开".to_string(),
+        ));
+    }
+
+    let path = Path::new(file_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Storage("文件没有父目录".to_string()))?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| AppError::Storage("文件名无效".to_string()))?;
+    let temporary = parent.join(format!(
+        ".{}.fileterm-edit-{}.tmp",
+        file_name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+    fs::write(&temporary, content.as_bytes())
+        .map_err(|error| AppError::Storage(error.to_string()))?;
+    if let Err(error) = fs::set_permissions(
+        &temporary,
+        fs::metadata(path)
+            .map_err(|e| AppError::Storage(e.to_string()))?
+            .permissions(),
+    ) {
+        let _ = fs::remove_file(&temporary);
+        return Err(AppError::Storage(error.to_string()));
+    }
+    if let Err(error) = crate::backend::storage::replace_file_atomically(&temporary, path) {
+        let _ = fs::remove_file(temporary);
+        return Err(error);
+    }
+    app_read_local_text_file(file_path, max_bytes)
+}
+
+fn modified_nanos(metadata: &fs::Metadata) -> u128 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 pub fn app_write_local_file(
@@ -527,7 +632,10 @@ fn encode_text(text: &str, encoding: &str) -> Vec<u8> {
 mod permission_tests {
     #[cfg(unix)]
     use super::app_change_local_permissions;
-    use super::{LocalFileItem, PermissionApplyTarget, PermissionChangeOptions};
+    use super::{
+        app_read_local_text_file, app_write_local_text_file_if_unchanged, LocalFileItem,
+        PermissionApplyTarget, PermissionChangeOptions,
+    };
 
     #[test]
     fn local_file_items_serialize_with_core_camel_case_fields() {
@@ -543,6 +651,41 @@ mod permission_tests {
         let value = serde_json::to_value(item).unwrap();
         assert_eq!(value["ownerGroup"], "user:staff");
         assert!(value.get("owner_group").is_none());
+    }
+
+    #[test]
+    fn local_text_save_is_atomic_and_rejects_stale_revision() {
+        let root =
+            std::env::temp_dir().join(format!("fileterm-local-editor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.txt");
+        std::fs::write(&path, "first").unwrap();
+        let path_text = path.to_string_lossy().into_owned();
+
+        let first = app_read_local_text_file(&path_text, 1024).unwrap();
+        let saved = app_write_local_text_file_if_unchanged(
+            &path_text,
+            first.size,
+            first.modified_nanos,
+            &first.sha256,
+            "second",
+            1024,
+        )
+        .unwrap();
+        assert_eq!(saved.content, "second");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+
+        let stale = app_write_local_text_file_if_unchanged(
+            &path_text,
+            first.size,
+            first.modified_nanos,
+            &first.sha256,
+            "third",
+            1024,
+        );
+        assert!(stale.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

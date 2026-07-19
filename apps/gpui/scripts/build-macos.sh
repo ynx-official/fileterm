@@ -1,49 +1,33 @@
 #!/usr/bin/env bash
-# FileTerm GPUI — macOS release packaging skeleton.
+# Build a native FileTerm macOS application bundle and DMG.
 #
-# G5 phase of `docs/plans/active/gpui-refactor.md` section 6.6.
-#
-# Produces `dist/FileTerm-GPUI-{version}-macos.dmg` from a clean
-# `cargo build --release`. Mirrors the layout Tauri's macOS bundler
-# would produce (FileTerm.app bundle with Contents/{MacOS,Resources,
-# Info.plist}) so users can drag-drop install identically.
-#
-# ## Toolchain requirements (host: macOS)
-#
-# * Rust stable (rustup toolchain)
-# * Xcode command-line tools (`xcode-select --install`) for `codesign`
-#   and `hdiutil`
-# * `create-dmg` from Homebrew for the DMG layout (`brew install create-dmg`)
-#
-# ## What's a skeleton
-#
-# G5 ships the structure; code signing with a Developer ID certificate
-# + notarization (`xcrun notarytool submit`) are gated behind env vars
-# (`FILETERM_SIGN_IDENTITY`, `FILETERM_NOTARY_PROFILE`) and skip
-# silently when unset. When the release pipeline lands for real, the
-# CI job will set those vars and the script will produce a signed +
-# notarized DMG.
+# Required: Rust stable, Xcode command-line tools, and the checked-in icon.
+# Developer ID signing and notarization are enabled through
+# FILETERM_SIGN_IDENTITY and FILETERM_NOTARY_PROFILE respectively.
 
 set -euo pipefail
 
-# Resolve repo root from script location.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "[build-macos] FATAL: this package must be built on macOS" >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-# Configuration.
-VERSION="${FILETERM_VERSION:-0.1.0}"
+VERSION="${FILETERM_VERSION:-$(node -p "require('./package.json').version")}"
 APP_NAME="FileTerm"
 APP_BUNDLE="${APP_NAME}.app"
 APP_BINARY="fileterm-gpui"
 DIST_DIR="$REPO_ROOT/dist"
 STAGE_DIR="$DIST_DIR/stage-macos"
 APP_DIR="$STAGE_DIR/$APP_BUNDLE"
-DMG_OUTPUT="$DIST_DIR/${APP_NAME}-GPUI-${VERSION}-macos.dmg"
+DMG_OUTPUT="$DIST_DIR/${APP_NAME}-${VERSION}-macos.dmg"
 
 echo "[build-macos] version=$VERSION  binary=$APP_BINARY"
 
-# Step 1: clean cargo release build.
+# Step 1: cargo release build.
 echo "[build-macos] cargo build --release -p fileterm-gpui"
 cargo build --release -p fileterm-gpui
 
@@ -61,36 +45,28 @@ mkdir -p "$APP_DIR/Contents/Resources"
 
 cp "$BINARY_PATH" "$APP_DIR/Contents/MacOS/$APP_BINARY"
 
-# Copy Info.plist from cargo's OUT_DIR. build.rs writes it there; we
-# find it by walking target/release/build/fileterm-gpui-*/out/Info.plist.
-PLIST_SRC="$(find "$REPO_ROOT/target/release/build" -path '*/out/Info.plist' | head -n1 || true)"
+# Copy the metadata generated for this exact release build.
+PLIST_SRC=""
+for candidate in "$REPO_ROOT"/target/release/build/fileterm-gpui-*/out/Info.plist; do
+  if [[ -f "$candidate" && ( -z "$PLIST_SRC" || "$candidate" -nt "$PLIST_SRC" ) ]]; then
+    PLIST_SRC="$candidate"
+  fi
+done
 if [[ -z "$PLIST_SRC" ]]; then
-  echo "[build-macos] WARN: Info.plist not found in OUT_DIR; writing minimal fallback" >&2
-  cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0"><dict>
-  <key>CFBundleName</key><string>FileTerm</string>
-  <key>CFBundleIdentifier</key><string>dev.fileterm.gpui</string>
-  <key>CFBundleExecutable</key><string>fileterm-gpui</string>
-  <key>CFBundleVersion</key><string>0.1.0</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-</dict></plist>
-PLIST
-else
-  cp "$PLIST_SRC" "$APP_DIR/Contents/Info.plist"
+  echo "[build-macos] FATAL: generated Info.plist not found" >&2
+  exit 1
 fi
+cp "$PLIST_SRC" "$APP_DIR/Contents/Info.plist"
 
-# Step 3: copy icon assets if present (G5 skeleton: assets may not ship yet).
 ICNS_SRC="$REPO_ROOT/apps/gpui/assets/icons/icon.icns"
-if [[ -f "$ICNS_SRC" ]]; then
-  cp "$ICNS_SRC" "$APP_DIR/Contents/Resources/icon.icns"
-  # Reference the icon in Info.plist (CFBundleIconFile key).
-  /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string icon.icns" \
-    "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
-else
-  echo "[build-macos] WARN: icon.icns missing; bundle will have no app icon" >&2
+if [[ ! -f "$ICNS_SRC" ]]; then
+  echo "[build-macos] FATAL: $ICNS_SRC is required" >&2
+  exit 1
 fi
+cp "$ICNS_SRC" "$APP_DIR/Contents/Resources/icon.icns"
+plutil -lint "$APP_DIR/Contents/Info.plist"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_DIR/Contents/Info.plist")" == "com.fileterm.desktop" ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_DIR/Contents/Info.plist")" == "$VERSION" ]]
 
 # Step 4: code signing (optional — gated by FILETERM_SIGN_IDENTITY).
 if [[ -n "${FILETERM_SIGN_IDENTITY:-}" ]]; then
@@ -108,7 +84,7 @@ echo "[build-macos] creating $DMG_OUTPUT"
 rm -f "$DMG_OUTPUT"
 if command -v create-dmg >/dev/null 2>&1; then
   create-dmg \
-    --volname "$APP_NAME GPUI $VERSION" \
+    --volname "$APP_NAME $VERSION" \
     --window-pos 200 120 \
     --window-size 600 400 \
     --icon-size 100 \
@@ -119,7 +95,7 @@ if command -v create-dmg >/dev/null 2>&1; then
     "$STAGE_DIR"
 else
   # Fallback: bare hdiutil DMG (no pretty layout).
-  hdiutil create -volname "$APP_NAME GPUI $VERSION" \
+  hdiutil create -volname "$APP_NAME $VERSION" \
     -srcfolder "$STAGE_DIR" -ov -format UDZO \
     "$DMG_OUTPUT"
 fi

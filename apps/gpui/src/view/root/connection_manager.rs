@@ -21,6 +21,10 @@ pub(super) struct PendingConnectionEditor {
     security_mode: String,
     device_path: String,
     baud_rate: String,
+    data_bits: String,
+    stop_bits: String,
+    parity: String,
+    flow_control: String,
     active_field: usize,
     busy: bool,
     error: Option<String>,
@@ -45,6 +49,10 @@ impl PendingConnectionEditor {
             security_mode: "none".to_string(),
             device_path: String::new(),
             baud_rate: "115200".to_string(),
+            data_bits: "8".to_string(),
+            stop_bits: "1".to_string(),
+            parity: "none".to_string(),
+            flow_control: "none".to_string(),
             active_field: 0,
             busy: false,
             error: None,
@@ -77,12 +85,24 @@ impl PendingConnectionEditor {
             .and_then(Value::as_u64)
             .unwrap_or(115_200)
             .to_string();
+        editor.data_bits = profile
+            .get("dataBits")
+            .and_then(Value::as_u64)
+            .unwrap_or(8)
+            .to_string();
+        editor.stop_bits = profile
+            .get("stopBits")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .to_string();
+        editor.parity = text(profile, "parity", "none");
+        editor.flow_control = text(profile, "flowControl", "none");
         editor
     }
 
     fn field_count(&self) -> usize {
         match self.protocol.as_str() {
-            "serial" => 4,
+            "serial" => 8,
             "ssh" if self.auth_type == "privateKey" => 9,
             _ => 7,
         }
@@ -94,6 +114,10 @@ impl PendingConnectionEditor {
                 0 => &mut self.name,
                 1 => &mut self.device_path,
                 2 => &mut self.baud_rate,
+                3 => &mut self.data_bits,
+                4 => &mut self.stop_bits,
+                5 => &mut self.parity,
+                6 => &mut self.flow_control,
                 _ => &mut self.group,
             },
             "ssh" if self.auth_type == "privateKey" => match self.active_field {
@@ -130,12 +154,30 @@ impl PendingConnectionEditor {
                 .baud_rate
                 .parse::<u32>()
                 .map_err(|_| "串口波特率无效".to_string())?;
+            let data_bits = self
+                .data_bits
+                .parse::<u8>()
+                .ok()
+                .filter(|value| matches!(value, 5..=8))
+                .ok_or_else(|| "串口数据位必须是 5、6、7 或 8".to_string())?;
+            let stop_bits = self
+                .stop_bits
+                .parse::<u8>()
+                .ok()
+                .filter(|value| matches!(value, 1 | 2))
+                .ok_or_else(|| "串口停止位必须是 1 或 2".to_string())?;
+            if !matches!(self.parity.as_str(), "none" | "odd" | "even") {
+                return Err("串口校验位必须是 none、odd 或 even".to_string());
+            }
+            if !matches!(self.flow_control.as_str(), "none" | "software" | "hardware") {
+                return Err("串口流控必须是 none、software 或 hardware".to_string());
+            }
             input["devicePath"] = Value::String(self.device_path.trim().to_string());
             input["baudRate"] = Value::Number(baud_rate.into());
-            input["dataBits"] = Value::Number(8.into());
-            input["stopBits"] = Value::Number(1.into());
-            input["parity"] = Value::String("none".to_string());
-            input["flowControl"] = Value::String("none".to_string());
+            input["dataBits"] = Value::Number(data_bits.into());
+            input["stopBits"] = Value::Number(stop_bits.into());
+            input["parity"] = Value::String(self.parity.clone());
+            input["flowControl"] = Value::String(self.flow_control.clone());
             return Ok(input);
         }
 
@@ -480,6 +522,14 @@ impl RootView {
             fields.extend([
                 ("设备路径", editor.device_path.clone(), false),
                 ("波特率", editor.baud_rate.clone(), false),
+                ("数据位（5/6/7/8）", editor.data_bits.clone(), false),
+                ("停止位（1/2）", editor.stop_bits.clone(), false),
+                ("校验位（none/odd/even）", editor.parity.clone(), false),
+                (
+                    "流控（none/software/hardware）",
+                    editor.flow_control.clone(),
+                    false,
+                ),
                 ("分组", editor.group.clone(), false),
             ]);
         } else {

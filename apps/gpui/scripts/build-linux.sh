@@ -1,37 +1,21 @@
 #!/usr/bin/env bash
-# FileTerm GPUI — Linux release packaging skeleton.
+# Build the FileTerm Linux AppImage on a Linux release host.
 #
-# G5 phase of `docs/plans/active/gpui-refactor.md` section 6.6.
-#
-# Produces `dist/FileTerm-GPUI-{version}-linux-{arch}.AppImage` from a
-# clean `cargo build --release`. Uses `linuxdeploy` + `appimagetool` to
-# bundle the binary + desktop integration (.desktop file, icon, MIME
-# associations) into a single self-mounting AppImage.
-#
-# ## Toolchain requirements (host: Linux x86_64)
-#
-# * Rust stable (rustup toolchain)
-# * `linuxdeploy` (https://github.com/linuxdeploy/linuxdeploy) on PATH
-#   or at `$LINUXDEPLOY_BIN`
-# * `appimagetool` (https://github.com/AppImage/AppImageKit) on PATH
-#   or at `$APPIMAGETOOL_BIN`
-# * Optional: `patchelf` for rpath fixup of bundled libs
-#
-# ## What's a skeleton
-#
-# G5 ships the structure; the .desktop file + icon are generated inline
-# because they're trivial. Real release packaging will need to handle
-# glibc version skew (build on the oldest supported distro, e.g.
-# ubuntu:20.04), bundle required shared libs (fontconfig, freetype),
-# and possibly produce separate X11 / Wayland variants.
+# Required: Rust stable, linuxdeploy, and the checked-in PNG icon. Build on
+# the oldest supported distribution to keep the resulting glibc baseline.
 
 set -euo pipefail
 
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "[build-linux] FATAL: this package must be built on Linux" >&2
+  exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 cd "$REPO_ROOT"
 
-VERSION="${FILETERM_VERSION:-0.1.0}"
+VERSION="${FILETERM_VERSION:-$(node -p "require('./package.json').version")}"
 APP_NAME="FileTerm"
 APP_BINARY="fileterm-gpui"
 APP_NAME_LOWER="fileterm-gpui"
@@ -39,7 +23,7 @@ DIST_DIR="$REPO_ROOT/dist"
 STAGE_DIR="$DIST_DIR/stage-linux"
 APPDIR="$STAGE_DIR/FileTerm.AppDir"
 ARCH="${FILETERM_ARCH:-x86_64}"
-APPRUN_OUTPUT="$DIST_DIR/${APP_NAME}-GPUI-${VERSION}-linux-${ARCH}.AppImage"
+APPRUN_OUTPUT="$DIST_DIR/${APP_NAME}-${VERSION}-linux-${ARCH}.AppImage"
 
 echo "[build-linux] version=$VERSION  arch=$ARCH"
 
@@ -66,9 +50,9 @@ cp "$BINARY_PATH" "$APPDIR/usr/bin/$APP_BINARY"
 cat > "$APPDIR/usr/share/applications/${APP_NAME_LOWER}.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
-Name=FileTerm (GPUI)
+Name=FileTerm
 GenericName=Remote Workspace
-Comment=SSH/SFTP/FTP desktop workstation (GPUI runtime)
+Comment=SSH, SFTP, and FTP desktop workstation
 Exec=$APP_BINARY %U
 Icon=$APP_NAME_LOWER
 Categories=Development;System;TerminalEmulator;
@@ -76,13 +60,12 @@ Terminal=false
 StartupWMClass=$APP_NAME
 DESKTOP
 
-# Copy icon if present (G5 skeleton: assets may not ship yet).
 PNG_SRC="$REPO_ROOT/apps/gpui/assets/icons/icon-256.png"
-if [[ -f "$PNG_SRC" ]]; then
-  cp "$PNG_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME_LOWER}.png"
-else
-  echo "[build-linux] WARN: icon-256.png missing; AppImage will have no icon" >&2
+if [[ ! -f "$PNG_SRC" ]]; then
+  echo "[build-linux] FATAL: $PNG_SRC is required" >&2
+  exit 1
 fi
+cp "$PNG_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME_LOWER}.png"
 
 # Step 3: run linuxdeploy to bundle deps + generate AppRun entry point.
 LINUXDEPLOY="${LINUXDEPLOY_BIN:-linuxdeploy}"
@@ -98,15 +81,7 @@ export ARCH
   --appdir "$APPDIR" \
   --desktop-file "$APPDIR/usr/share/applications/${APP_NAME_LOWER}.desktop" \
   --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/${APP_NAME_LOWER}.png" \
-  --output appimage || {
-    # If icon-file is missing linuxdeploy errors out; retry without it
-    # so the skeleton still produces an AppImage (just icon-less).
-    echo "[build-linux] retry linuxdeploy without icon-file (likely missing icon)" >&2
-    "$LINUXDEPLOY" \
-      --appdir "$APPDIR" \
-      --desktop-file "$APPDIR/usr/share/applications/${APP_NAME_LOWER}.desktop" \
-      --output appimage
-  }
+  --output appimage
 
 if [[ ! -f "$APPRUN_OUTPUT" ]]; then
   echo "[build-linux] FATAL: $APPRUN_OUTPUT not produced" >&2

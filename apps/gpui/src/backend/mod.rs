@@ -11,6 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zeroize::Zeroize;
 
 pub mod app_handle;
 pub mod commands;
@@ -72,9 +73,15 @@ pub struct SshConnectOptions {
 
 impl SshConnectOptions {
     pub(crate) fn clear_transient_secrets(&mut self) {
+        if let Some(password) = self.transient_password.as_mut() {
+            password.zeroize();
+        }
+        if let Some(passphrase) = self.transient_passphrase.as_mut() {
+            passphrase.zeroize();
+        }
         self.transient_password = None;
         self.transient_passphrase = None;
-        self.keyboard_interactive_answers.clear();
+        self.keyboard_interactive_answers.zeroize();
     }
 }
 
@@ -496,6 +503,20 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+
+    #[test]
+    fn ssh_connect_options_clear_all_transient_secrets() {
+        let mut options = SshConnectOptions::default();
+        options.transient_password = Some("password".to_string());
+        options.transient_passphrase = Some("passphrase".to_string());
+        options.keyboard_interactive_answers = vec!["otp".to_string()];
+
+        options.clear_transient_secrets();
+
+        assert!(options.transient_password.is_none());
+        assert!(options.transient_passphrase.is_none());
+        assert!(options.keyboard_interactive_answers.is_empty());
+    }
 
     #[tokio::test]
     async fn implementation_is_usable_as_dyn_arc() {

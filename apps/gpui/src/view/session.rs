@@ -20,12 +20,14 @@ use crate::{
     state::{AppState, TabStatus},
     term::{ssh_transport, TermChunk, TermView},
     theme::ThemePalette,
+    view::{text_editor, SshTunnelPanel},
 };
 
 pub struct SessionWorkspace {
     tab_id: String,
     controller: Arc<SshController>,
     terminal: Entity<TermView>,
+    tunnels: Entity<SshTunnelPanel>,
     app_state: Entity<AppState>,
     metrics: Option<SystemMetrics>,
     sftp: Option<Arc<SftpClient>>,
@@ -92,6 +94,7 @@ impl SessionWorkspace {
         let terminal = cx.new(|cx| {
             TermView::from_transport_receiver(cx, ssh_transport(controller.clone()), output, 80, 24)
         });
+        let tunnels = cx.new(|cx| SshTunnelPanel::new(controller.clone(), app_state.clone(), cx));
         let term_session = terminal.read(cx).session();
         let runtime_subscription = cx.observe(&term_session, |this, session, cx| {
             let session = session.read(cx);
@@ -114,6 +117,7 @@ impl SessionWorkspace {
             tab_id,
             controller,
             terminal,
+            tunnels,
             app_state,
             metrics: None,
             sftp: None,
@@ -395,28 +399,31 @@ impl SessionWorkspace {
                 cx.notify();
             }
             "left" => {
-                editor.cursor_byte = previous_char_boundary(&editor.content, editor.cursor_byte);
+                editor.cursor_byte =
+                    text_editor::previous_char_boundary(&editor.content, editor.cursor_byte);
                 cx.notify();
             }
             "right" => {
-                editor.cursor_byte = next_char_boundary(&editor.content, editor.cursor_byte);
+                editor.cursor_byte =
+                    text_editor::next_char_boundary(&editor.content, editor.cursor_byte);
                 cx.notify();
             }
             "up" => {
                 editor.cursor_byte =
-                    move_cursor_vertically(&editor.content, editor.cursor_byte, -1);
+                    text_editor::move_cursor_vertically(&editor.content, editor.cursor_byte, -1);
                 cx.notify();
             }
             "down" => {
-                editor.cursor_byte = move_cursor_vertically(&editor.content, editor.cursor_byte, 1);
+                editor.cursor_byte =
+                    text_editor::move_cursor_vertically(&editor.content, editor.cursor_byte, 1);
                 cx.notify();
             }
             "home" => {
-                editor.cursor_byte = line_start(&editor.content, editor.cursor_byte);
+                editor.cursor_byte = text_editor::line_start(&editor.content, editor.cursor_byte);
                 cx.notify();
             }
             "end" => {
-                editor.cursor_byte = line_end(&editor.content, editor.cursor_byte);
+                editor.cursor_byte = text_editor::line_end(&editor.content, editor.cursor_byte);
                 cx.notify();
             }
             "enter" | "return" => {
@@ -1022,11 +1029,7 @@ impl SessionWorkspace {
         } else {
             "已保存".to_string()
         };
-        let mut visible_content = editor.content.clone();
-        let cursor_byte = editor.cursor_byte.min(visible_content.len());
-        if visible_content.is_char_boundary(cursor_byte) {
-            visible_content.insert(cursor_byte, '│');
-        }
+        let visible_content = text_editor::with_visible_cursor(&editor.content, editor.cursor_byte);
         div()
             .absolute()
             .inset_0()
@@ -1392,6 +1395,12 @@ impl Render for SessionWorkspace {
                     .border_color(palette.border)
                     .child(self.render_metrics(palette))
                     .child(self.render_files(palette, cx))
+                    .child(
+                        div()
+                            .max_h(px(260.0))
+                            .overflow_hidden()
+                            .child(self.tunnels.clone()),
+                    )
                     .child(self.render_transfers(palette, cx))
                     .when_some(self.connection_error.clone(), |view, error| {
                         view.child(
@@ -1412,72 +1421,6 @@ impl Render for SessionWorkspace {
     }
 }
 
-fn valid_cursor(content: &str, cursor: usize) -> usize {
-    let mut cursor = cursor.min(content.len());
-    while !content.is_char_boundary(cursor) {
-        cursor -= 1;
-    }
-    cursor
-}
-
-pub(super) fn previous_char_boundary(content: &str, cursor: usize) -> usize {
-    let cursor = valid_cursor(content, cursor);
-    content[..cursor]
-        .char_indices()
-        .next_back()
-        .map(|(index, _)| index)
-        .unwrap_or(0)
-}
-
-pub(super) fn next_char_boundary(content: &str, cursor: usize) -> usize {
-    let cursor = valid_cursor(content, cursor);
-    content[cursor..]
-        .chars()
-        .next()
-        .map(|character| cursor + character.len_utf8())
-        .unwrap_or(content.len())
-}
-
-pub(super) fn line_start(content: &str, cursor: usize) -> usize {
-    let cursor = valid_cursor(content, cursor);
-    content[..cursor]
-        .rfind('\n')
-        .map(|index| index + 1)
-        .unwrap_or(0)
-}
-
-pub(super) fn line_end(content: &str, cursor: usize) -> usize {
-    let cursor = valid_cursor(content, cursor);
-    content[cursor..]
-        .find('\n')
-        .map(|offset| cursor + offset)
-        .unwrap_or(content.len())
-}
-
-pub(super) fn move_cursor_vertically(content: &str, cursor: usize, direction: i8) -> usize {
-    let cursor = valid_cursor(content, cursor);
-    let current_start = line_start(content, cursor);
-    let column = content[current_start..cursor].chars().count();
-    let target_start = if direction < 0 {
-        if current_start == 0 {
-            return cursor;
-        }
-        line_start(content, current_start - 1)
-    } else {
-        let current_end = line_end(content, cursor);
-        if current_end == content.len() {
-            return cursor;
-        }
-        current_end + 1
-    };
-    let target_end = line_end(content, target_start);
-    content[target_start..target_end]
-        .char_indices()
-        .map(|(offset, _)| target_start + offset)
-        .nth(column)
-        .unwrap_or(target_end)
-}
-
 fn mark_editor_changed(editor: &mut PendingFileEditor) {
     editor.dirty = true;
     editor.discard_armed = false;
@@ -1485,31 +1428,21 @@ fn mark_editor_changed(editor: &mut PendingFileEditor) {
 }
 
 fn insert_editor_text(editor: &mut PendingFileEditor, text: &str) {
-    editor.cursor_byte = valid_cursor(&editor.content, editor.cursor_byte);
-    editor.content.insert_str(editor.cursor_byte, text);
-    editor.cursor_byte += text.len();
-    mark_editor_changed(editor);
+    if text_editor::insert(&mut editor.content, &mut editor.cursor_byte, text) {
+        mark_editor_changed(editor);
+    }
 }
 
 fn backspace_editor(editor: &mut PendingFileEditor) {
-    editor.cursor_byte = valid_cursor(&editor.content, editor.cursor_byte);
-    let previous = previous_char_boundary(&editor.content, editor.cursor_byte);
-    if previous == editor.cursor_byte {
-        return;
+    if text_editor::backspace(&mut editor.content, &mut editor.cursor_byte) {
+        mark_editor_changed(editor);
     }
-    editor.content.drain(previous..editor.cursor_byte);
-    editor.cursor_byte = previous;
-    mark_editor_changed(editor);
 }
 
 fn delete_editor_char(editor: &mut PendingFileEditor) {
-    editor.cursor_byte = valid_cursor(&editor.content, editor.cursor_byte);
-    let next = next_char_boundary(&editor.content, editor.cursor_byte);
-    if next == editor.cursor_byte {
-        return;
+    if text_editor::delete(&mut editor.content, &mut editor.cursor_byte) {
+        mark_editor_changed(editor);
     }
-    editor.content.drain(editor.cursor_byte..next);
-    mark_editor_changed(editor);
 }
 
 async fn inspect_transfer(
@@ -1708,21 +1641,6 @@ mod tests {
         delete_editor_char(&mut editor);
         assert_eq!(editor.content, "甲");
         assert!(editor.dirty);
-    }
-
-    #[test]
-    fn editor_vertical_navigation_preserves_character_column() {
-        let content = "ab甲\nx\n12345";
-        let first_line_column_three = "ab甲".len();
-        let second_line_end = move_cursor_vertically(content, first_line_column_three, 1);
-        assert_eq!(second_line_end, "ab甲\nx".len());
-
-        let third_line_column_one = move_cursor_vertically(content, second_line_end, 1);
-        assert_eq!(third_line_column_one, "ab甲\nx\n1".len());
-        assert_eq!(
-            move_cursor_vertically(content, third_line_column_one, -1),
-            second_line_end
-        );
     }
 
     fn editor(content: &str) -> PendingFileEditor {

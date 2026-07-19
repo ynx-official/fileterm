@@ -285,25 +285,33 @@ impl FtpWorkspace {
             }
             "left" => {
                 editor.cursor_byte =
-                    super::session::previous_char_boundary(&editor.content, editor.cursor_byte)
+                    super::text_editor::previous_char_boundary(&editor.content, editor.cursor_byte)
             }
             "right" => {
                 editor.cursor_byte =
-                    super::session::next_char_boundary(&editor.content, editor.cursor_byte)
+                    super::text_editor::next_char_boundary(&editor.content, editor.cursor_byte)
             }
             "up" => {
-                editor.cursor_byte =
-                    super::session::move_cursor_vertically(&editor.content, editor.cursor_byte, -1)
+                editor.cursor_byte = super::text_editor::move_cursor_vertically(
+                    &editor.content,
+                    editor.cursor_byte,
+                    -1,
+                )
             }
             "down" => {
-                editor.cursor_byte =
-                    super::session::move_cursor_vertically(&editor.content, editor.cursor_byte, 1)
+                editor.cursor_byte = super::text_editor::move_cursor_vertically(
+                    &editor.content,
+                    editor.cursor_byte,
+                    1,
+                )
             }
             "home" => {
-                editor.cursor_byte = super::session::line_start(&editor.content, editor.cursor_byte)
+                editor.cursor_byte =
+                    super::text_editor::line_start(&editor.content, editor.cursor_byte)
             }
             "end" => {
-                editor.cursor_byte = super::session::line_end(&editor.content, editor.cursor_byte)
+                editor.cursor_byte =
+                    super::text_editor::line_end(&editor.content, editor.cursor_byte)
             }
             "enter" | "return" => edit_ftp_content(editor, Some("\n"), false),
             "backspace" => edit_ftp_content(editor, None, true),
@@ -568,10 +576,7 @@ impl FtpWorkspace {
         palette: ThemePalette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut visible = editor.content.clone();
-        if visible.is_char_boundary(editor.cursor_byte.min(visible.len())) {
-            visible.insert(editor.cursor_byte.min(visible.len()), '│');
-        }
+        let visible = super::text_editor::with_visible_cursor(&editor.content, editor.cursor_byte);
         div()
             .absolute()
             .inset_0()
@@ -771,29 +776,25 @@ impl FtpWorkspace {
 }
 
 fn edit_ftp_content(editor: &mut FtpFileEditor, text: Option<&str>, backspace: bool) {
-    if backspace {
-        let previous = super::session::previous_char_boundary(&editor.content, editor.cursor_byte);
-        if previous != editor.cursor_byte {
-            editor.content.drain(previous..editor.cursor_byte);
-            editor.cursor_byte = previous;
-        } else {
-            return;
-        }
-    } else if let Some(text) = text {
-        editor.content.insert_str(editor.cursor_byte, text);
-        editor.cursor_byte += text.len();
+    let changed = if backspace {
+        super::text_editor::backspace(&mut editor.content, &mut editor.cursor_byte)
+    } else {
+        text.is_some_and(|text| {
+            super::text_editor::insert(&mut editor.content, &mut editor.cursor_byte, text)
+        })
+    };
+    if changed {
+        mark_editor_changed(editor);
     }
-    editor.dirty = true;
-    editor.discard_armed = false;
-    editor.error = None;
 }
 
 fn delete_ftp_content(editor: &mut FtpFileEditor) {
-    let next = super::session::next_char_boundary(&editor.content, editor.cursor_byte);
-    if next == editor.cursor_byte {
-        return;
+    if super::text_editor::delete(&mut editor.content, &mut editor.cursor_byte) {
+        mark_editor_changed(editor);
     }
-    editor.content.drain(editor.cursor_byte..next);
+}
+
+fn mark_editor_changed(editor: &mut FtpFileEditor) {
     editor.dirty = true;
     editor.discard_armed = false;
     editor.error = None;

@@ -1,27 +1,8 @@
-//! Build script — platform resource bundling skeleton.
+//! Generates platform metadata consumed by the release packaging scripts.
 //!
-//! G5 phase of `docs/plans/active/gpui-refactor.md` section 6.6.
-//!
-//! Runs at `cargo build` time. Responsibilities (per platform):
-//!
-//! * **macOS**: writes `Info.plist` into `target/{profile}/FileTerm.app/Contents/`
-//!   so the binary is recognizable as a macOS app bundle. Icons + code
-//!   signing land in the release shell script (`scripts/build-macos.sh`)
-//!   because they need `codesign` / `create-dmg` tooling that doesn't
-//!   belong in `build.rs`.
-//! * **Windows**: writes a `FileTerm.exe.manifest` so Windows applies
-//!   DPI-awareness + theme preferences. NSIS installer generation lives
-//!   in `scripts/build-windows.sh`.
-//! * **Linux**: no-op for now — AppImage bundling is done entirely by
-//!   `scripts/build-linux.sh` (uses `linuxdeploy`).
-//!
-//! ## Why a skeleton
-//!
-//! G5 ships the structure; the actual icon assets (`icon.icns` /
-//! `icon.ico` / `icon.png`) are tracked in `apps/gpui/assets/icons/`
-//! but don't exist yet (placeholder until the design token pass). When
-//! the assets land, this script grows the `cp` / `embed-resource` calls
-//! to copy them into the right place per platform.
+//! Binary embedding and installer assembly remain platform-specific, while
+//! application identity and version always come from this crate's package
+//! metadata so all produced bundles describe the same FileTerm application.
 
 use std::env;
 use std::fs;
@@ -55,8 +36,10 @@ fn main() {
 ///
 /// The release shell script (`scripts/build-macos.sh`) copies this into
 /// `FileTerm.app/Contents/Info.plist` after `cargo build --release`.
-fn write_macos_plist(_out_dir: &std::path::Path) {
-    let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+fn write_macos_plist(out_dir: &std::path::Path) {
+    let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is set by Cargo");
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -65,15 +48,17 @@ fn write_macos_plist(_out_dir: &std::path::Path) {
     <key>CFBundleDisplayName</key>
     <string>FileTerm</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.fileterm.gpui</string>
+    <string>com.fileterm.desktop</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>{version}</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>{version}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
     <string>fileterm-gpui</string>
+    <key>CFBundleIconFile</key>
+    <string>icon.icns</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>NSHighResolutionCapable</key>
@@ -84,25 +69,29 @@ fn write_macos_plist(_out_dir: &std::path::Path) {
     <false/>
 </dict>
 </plist>
-"#;
-    // Write to OUT_DIR so cargo's cache holds it; the shell script copies
-    // it out. We don't write directly to the .app bundle because that
-    // path is layout-dependent and not known to build.rs.
-    let out_path = _out_dir.join("Info.plist");
-    let _ = fs::write(&out_path, plist);
-    println!(
-        "cargo:warning=fileterm-gpui build.rs: wrote {}",
-        out_path.display()
+"#
     );
+    let out_path = out_dir.join("Info.plist");
+    fs::write(&out_path, plist).expect("write generated macOS Info.plist");
+    println!("cargo:warning=generated {}", out_path.display());
 }
 
 /// Write a Windows application manifest declaring DPI awareness so
 /// GPUI's renderer gets the real physical pixel resolution instead of
 /// the scaled virtual one.
-fn write_windows_manifest(_out_dir: &std::path::Path) {
-    let manifest = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+fn write_windows_manifest(out_dir: &std::path::Path) {
+    let package_version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is set by Cargo");
+    let mut parts = package_version
+        .split('.')
+        .map(|part| part.split('-').next().unwrap_or("0"))
+        .take(4)
+        .collect::<Vec<_>>();
+    parts.resize(4, "0");
+    let assembly_version = parts.join(".");
+    let manifest = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="0.1.0.0" name="FileTerm.Gpui" type="win32"/>
+  <assemblyIdentity version="{assembly_version}" name="FileTerm.Desktop" type="win32"/>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
@@ -117,11 +106,22 @@ fn write_windows_manifest(_out_dir: &std::path::Path) {
     </windowsSettings>
   </application>
 </assembly>
-"#;
-    let out_path = _out_dir.join("FileTerm.exe.manifest");
-    let _ = fs::write(&out_path, manifest);
-    println!(
-        "cargo:warning=fileterm-gpui build.rs: wrote {}",
-        out_path.display()
+"#
     );
+    let out_path = out_dir.join("FileTerm.exe.manifest");
+    fs::write(&out_path, &manifest).expect("write generated Windows manifest");
+
+    let mut resource = winresource::WindowsResource::new();
+    resource
+        .set_icon("assets/icons/icon.ico")
+        .set_manifest(&manifest)
+        .set("ProductName", "FileTerm")
+        .set("InternalName", "fileterm-gpui.exe")
+        .set("OriginalFilename", "fileterm-gpui.exe")
+        .set("FileDescription", "FileTerm remote workspace");
+    resource
+        .compile()
+        .expect("compile Windows executable resources");
+
+    println!("cargo:warning=generated {}", out_path.display());
 }

@@ -5,14 +5,23 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
-use russh::{client::Handler, ChannelMsg};
+use russh::{client::Handler, Channel, ChannelMsg};
 use russh_keys::PublicKeyBase64;
 use russh_sftp::client::SftpSession;
 use sha2::{Digest, Sha256};
-use tokio::sync::{broadcast, mpsc};
 use tokio::time::timeout;
+use tokio::{
+    net::TcpStream,
+    sync::{broadcast, mpsc},
+};
 
-use crate::term::TermChunk;
+use crate::{
+    ssh::tunnel::{
+        remote_bind_host_matches, RemoteForwardTargets, SharedTunnelManager, SshTunnelRule,
+        SshTunnelSnapshot, TunnelManager,
+    },
+    term::TermChunk,
+};
 
 const SSH_STAGE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHELL_CWD_SETUP: &str = "test -z \"${FISH_VERSION-}\" && eval '__tdcwd() { printf \"\\033]7;file://%s\\007\\033]1337;RemoteUser=%s\\007\" \"$(pwd -P 2>/dev/null)\" \"$(id -un 2>/dev/null)\"; }; if [ -n \"${ZSH_VERSION-}\" ]; then autoload -Uz add-zsh-hook 2>/dev/null; add-zsh-hook -D precmd __tdcwd 2>/dev/null; add-zsh-hook precmd __tdcwd 2>/dev/null; elif [ -n \"${BASH_VERSION-}\" ]; then case \"${PROMPT_COMMAND-}\" in *\"__tdcwd\"*) ;; *) PROMPT_COMMAND=\"__tdcwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}\" ;; esac; else case \"${PS1-}\" in *\"__tdcwd\"*) ;; *) PS1=\"\\$(__tdcwd)${PS1-}\" ;; esac; fi; __tdcwd'; stty echo 2>/dev/null\n";
@@ -61,7 +70,8 @@ pub struct SshController {
     tx: broadcast::Sender<TermChunk>,
     event_tx: broadcast::Sender<SshSessionEvent>,
     command_tx: mpsc::UnboundedSender<SshCommand>,
-    handle: Arc<russh::client::Handle<ClientHandler>>,
+    handle: Arc<tokio::sync::Mutex<russh::client::Handle<ClientHandler>>>,
+    tunnels: SharedTunnelManager,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -70,11 +80,14 @@ impl SshController {
         validate_config(&config)?;
 
         let observed_fingerprint = Arc::new(parking_lot::Mutex::new(None));
+        let remote_forward_targets: RemoteForwardTargets =
+            Arc::new(tokio::sync::RwLock::new(Vec::new()));
         let handler = ClientHandler {
             host: config.host.clone(),
             port: config.port,
             trusted_fingerprint: config.trusted_host_fingerprint.clone(),
             observed_fingerprint: observed_fingerprint.clone(),
+            remote_forward_targets: remote_forward_targets.clone(),
         };
         let client_config = Arc::new(russh::client::Config {
             inactivity_timeout: Some(Duration::from_secs(300)),
@@ -100,7 +113,6 @@ impl SshController {
 
         authenticate(&mut handle, &config).await?;
         let platform = detect_remote_platform(&handle).await;
-        let handle = Arc::new(handle);
 
         let cwd_setup = shell_cwd_setup_for_platform(&platform);
         let mut terminal_modes = vec![
@@ -132,12 +144,15 @@ impl SshController {
             .await
             .context("request SSH shell")?;
 
+        let handle = Arc::new(tokio::sync::Mutex::new(handle));
+        let tunnels = TunnelManager::shared(handle.clone(), remote_forward_targets);
         let (tx, rx) = broadcast::channel(256);
         let (event_tx, _) = broadcast::channel(32);
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
         let output_tx = tx.clone();
         let output_event_tx = event_tx.clone();
         let task_handle = handle.clone();
+        let task_tunnels = tunnels.clone();
 
         let task = tokio::spawn(async move {
             let mut seq = 0u64;
@@ -181,7 +196,10 @@ impl SshController {
                     }
                 }
             }
+            task_tunnels.lock().await.stop_all().await;
             let _ = task_handle
+                .lock()
+                .await
                 .disconnect(
                     russh::Disconnect::ByApplication,
                     "FileTerm session closed",
@@ -197,6 +215,7 @@ impl SshController {
                 event_tx,
                 command_tx,
                 handle,
+                tunnels,
                 _task: task,
             },
             rx,
@@ -229,11 +248,34 @@ impl SshController {
         let _ = self.command_tx.send(SshCommand::Shutdown);
     }
 
+    pub async fn list_tunnels(&self) -> Vec<SshTunnelSnapshot> {
+        self.tunnels.lock().await.list()
+    }
+
+    pub async fn create_tunnel(&self, rule: SshTunnelRule) -> Result<Vec<SshTunnelSnapshot>> {
+        self.tunnels.lock().await.create(rule).await
+    }
+
+    pub async fn start_tunnel(&self, rule_id: &str) -> Result<Vec<SshTunnelSnapshot>> {
+        self.tunnels.lock().await.start(rule_id).await
+    }
+
+    pub async fn stop_tunnel(&self, rule_id: &str) -> Result<Vec<SshTunnelSnapshot>> {
+        self.tunnels.lock().await.stop(rule_id).await
+    }
+
+    pub async fn delete_tunnel(&self, rule_id: &str) -> Result<Vec<SshTunnelSnapshot>> {
+        self.tunnels.lock().await.delete(rule_id).await
+    }
+
     pub async fn exec(&self, command: &str) -> Result<Vec<u8>> {
-        let mut channel = timeout(SSH_STAGE_TIMEOUT, self.handle.channel_open_session())
-            .await
-            .context("SSH exec channel timed out")?
-            .context("open SSH exec channel")?;
+        let mut channel = {
+            let handle = self.handle.lock().await;
+            timeout(SSH_STAGE_TIMEOUT, handle.channel_open_session())
+                .await
+                .context("SSH exec channel timed out")?
+                .context("open SSH exec channel")?
+        };
         channel
             .exec(true, command)
             .await
@@ -255,10 +297,13 @@ impl SshController {
     }
 
     pub async fn open_sftp(&self) -> Result<SftpSession> {
-        let channel = timeout(SSH_STAGE_TIMEOUT, self.handle.channel_open_session())
-            .await
-            .context("SFTP channel timed out")?
-            .context("open SFTP channel")?;
+        let channel = {
+            let handle = self.handle.lock().await;
+            timeout(SSH_STAGE_TIMEOUT, handle.channel_open_session())
+                .await
+                .context("SFTP channel timed out")?
+                .context("open SFTP channel")?
+        };
         timeout(SSH_STAGE_TIMEOUT, channel.request_subsystem(true, "sftp"))
             .await
             .context("SFTP subsystem request timed out")?
@@ -505,11 +550,12 @@ fn fingerprint_sha256(key: &russh_keys::key::PublicKey) -> String {
     format!("SHA256:{}", STANDARD_NO_PAD.encode(digest))
 }
 
-struct ClientHandler {
+pub(crate) struct ClientHandler {
     host: String,
     port: u16,
     trusted_fingerprint: Option<String>,
     observed_fingerprint: Arc<parking_lot::Mutex<Option<String>>>,
+    remote_forward_targets: RemoteForwardTargets,
 }
 
 #[async_trait]
@@ -529,6 +575,42 @@ impl Handler for ClientHandler {
                 .unwrap_or(false),
         };
         Ok((self, accepted))
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        self,
+        channel: Channel<russh::client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        session: russh::client::Session,
+    ) -> Result<(Self, russh::client::Session), Self::Error> {
+        let target = {
+            let targets = self.remote_forward_targets.read().await;
+            targets
+                .iter()
+                .find(|target| {
+                    target.bind_port == connected_port
+                        && remote_bind_host_matches(&target.bind_host, connected_address)
+                })
+                .cloned()
+        };
+        if let Some(target) = target {
+            tokio::spawn(async move {
+                let result = async {
+                    let mut local =
+                        TcpStream::connect((target.target_host.as_str(), target.target_port))
+                            .await?;
+                    let mut remote = channel.into_stream();
+                    tokio::io::copy_bidirectional(&mut local, &mut remote).await?;
+                    Ok::<(), std::io::Error>(())
+                }
+                .await;
+                let _ = result;
+            });
+        }
+        Ok((self, session))
     }
 }
 

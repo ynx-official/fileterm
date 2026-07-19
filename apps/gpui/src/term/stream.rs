@@ -42,8 +42,16 @@ pub struct SerialConfig {
     pub flow_control: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StreamSessionEvent {
+    Connected,
+    Closed,
+    Error(String),
+}
+
 pub struct StreamController {
     tx: broadcast::Sender<TermChunk>,
+    event_tx: broadcast::Sender<StreamSessionEvent>,
     command_tx: mpsc::UnboundedSender<StreamCommand>,
     _task: tokio::task::JoinHandle<()>,
 }
@@ -95,26 +103,37 @@ impl StreamController {
         T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (tx, _) = broadcast::channel(256);
+        let (event_tx, _) = broadcast::channel(32);
         let (command_tx, mut command_rx) = mpsc::unbounded_channel();
         let output_tx = tx.clone();
+        let output_event_tx = event_tx.clone();
         let task = tokio::spawn(async move {
+            let _ = output_event_tx.send(StreamSessionEvent::Connected);
             let (mut reader, mut writer) = tokio::io::split(stream);
             let mut buffer = [0_u8; 32 * 1024];
             let mut seq = 0_u64;
             let mut telnet = TelnetDecoder::default();
+            let mut final_event = StreamSessionEvent::Closed;
             loop {
                 tokio::select! {
                     read = reader.read(&mut buffer) => {
                         let count = match read {
-                            Ok(0) | Err(_) => break,
+                            Ok(0) => break,
+                            Err(error) => {
+                                final_event = StreamSessionEvent::Error(error.to_string());
+                                break;
+                            }
                             Ok(count) => count,
                         };
                         let (bytes, response) = match protocol {
                             StreamProtocol::Raw => (buffer[..count].to_vec(), Vec::new()),
                             StreamProtocol::Telnet => telnet.feed(&buffer[..count]),
                         };
-                        if !response.is_empty() && writer.write_all(&response).await.is_err() {
-                            break;
+                        if !response.is_empty() {
+                            if let Err(error) = writer.write_all(&response).await {
+                                final_event = StreamSessionEvent::Error(error.to_string());
+                                break;
+                            }
                         }
                         if !bytes.is_empty() {
                             seq = seq.wrapping_add(1);
@@ -129,13 +148,21 @@ impl StreamController {
                                 } else {
                                     bytes
                                 };
-                                if writer.write_all(&bytes).await.is_err() || writer.flush().await.is_err() {
+                                if let Err(error) = writer.write_all(&bytes).await {
+                                    final_event = StreamSessionEvent::Error(error.to_string());
+                                    break;
+                                }
+                                if let Err(error) = writer.flush().await {
+                                    final_event = StreamSessionEvent::Error(error.to_string());
                                     break;
                                 }
                             }
                             Some(StreamCommand::Resize { cols, rows }) if protocol == StreamProtocol::Telnet => {
+                                telnet.cols = cols;
+                                telnet.rows = rows;
                                 let frame = naws_frame(cols, rows);
-                                if writer.write_all(&frame).await.is_err() {
+                                if let Err(error) = writer.write_all(&frame).await {
+                                    final_event = StreamSessionEvent::Error(error.to_string());
                                     break;
                                 }
                             }
@@ -148,12 +175,18 @@ impl StreamController {
                     }
                 }
             }
+            let _ = output_event_tx.send(final_event);
         });
         Self {
             tx,
+            event_tx,
             command_tx,
             _task: task,
         }
+    }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<StreamSessionEvent> {
+        self.event_tx.subscribe()
     }
 
     pub fn shutdown(&self) {
@@ -185,10 +218,22 @@ impl Drop for StreamController {
     }
 }
 
-#[derive(Default)]
 struct TelnetDecoder {
     state: TelnetState,
     subnegotiation: Vec<u8>,
+    cols: u16,
+    rows: u16,
+}
+
+impl Default for TelnetDecoder {
+    fn default() -> Self {
+        Self {
+            state: TelnetState::Data,
+            subnegotiation: Vec::new(),
+            cols: 80,
+            rows: 24,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -223,6 +268,9 @@ impl TelnetDecoder {
                 TelnetState::Iac => self.state = TelnetState::Data,
                 TelnetState::Negotiation(command) => {
                     response.extend(negotiate(command, byte));
+                    if command == DO && byte == OPT_NAWS {
+                        response.extend(naws_frame(self.cols, self.rows));
+                    }
                     self.state = TelnetState::Data;
                 }
                 TelnetState::Subnegotiation if byte == IAC => {
@@ -315,6 +363,19 @@ mod tests {
         );
         let (_, response) = decoder.feed(&[1, IAC, SE]);
         assert!(response.windows(14).any(|part| part == b"xterm-256color"));
+    }
+
+    #[test]
+    fn telnet_naws_negotiation_sends_current_dimensions() {
+        let mut decoder = TelnetDecoder {
+            cols: 120,
+            rows: 40,
+            ..Default::default()
+        };
+        let (_, response) = decoder.feed(&[IAC, DO, OPT_NAWS]);
+        let mut expected = vec![IAC, WILL, OPT_NAWS];
+        expected.extend(naws_frame(120, 40));
+        assert_eq!(response, expected);
     }
 
     #[test]

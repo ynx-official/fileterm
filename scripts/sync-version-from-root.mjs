@@ -47,16 +47,16 @@ async function updateTextFile(relativePath, mutate) {
   await writeFile(targetPath, mutate(raw), 'utf8')
 }
 
-function updateCargoPackageVersion(raw) {
+function updateCargoPackageVersion(raw, relativePath) {
   const packageStart = raw.indexOf('[package]')
   if (packageStart < 0) {
-    throw new Error('apps/tauri/src-tauri/Cargo.toml is missing [package].')
+    throw new Error(`${relativePath} is missing [package].`)
   }
   const nextSection = raw.indexOf('\n[', packageStart + '[package]'.length)
   const packageEnd = nextSection < 0 ? raw.length : nextSection
   const packageBlock = raw.slice(packageStart, packageEnd)
   if (!/^version\s*=\s*"[^"]+"\s*$/m.test(packageBlock)) {
-    throw new Error('apps/tauri/src-tauri/Cargo.toml is missing package.version.')
+    throw new Error(`${relativePath} is missing package.version.`)
   }
   const updatedBlock = packageBlock.replace(/^version\s*=\s*"[^"]+"\s*$/m, `version = "${nextVersion}"`)
   return `${raw.slice(0, packageStart)}${updatedBlock}${raw.slice(packageEnd)}`
@@ -122,7 +122,12 @@ await updateJsonFile('package-lock.json', (lockfile) => {
 })
 
 await updateTextFile('apps/tauri/src-tauri/tauri.conf.json', updateTauriConfigVersion)
-await updateTextFile('apps/tauri/src-tauri/Cargo.toml', updateCargoPackageVersion)
+await updateTextFile('apps/tauri/src-tauri/Cargo.toml', (raw) =>
+  updateCargoPackageVersion(raw, 'apps/tauri/src-tauri/Cargo.toml')
+)
 await updateTextFile('apps/tauri/src-tauri/Cargo.lock', updateCargoLockVersion)
+await updateTextFile('apps/gpui/Cargo.toml', (raw) =>
+  updateCargoPackageVersion(raw, 'apps/gpui/Cargo.toml')
+)
 
-console.log(`Synced workspace and Tauri bundle versions from root: ${nextVersion}`)
+console.log(`Synced workspace, Tauri, and GPUI versions from root: ${nextVersion}`)
