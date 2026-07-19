@@ -43,6 +43,22 @@ impl NavigationSection {
             Self::Settings => "S",
         }
     }
+
+    pub fn tab_id(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Connections => "connections",
+            Self::Commands => "commands",
+            Self::SshKeys => "ssh-keys",
+            Self::Settings => "settings",
+        }
+    }
+
+    pub fn from_tab_id(tab_id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|section| section.tab_id() == tab_id)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,14 +171,7 @@ impl Default for AppState {
 impl AppState {
     pub fn select_navigation(&mut self, section: NavigationSection) {
         self.navigation = section;
-        self.active_tab_id = match section {
-            NavigationSection::Overview => "overview",
-            NavigationSection::Connections => "connections",
-            NavigationSection::Commands => "commands",
-            NavigationSection::SshKeys => "ssh-keys",
-            NavigationSection::Settings => "settings",
-        }
-        .to_string();
+        self.active_tab_id = section.tab_id().to_string();
 
         if let Some(tab) = self
             .tabs
@@ -213,7 +222,9 @@ impl AppState {
     pub fn activate_tab(&mut self, tab_id: &str) {
         if self.tabs.iter().any(|tab| tab.id == tab_id) {
             self.active_tab_id = tab_id.to_string();
-            if is_terminal_tab(tab_id) {
+            if let Some(section) = NavigationSection::from_tab_id(tab_id) {
+                self.navigation = section;
+            } else if is_terminal_tab(tab_id) {
                 self.last_terminal_tab_id = Some(tab_id.to_string());
             }
         }
@@ -240,6 +251,9 @@ impl AppState {
                 .last()
                 .map(|tab| tab.id.clone())
                 .unwrap_or_else(|| "overview".to_string());
+            if let Some(section) = NavigationSection::from_tab_id(&self.active_tab_id) {
+                self.navigation = section;
+            }
         }
     }
 
@@ -396,6 +410,22 @@ mod tests {
         state.select_navigation(NavigationSection::Connections);
         assert_eq!(state.tabs.len(), 2);
         assert_eq!(state.active_tab_id, "connections");
+        assert_eq!(state.navigation, NavigationSection::Connections);
+    }
+
+    #[test]
+    fn activating_navigation_tabs_switches_rendered_section() {
+        let mut state = AppState::default();
+        state.select_navigation(NavigationSection::Connections);
+        state.select_navigation(NavigationSection::Commands);
+
+        state.activate_tab("connections");
+        assert_eq!(state.active_tab_id, "connections");
+        assert_eq!(state.navigation, NavigationSection::Connections);
+
+        state.activate_tab("commands");
+        assert_eq!(state.active_tab_id, "commands");
+        assert_eq!(state.navigation, NavigationSection::Commands);
     }
 
     #[test]
