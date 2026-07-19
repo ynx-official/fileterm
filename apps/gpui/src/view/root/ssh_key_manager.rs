@@ -1,4 +1,4 @@
-use gpui::{div, prelude::*, px, AnyElement, Context, KeyDownEvent};
+use gpui::{div, prelude::*, px, AnyElement, Context, KeyDownEvent, MouseButton};
 use zeroize::Zeroize;
 
 use super::RootView;
@@ -7,6 +7,38 @@ use crate::{
     state::AppState,
     theme::ThemePalette,
 };
+
+mod layout;
+use layout::{
+    assign_key_folder, delete_folder_from_layout, next_root_order, normalize_layout,
+    reorder_relative, root_items,
+};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SshKeyDeleteTarget {
+    Key { id: String, name: String },
+    Folder { id: String, name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum SshKeyDragItem {
+    Key(String),
+    Folder(String),
+}
+
+impl SshKeyDragItem {
+    fn id(&self) -> &str {
+        match self {
+            Self::Key(id) | Self::Folder(id) => id,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SshKeyDropPosition {
+    Before,
+    After,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SshKeyEditorMode {
@@ -21,6 +53,7 @@ pub(super) struct PendingSshKeyEditor {
     pub(super) mode: SshKeyEditorMode,
     pub(super) name: String,
     pub(super) note: String,
+    pub(super) folder_id: Option<String>,
     pub(super) source: Option<SshKeyFileSelection>,
     pub(super) active_field: usize,
     pub(super) busy: bool,
@@ -37,11 +70,12 @@ impl Drop for PendingSshKeyEditor {
 }
 
 impl PendingSshKeyEditor {
-    fn import() -> Self {
+    fn import(folder_id: Option<String>) -> Self {
         Self {
             mode: SshKeyEditorMode::Import,
             name: String::new(),
             note: String::new(),
+            folder_id,
             source: None,
             active_field: 0,
             busy: false,
@@ -49,11 +83,12 @@ impl PendingSshKeyEditor {
         }
     }
 
-    fn edit(key: &SshKeyMetadata) -> Self {
+    fn edit(key: &SshKeyMetadata, folder_id: Option<String>) -> Self {
         Self {
             mode: SshKeyEditorMode::Edit(key.id.clone()),
             name: key.name.clone(),
             note: key.note.clone().unwrap_or_default(),
+            folder_id,
             source: None,
             active_field: 0,
             busy: false,
@@ -66,6 +101,7 @@ impl PendingSshKeyEditor {
             mode,
             name,
             note: String::new(),
+            folder_id: None,
             source: None,
             active_field: 0,
             busy: false,
@@ -75,19 +111,13 @@ impl PendingSshKeyEditor {
 
     fn active_value(&mut self) -> &mut String {
         match self.mode {
-            SshKeyEditorMode::Import => &mut self.note,
-            SshKeyEditorMode::Edit(_) if self.active_field == 0 => &mut self.name,
-            SshKeyEditorMode::Edit(_) => &mut self.note,
+            SshKeyEditorMode::Import | SshKeyEditorMode::Edit(_) => &mut self.note,
             SshKeyEditorMode::CreateFolder | SshKeyEditorMode::RenameFolder(_) => &mut self.name,
         }
     }
 
     fn field_count(&self) -> usize {
-        if matches!(self.mode, SshKeyEditorMode::Edit(_)) {
-            2
-        } else {
-            1
-        }
+        1
     }
 }
 
@@ -114,7 +144,9 @@ impl RootView {
     }
 
     pub(super) fn begin_ssh_key_import(&mut self, cx: &mut Context<Self>) {
-        self.pending_ssh_key_editor = Some(PendingSshKeyEditor::import());
+        self.pending_ssh_key_editor = Some(PendingSshKeyEditor::import(
+            self.active_ssh_key_folder.clone(),
+        ));
         cx.notify();
     }
 
@@ -127,7 +159,14 @@ impl RootView {
             .find(|key| key.id == key_id)
             .cloned();
         if let Some(key) = key {
-            self.pending_ssh_key_editor = Some(PendingSshKeyEditor::edit(&key));
+            let folder_id = self
+                .state
+                .read(cx)
+                .ssh_key_layout
+                .assignments
+                .get(&key.id)
+                .cloned();
+            self.pending_ssh_key_editor = Some(PendingSshKeyEditor::edit(&key, folder_id));
         }
         cx.notify();
     }
@@ -223,6 +262,7 @@ impl RootView {
         let mode = editor.mode.clone();
         let name = editor.name.trim().to_string();
         let note = editor.note.trim().to_string();
+        let folder_id = editor.folder_id.clone();
         let source_path = editor
             .source
             .as_ref()
@@ -234,29 +274,43 @@ impl RootView {
         cx.spawn(async move |this, cx| {
             let result = match mode {
                 SshKeyEditorMode::Import => match source_path {
-                    Some(path) => api.ssh_keys_import(path, note).await.map(|_| ()),
+                    Some(path) => match api.ssh_keys_import(path, note).await {
+                        Ok(imported) => {
+                            let mut layout = current_layout;
+                            assign_key_folder(&mut layout, &imported.key.id, folder_id);
+                            api.ssh_keys_save_layout(layout).await.map(|_| ())
+                        }
+                        Err(error) => Err(error),
+                    },
                     None => Err(crate::error::AppError::Command(
                         "请选择 SSH 私钥文件。".to_string(),
                     )),
                 },
                 SshKeyEditorMode::Edit(key_id) => {
-                    if name.is_empty() || note.is_empty() {
+                    if note.is_empty() {
                         Err(crate::error::AppError::Command(
-                            "密钥名称和备注不能为空。".to_string(),
+                            "密钥备注不能为空。".to_string(),
                         ))
                     } else {
-                        match api.ssh_keys_rename(key_id.clone(), name).await {
-                            Ok(_) => api.ssh_keys_update_note(key_id, note).await.map(|_| ()),
+                        match api.ssh_keys_update_note(key_id.clone(), note).await {
+                            Ok(_) => {
+                                let mut layout = current_layout;
+                                assign_key_folder(&mut layout, &key_id, folder_id);
+                                api.ssh_keys_save_layout(layout).await.map(|_| ())
+                            }
                             Err(error) => Err(error),
                         }
                     }
                 }
                 SshKeyEditorMode::CreateFolder => {
                     let mut layout = current_layout;
+                    let folder_id = uuid::Uuid::new_v4().to_string();
+                    let next_order = next_root_order(&layout);
                     layout.folders.push(SshKeyFolder {
-                        id: uuid::Uuid::new_v4().to_string(),
+                        id: folder_id.clone(),
                         name,
                     });
+                    layout.item_order.insert(folder_id, next_order);
                     api.ssh_keys_save_layout(layout).await.map(|_| ())
                 }
                 SshKeyEditorMode::RenameFolder(folder_id) => {
@@ -289,19 +343,48 @@ impl RootView {
     }
 
     fn request_delete_ssh_key(&mut self, key_id: String, name: String, cx: &mut Context<Self>) {
-        self.pending_ssh_key_delete = Some((key_id, name));
+        self.pending_ssh_key_delete = Some(SshKeyDeleteTarget::Key { id: key_id, name });
+        cx.notify();
+    }
+
+    fn request_delete_ssh_key_folder(
+        &mut self,
+        folder_id: String,
+        name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_ssh_key_delete = Some(SshKeyDeleteTarget::Folder {
+            id: folder_id,
+            name,
+        });
         cx.notify();
     }
 
     fn confirm_delete_ssh_key(&mut self, cx: &mut Context<Self>) {
-        let Some((key_id, _)) = self.pending_ssh_key_delete.clone() else {
+        let Some(target) = self.pending_ssh_key_delete.clone() else {
             return;
         };
         let api = self.api.clone();
+        let current_layout = self.state.read(cx).ssh_key_layout.clone();
         cx.spawn(async move |this, cx| {
-            let result = api.ssh_keys_delete(key_id).await;
+            let result = match target {
+                SshKeyDeleteTarget::Key { id, .. } => api.ssh_keys_delete(id).await,
+                SshKeyDeleteTarget::Folder { id, .. } => {
+                    let mut layout = current_layout;
+                    delete_folder_from_layout(&mut layout, &id);
+                    api.ssh_keys_save_layout(layout).await.map(|_| ())
+                }
+            };
             let _ = this.update(cx, |root, cx| match result {
                 Ok(()) => {
+                    if let Some(SshKeyDeleteTarget::Folder { id, .. }) =
+                        root.pending_ssh_key_delete.as_ref()
+                    {
+                        root.expanded_ssh_key_folders.remove(id);
+                        if root.active_ssh_key_folder.as_ref() == Some(id) {
+                            root.active_ssh_key_folder = None;
+                        }
+                    }
                     root.pending_ssh_key_delete = None;
                     root.reload_ssh_key_library(cx);
                 }
@@ -315,36 +398,83 @@ impl RootView {
         .detach();
     }
 
-    fn delete_ssh_key_folder(&mut self, folder_id: String, cx: &mut Context<Self>) {
-        let mut layout = self.state.read(cx).ssh_key_layout.clone();
-        layout.folders.retain(|folder| folder.id != folder_id);
-        layout
-            .assignments
-            .retain(|_, assigned| assigned != &folder_id);
-        layout.item_order.remove(&folder_id);
-        self.persist_ssh_key_layout(layout, cx);
+    fn start_ssh_key_drag(&mut self, item: SshKeyDragItem, cx: &mut Context<Self>) {
+        self.ssh_key_dragging = Some(item);
+        cx.notify();
     }
 
-    fn cycle_ssh_key_folder(&mut self, key_id: String, cx: &mut Context<Self>) {
-        let mut layout = self.state.read(cx).ssh_key_layout.clone();
-        let next_folder = match layout.assignments.get(&key_id) {
-            None => layout.folders.first().map(|folder| folder.id.clone()),
-            Some(current) => layout
-                .folders
-                .iter()
-                .position(|folder| &folder.id == current)
-                .and_then(|index| layout.folders.get(index + 1))
-                .map(|folder| folder.id.clone()),
+    fn drop_ssh_key_on(
+        &mut self,
+        target: SshKeyDragItem,
+        position: SshKeyDropPosition,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dragged) = self.ssh_key_dragging.take() else {
+            return;
         };
-        if let Some(folder_id) = next_folder {
-            layout.assignments.insert(key_id, folder_id);
-        } else {
-            layout.assignments.remove(&key_id);
+        if dragged == target {
+            cx.notify();
+            return;
         }
+        let state = self.state.read(cx);
+        let mut layout = state.ssh_key_layout.clone();
+        reorder_relative(&mut layout, &state.ssh_keys, &dragged, &target, position);
         self.persist_ssh_key_layout(layout, cx);
     }
 
-    fn persist_ssh_key_layout(&mut self, layout: SshKeyLayout, cx: &mut Context<Self>) {
+    fn drop_ssh_key_into_folder(&mut self, folder_id: String, cx: &mut Context<Self>) {
+        let Some(dragged) = self.ssh_key_dragging.take() else {
+            return;
+        };
+        let SshKeyDragItem::Key(key_id) = dragged else {
+            cx.notify();
+            return;
+        };
+        let state = self.state.read(cx);
+        let mut layout = state.ssh_key_layout.clone();
+        assign_key_folder(&mut layout, &key_id, Some(folder_id.clone()));
+        self.expanded_ssh_key_folders.insert(folder_id);
+        self.persist_ssh_key_layout(layout, cx);
+    }
+
+    fn drop_ssh_key_on_root(&mut self, cx: &mut Context<Self>) {
+        let Some(SshKeyDragItem::Key(key_id)) = self.ssh_key_dragging.take() else {
+            self.ssh_key_dragging = None;
+            cx.notify();
+            return;
+        };
+        let state = self.state.read(cx);
+        let mut layout = state.ssh_key_layout.clone();
+        layout.assignments.remove(&key_id);
+        let next_order = root_items(&layout, &state.ssh_keys)
+            .into_iter()
+            .filter(|id| id != &key_id)
+            .enumerate()
+            .map(|(index, id)| {
+                layout.item_order.insert(id, ((index + 1) * 1000) as u64);
+                index
+            })
+            .last()
+            .map_or(1000, |index| ((index + 2) * 1000) as u64);
+        layout.item_order.insert(key_id, next_order);
+        self.persist_ssh_key_layout(layout, cx);
+    }
+
+    pub(super) fn cancel_ssh_key_drag(&mut self, cx: &mut Context<Self>) {
+        if self.ssh_key_dragging.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn toggle_ssh_key_folder(&mut self, folder_id: String, cx: &mut Context<Self>) {
+        if !self.expanded_ssh_key_folders.remove(&folder_id) {
+            self.expanded_ssh_key_folders.insert(folder_id);
+        }
+        cx.notify();
+    }
+
+    fn persist_ssh_key_layout(&mut self, mut layout: SshKeyLayout, cx: &mut Context<Self>) {
+        normalize_layout(&mut layout, &self.state.read(cx).ssh_keys);
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api.ssh_keys_save_layout(layout).await;
@@ -399,6 +529,90 @@ impl RootView {
                 .copied()
                 .unwrap_or(key.imported_at)
         });
+        let rows = if active_folder.is_some() {
+            keys.into_iter()
+                .enumerate()
+                .map(|(index, key)| self.render_ssh_key_row(index, key, state, palette, cx))
+                .collect::<Vec<_>>()
+        } else {
+            let visible_key_ids = keys
+                .iter()
+                .map(|key| key.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let visible_folder_ids = state
+                .ssh_key_layout
+                .folders
+                .iter()
+                .filter(|folder| query.is_empty() || folder.name.to_lowercase().contains(&query))
+                .map(|folder| folder.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            let mut rows = Vec::new();
+            let mut row_index = 0usize;
+            for item_id in root_items(&state.ssh_key_layout, &state.ssh_keys) {
+                if let Some(folder) = state
+                    .ssh_key_layout
+                    .folders
+                    .iter()
+                    .find(|folder| folder.id == item_id)
+                {
+                    if !visible_folder_ids.contains(folder.id.as_str()) {
+                        continue;
+                    }
+                    rows.push(self.render_ssh_key_folder_row(
+                        row_index,
+                        folder.clone(),
+                        state,
+                        palette,
+                        cx,
+                    ));
+                    row_index += 1;
+                    if self.expanded_ssh_key_folders.contains(&folder.id) {
+                        let mut folder_keys = keys
+                            .iter()
+                            .filter(|key| {
+                                state.ssh_key_layout.assignments.get(&key.id) == Some(&folder.id)
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        folder_keys.sort_by_key(|key| {
+                            state
+                                .ssh_key_layout
+                                .item_order
+                                .get(&key.id)
+                                .copied()
+                                .unwrap_or(key.imported_at)
+                        });
+                        if folder_keys.is_empty() {
+                            rows.push(
+                                div()
+                                    .min_h(px(42.0))
+                                    .flex()
+                                    .items_center()
+                                    .pl_8()
+                                    .border_b_1()
+                                    .border_color(palette.border)
+                                    .text_xs()
+                                    .text_color(palette.text_soft)
+                                    .child("空文件夹")
+                                    .into_any_element(),
+                            );
+                            row_index += 1;
+                        }
+                        for key in folder_keys {
+                            rows.push(self.render_ssh_key_row(row_index, key, state, palette, cx));
+                            row_index += 1;
+                        }
+                    }
+                } else if visible_key_ids.contains(item_id.as_str()) {
+                    if let Some(key) = keys.iter().find(|key| key.id == item_id).cloned() {
+                        rows.push(self.render_ssh_key_row(row_index, key, state, palette, cx));
+                        row_index += 1;
+                    }
+                }
+            }
+            rows
+        };
+        let has_rows = !rows.is_empty();
 
         div()
             .size_full()
@@ -495,6 +709,30 @@ impl RootView {
                         self.ssh_key_query.clone()
                     }),
             )
+            .when_some(state.data_error.clone(), |view, error| {
+                view.child(
+                    div()
+                        .id("dismiss-ssh-key-error")
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .bg(palette.background)
+                        .border_1()
+                        .border_color(palette.danger)
+                        .text_xs()
+                        .text_color(palette.danger)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.update_state(cx, |state| state.data_error = None);
+                        }))
+                        .child(error)
+                        .child("关闭"),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -530,7 +768,7 @@ impl RootView {
                                     .child(div().w(px(40.0)).child("引用"))
                                     .child(div().w(px(150.0)).child("操作")),
                             )
-                            .when(keys.is_empty(), |view| {
+                            .when(!has_rows, |view| {
                                 view.flex_1()
                                     .flex()
                                     .items_center()
@@ -540,14 +778,10 @@ impl RootView {
                                     .child(if query.is_empty() {
                                         "尚未导入私钥。导入后可在 SSH 连接中复用。"
                                     } else {
-                                        "没有匹配的密钥。"
+                                        "没有匹配的密钥或文件夹。"
                                     })
                             })
-                            .when(!keys.is_empty(), |view| {
-                                view.children(keys.into_iter().enumerate().map(|(index, key)| {
-                                    self.render_ssh_key_row(index, key, state, palette, cx)
-                                }))
-                            }),
+                            .when(has_rows, |view| view.children(rows)),
                     ),
             )
             .into_any_element()
@@ -560,6 +794,15 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let all_active = self.active_ssh_key_folder.is_none();
+        let mut folders = state.ssh_key_layout.folders.clone();
+        folders.sort_by_key(|folder| {
+            state
+                .ssh_key_layout
+                .item_order
+                .get(&folder.id)
+                .copied()
+                .unwrap_or(u64::MAX)
+        });
         div()
             .w(px(190.0))
             .flex_shrink_0()
@@ -595,78 +838,259 @@ impl RootView {
                         this.active_ssh_key_folder = None;
                         cx.notify();
                     }))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.drop_ssh_key_on_root(cx)),
+                    )
                     .child("全部密钥")
                     .child(state.ssh_keys.len().to_string()),
             )
-            .children(
-                state
+            .children(folders.into_iter().enumerate().map(|(index, folder)| {
+                let folder_id = folder.id.clone();
+                let drop_folder_id = folder.id.clone();
+                let rename_id = folder.id.clone();
+                let delete_id = folder.id.clone();
+                let delete_name = folder.name.clone();
+                let active = self.active_ssh_key_folder.as_deref() == Some(&folder.id);
+                let count = state
                     .ssh_key_layout
-                    .folders
-                    .iter()
-                    .enumerate()
-                    .map(|(index, folder)| {
-                        let folder_id = folder.id.clone();
-                        let rename_id = folder.id.clone();
-                        let delete_id = folder.id.clone();
-                        let active = self.active_ssh_key_folder.as_deref() == Some(&folder.id);
-                        let count = state
-                            .ssh_key_layout
-                            .assignments
-                            .values()
-                            .filter(|assigned| *assigned == &folder.id)
-                            .count();
+                    .assignments
+                    .values()
+                    .filter(|assigned| *assigned == &folder.id)
+                    .count();
+                div()
+                    .id(("ssh-key-folder", index))
+                    .h(px(38.0))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .rounded_md()
+                    .bg(if active {
+                        palette.surface_active
+                    } else {
+                        palette.background
+                    })
+                    .text_xs()
+                    .text_color(if active {
+                        palette.text
+                    } else {
+                        palette.text_muted
+                    })
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.drop_ssh_key_into_folder(drop_folder_id.clone(), cx)
+                        }),
+                    )
+                    .child(
                         div()
-                            .id(("ssh-key-folder", index))
-                            .h(px(38.0))
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_2()
-                            .rounded_md()
-                            .bg(if active {
-                                palette.surface_active
-                            } else {
-                                palette.background
-                            })
+                            .id(("select-ssh-key-folder", index))
+                            .flex_1()
+                            .truncate()
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.active_ssh_key_folder = Some(folder_id.clone());
+                                cx.notify();
+                            }))
+                            .child(format!("{} ({count})", folder.name)),
+                    )
+                    .child(
+                        div()
+                            .id(("rename-ssh-key-folder", index))
+                            .cursor_pointer()
+                            .text_color(palette.accent)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.begin_rename_key_folder(rename_id.clone(), cx)
+                            }))
+                            .child("改"),
+                    )
+                    .child(
+                        div()
+                            .id(("delete-ssh-key-folder", index))
+                            .cursor_pointer()
+                            .text_color(palette.danger)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_delete_ssh_key_folder(
+                                    delete_id.clone(),
+                                    delete_name.clone(),
+                                    cx,
+                                )
+                            }))
+                            .child("删"),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    fn render_ssh_key_folder_row(
+        &self,
+        index: usize,
+        folder: SshKeyFolder,
+        state: &AppState,
+        palette: ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let expanded = self.expanded_ssh_key_folders.contains(&folder.id);
+        let count = state
+            .ssh_key_layout
+            .assignments
+            .values()
+            .filter(|assigned| *assigned == &folder.id)
+            .count();
+        let drag_id = folder.id.clone();
+        let before_id = folder.id.clone();
+        let drop_id = folder.id.clone();
+        let inside_id = folder.id.clone();
+        let toggle_id = folder.id.clone();
+        let rename_id = folder.id.clone();
+        let delete_id = folder.id.clone();
+        let delete_name = folder.name.clone();
+
+        div()
+            .id(("ssh-key-folder-row", index))
+            .min_h(px(54.0))
+            .flex()
+            .items_center()
+            .gap_3()
+            .px_4()
+            .border_b_1()
+            .border_color(palette.border)
+            .bg(palette.background)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.start_ssh_key_drag(SshKeyDragItem::Folder(drag_id.clone()), cx)
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.drop_ssh_key_on(
+                        SshKeyDragItem::Folder(drop_id.clone()),
+                        SshKeyDropPosition::After,
+                        cx,
+                    )
+                }),
+            )
+            .child(
+                div()
+                    .id(("before-ssh-key-folder", index))
+                    .w(px(14.0))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(palette.text_soft)
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.drop_ssh_key_on(
+                                SshKeyDragItem::Folder(before_id.clone()),
+                                SshKeyDropPosition::Before,
+                                cx,
+                            )
+                        }),
+                    )
+                    .child("⋮"),
+            )
+            .child(
+                div()
+                    .id(("toggle-ssh-key-folder", index))
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .cursor_pointer()
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.drop_ssh_key_into_folder(inside_id.clone(), cx)
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_ssh_key_folder(toggle_id.clone(), cx)
+                    }))
+                    .child(
+                        div()
+                            .w(px(16.0))
                             .text_xs()
-                            .text_color(if active {
-                                palette.text
-                            } else {
-                                palette.text_muted
-                            })
-                            .child(
-                                div()
-                                    .id(("select-ssh-key-folder", index))
-                                    .flex_1()
-                                    .truncate()
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.active_ssh_key_folder = Some(folder_id.clone());
-                                        cx.notify();
-                                    }))
-                                    .child(format!("{} ({count})", folder.name)),
-                            )
-                            .child(
-                                div()
-                                    .id(("rename-ssh-key-folder", index))
-                                    .cursor_pointer()
-                                    .text_color(palette.accent)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.begin_rename_key_folder(rename_id.clone(), cx)
-                                    }))
-                                    .child("改"),
-                            )
-                            .child(
-                                div()
-                                    .id(("delete-ssh-key-folder", index))
-                                    .cursor_pointer()
-                                    .text_color(palette.danger)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.delete_ssh_key_folder(delete_id.clone(), cx)
-                                    }))
-                                    .child("删"),
-                            )
-                    }),
+                            .text_color(palette.text_soft)
+                            .child(if expanded { "▼" } else { "▶" }),
+                    )
+                    .child(
+                        div()
+                            .truncate()
+                            .text_sm()
+                            .text_color(palette.text)
+                            .child(folder.name),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette.text_muted)
+                            .child(format!("{count} 个密钥")),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(180.0))
+                    .text_xs()
+                    .text_color(palette.text_soft)
+                    .child("—"),
+            )
+            .child(
+                div()
+                    .w(px(140.0))
+                    .text_xs()
+                    .text_color(palette.text_soft)
+                    .child("—"),
+            )
+            .child(
+                div()
+                    .w(px(100.0))
+                    .text_xs()
+                    .text_color(palette.text_soft)
+                    .child("—"),
+            )
+            .child(
+                div()
+                    .w(px(40.0))
+                    .text_xs()
+                    .text_color(palette.text_soft)
+                    .child("—"),
+            )
+            .child(
+                div()
+                    .w(px(150.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(("rename-inline-ssh-key-folder", index))
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(palette.accent)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.begin_rename_key_folder(rename_id.clone(), cx)
+                            }))
+                            .child("重命名"),
+                    )
+                    .child(
+                        div()
+                            .id(("delete-inline-ssh-key-folder", index))
+                            .cursor_pointer()
+                            .text_xs()
+                            .text_color(palette.danger)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request_delete_ssh_key_folder(
+                                    delete_id.clone(),
+                                    delete_name.clone(),
+                                    cx,
+                                )
+                            }))
+                            .child("删除"),
+                    ),
             )
             .into_any_element()
     }
@@ -679,23 +1103,14 @@ impl RootView {
         palette: ThemePalette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let nested = self.active_ssh_key_folder.is_none()
+            && state.ssh_key_layout.assignments.contains_key(&key.id);
         let edit_id = key.id.clone();
-        let move_id = key.id.clone();
+        let drag_id = key.id.clone();
+        let before_id = key.id.clone();
+        let drop_id = key.id.clone();
         let delete_id = key.id.clone();
         let delete_name = key.name.clone();
-        let folder_name = state
-            .ssh_key_layout
-            .assignments
-            .get(&key.id)
-            .and_then(|folder_id| {
-                state
-                    .ssh_key_layout
-                    .folders
-                    .iter()
-                    .find(|folder| &folder.id == folder_id)
-            })
-            .map(|folder| folder.name.as_str())
-            .unwrap_or("全部密钥");
         div()
             .id(("ssh-key-row", index))
             .min_h(px(72.0))
@@ -703,8 +1118,44 @@ impl RootView {
             .items_center()
             .gap_3()
             .px_4()
+            .when(nested, |row| row.pl_8())
             .border_b_1()
             .border_color(palette.border)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.start_ssh_key_drag(SshKeyDragItem::Key(drag_id.clone()), cx)
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    this.drop_ssh_key_on(
+                        SshKeyDragItem::Key(drop_id.clone()),
+                        SshKeyDropPosition::After,
+                        cx,
+                    )
+                }),
+            )
+            .child(
+                div()
+                    .id(("before-ssh-key", index))
+                    .w(px(14.0))
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(palette.text_soft)
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.drop_ssh_key_on(
+                                SshKeyDragItem::Key(before_id.clone()),
+                                SshKeyDropPosition::Before,
+                                cx,
+                            )
+                        }),
+                    )
+                    .child("⋮"),
+            )
             .child(
                 div()
                     .flex_1()
@@ -782,19 +1233,6 @@ impl RootView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .id(("move-ssh-key", index))
-                            .max_w(px(78.0))
-                            .truncate()
-                            .cursor_pointer()
-                            .text_xs()
-                            .text_color(palette.accent)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.cycle_ssh_key_folder(move_id.clone(), cx)
-                            }))
-                            .child(folder_name.to_string()),
-                    )
                     .child(
                         div()
                             .id(("edit-ssh-key", index))
@@ -876,14 +1314,27 @@ impl RootView {
                             .child("Tab 切换输入项，Enter 保存，Esc 取消。"),
                     )
                     .when(is_edit, |view| {
-                        view.child(key_input(
-                            "名称",
-                            editor.name.clone(),
-                            0,
-                            editor.active_field,
-                            palette,
-                            cx,
-                        ))
+                        view.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(div().text_xs().text_color(palette.text_muted).child("名称"))
+                                .child(
+                                    div()
+                                        .h(px(38.0))
+                                        .flex()
+                                        .items_center()
+                                        .px_3()
+                                        .rounded_md()
+                                        .bg(palette.background)
+                                        .border_1()
+                                        .border_color(palette.border)
+                                        .text_sm()
+                                        .text_color(palette.text_soft)
+                                        .child(editor.name.clone()),
+                                ),
+                        )
                     })
                     .when(!is_import && !is_edit, |view| {
                         view.child(key_input(
@@ -896,15 +1347,58 @@ impl RootView {
                         ))
                     })
                     .when(is_import || is_edit, |view| {
-                        let field = usize::from(is_edit);
                         view.child(key_input(
                             "备注信息",
                             editor.note.clone(),
-                            field,
+                            0,
                             editor.active_field,
                             palette,
                             cx,
                         ))
+                    })
+                    .when(is_import || is_edit, |view| {
+                        let folders = self.state.read(cx).ssh_key_layout.folders.clone();
+                        let selected_folder = editor.folder_id.clone();
+                        view.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(palette.text_muted)
+                                        .child("所属文件夹"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .gap_2()
+                                        .child(folder_option(
+                                            "根目录（未分类）".to_string(),
+                                            None,
+                                            selected_folder.is_none(),
+                                            0,
+                                            palette,
+                                            cx,
+                                        ))
+                                        .children(folders.into_iter().enumerate().map(
+                                            |(index, folder)| {
+                                                let selected =
+                                                    selected_folder.as_ref() == Some(&folder.id);
+                                                folder_option(
+                                                    folder.name,
+                                                    Some(folder.id),
+                                                    selected,
+                                                    index + 1,
+                                                    palette,
+                                                    cx,
+                                                )
+                                            },
+                                        )),
+                                ),
+                        )
                     })
                     .when(is_import, |view| {
                         let file_label = editor
@@ -999,11 +1493,21 @@ impl RootView {
 
     pub(super) fn render_ssh_key_delete_confirmation(
         &self,
-        key_id: String,
-        key_name: String,
+        target: SshKeyDeleteTarget,
         palette: ThemePalette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let (title, description) = match &target {
+            SshKeyDeleteTarget::Key { name, .. } => (
+                "删除密钥",
+                format!("确定删除 {name} 吗？此操作只删除 FileTerm 管理的副本，不会删除原始文件。"),
+            ),
+            SshKeyDeleteTarget::Folder { name, .. } => (
+                "删除文件夹",
+                format!("确定删除 {name} 吗？文件夹内的密钥会移回根目录，不会被删除。"),
+            ),
+        };
+        let expected_target = target.clone();
         div()
             .absolute()
             .inset_0()
@@ -1022,14 +1526,12 @@ impl RootView {
                     .bg(palette.surface)
                     .border_1()
                     .border_color(palette.border_strong)
-                    .child(div().text_lg().text_color(palette.text).child("删除密钥"))
+                    .child(div().text_lg().text_color(palette.text).child(title))
                     .child(
                         div()
                             .text_sm()
                             .text_color(palette.text_muted)
-                            .child(format!(
-                                "确定删除 {key_name} 吗？此操作只删除 FileTerm 管理的副本，不会删除原始文件。"
-                            )),
+                            .child(description),
                     )
                     .child(
                         div()
@@ -1058,7 +1560,9 @@ impl RootView {
                                     .text_xs()
                                     .text_color(palette.background)
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        if this.pending_ssh_key_delete.as_ref().map(|value| &value.0) == Some(&key_id) {
+                                        if this.pending_ssh_key_delete.as_ref()
+                                            == Some(&expected_target)
+                                        {
                                             this.confirm_delete_ssh_key(cx);
                                         }
                                     }))
@@ -1068,6 +1572,47 @@ impl RootView {
             )
             .into_any_element()
     }
+}
+
+fn folder_option(
+    label: String,
+    folder_id: Option<String>,
+    selected: bool,
+    index: usize,
+    palette: ThemePalette,
+    cx: &mut Context<RootView>,
+) -> impl IntoElement {
+    div()
+        .id(("ssh-key-folder-option", index))
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(if selected {
+            palette.surface_active
+        } else {
+            palette.background
+        })
+        .border_1()
+        .border_color(if selected {
+            palette.accent
+        } else {
+            palette.border
+        })
+        .text_xs()
+        .text_color(if selected {
+            palette.text
+        } else {
+            palette.text_muted
+        })
+        .on_click(cx.listener(move |this, _, _, cx| {
+            if let Some(editor) = this.pending_ssh_key_editor.as_mut() {
+                editor.folder_id = folder_id.clone();
+                editor.error = None;
+            }
+            cx.notify();
+        }))
+        .child(label)
 }
 
 fn key_input(

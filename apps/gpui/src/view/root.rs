@@ -2,10 +2,13 @@ mod connection_manager;
 mod ssh_key_manager;
 mod webdav;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use connection_manager::PendingConnectionEditor;
-use ssh_key_manager::PendingSshKeyEditor;
+use ssh_key_manager::{PendingSshKeyEditor, SshKeyDeleteTarget, SshKeyDragItem};
 use webdav::PendingWebDavEditor;
 
 use serde_json::Value;
@@ -50,7 +53,9 @@ pub struct RootView {
     pending_authentication: Option<PendingAuthentication>,
     pending_connection_editor: Option<PendingConnectionEditor>,
     pending_ssh_key_editor: Option<PendingSshKeyEditor>,
-    pending_ssh_key_delete: Option<(String, String)>,
+    pending_ssh_key_delete: Option<SshKeyDeleteTarget>,
+    ssh_key_dragging: Option<SshKeyDragItem>,
+    expanded_ssh_key_folders: HashSet<String>,
     ssh_key_query: String,
     ssh_key_search_focused: bool,
     active_ssh_key_folder: Option<String>,
@@ -184,6 +189,8 @@ impl RootView {
             pending_connection_editor: None,
             pending_ssh_key_editor: None,
             pending_ssh_key_delete: None,
+            ssh_key_dragging: None,
+            expanded_ssh_key_folders: HashSet::new(),
             ssh_key_query: String::new(),
             ssh_key_search_focused: false,
             active_ssh_key_folder: None,
@@ -2462,11 +2469,17 @@ impl Render for RootView {
             .on_action(cx.listener(Self::open_docs))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, event, window, cx| this.finish_main_tab_drag(event, window, cx)),
+                cx.listener(|this, event, window, cx| {
+                    this.finish_main_tab_drag(event, window, cx);
+                    this.cancel_ssh_key_drag(cx);
+                }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, event, window, cx| this.finish_main_tab_drag(event, window, cx)),
+                cx.listener(|this, event, window, cx| {
+                    this.finish_main_tab_drag(event, window, cx);
+                    this.cancel_ssh_key_drag(cx);
+                }),
             )
             .size_full()
             .relative()
@@ -2486,8 +2499,8 @@ impl Render for RootView {
             .when_some(pending_ssh_key_editor, |view, editor| {
                 view.child(self.render_ssh_key_editor(editor, palette, cx))
             })
-            .when_some(pending_ssh_key_delete, |view, (key_id, key_name)| {
-                view.child(self.render_ssh_key_delete_confirmation(key_id, key_name, palette, cx))
+            .when_some(pending_ssh_key_delete, |view, target| {
+                view.child(self.render_ssh_key_delete_confirmation(target, palette, cx))
             })
             .when_some(pending_command_editor, |view, pending| {
                 view.child(self.render_command_editor(pending, palette, cx))
