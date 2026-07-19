@@ -25,6 +25,11 @@ pub struct OpenConnectionManager;
 #[action(namespace = fileterm)]
 pub struct OpenCommandManager;
 
+/// File → SSH Key Manager. Opens the managed key library window.
+#[derive(Clone, PartialEq, Eq, gpui::Action)]
+#[action(namespace = fileterm)]
+pub struct OpenSshKeyManager;
+
 /// File → Close Tab. Closes the active workspace tab.
 #[derive(Clone, PartialEq, Eq, gpui::Action)]
 #[action(namespace = fileterm)]
@@ -87,6 +92,7 @@ pub fn build_application_menu(is_english: bool) -> Vec<Menu> {
             OpenConnectionManager,
         ),
         MenuItem::action(label("Command Manager", "命令管理器"), OpenCommandManager),
+        MenuItem::action(label("SSH Key Manager", "密钥管理器"), OpenSshKeyManager),
         MenuItem::separator(),
         MenuItem::action(label("Close Tab", "关闭标签"), CloseTab),
         MenuItem::separator(),
@@ -139,6 +145,7 @@ pub fn build_tray_menu(is_english: bool) -> Vec<MenuItem> {
             OpenConnectionManager,
         ),
         MenuItem::action(label("Command Manager", "命令管理器"), OpenCommandManager),
+        MenuItem::action(label("SSH Key Manager", "密钥管理器"), OpenSshKeyManager),
         MenuItem::separator(),
         MenuItem::action(label("Quit", "退出"), Quit),
     ]
@@ -156,10 +163,9 @@ mod tests {
     }
 
     #[test]
-    fn tray_menu_has_six_items_with_separators() {
+    fn tray_menu_has_seven_items_with_separators() {
         let menu = build_tray_menu(true);
-        // Show Main, sep, Connection Manager, Command Manager, sep, Quit
-        assert_eq!(menu.len(), 6);
+        assert_eq!(menu.len(), 7);
     }
 
     #[test]

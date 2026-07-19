@@ -1,9 +1,11 @@
 mod connection_manager;
+mod ssh_key_manager;
 mod webdav;
 
 use std::{collections::HashMap, sync::Arc};
 
 use connection_manager::PendingConnectionEditor;
+use ssh_key_manager::PendingSshKeyEditor;
 use webdav::PendingWebDavEditor;
 
 use serde_json::Value;
@@ -28,7 +30,7 @@ use crate::{
         detach_tab_to_new_window,
         menu::{
             CloseTab, NewConnection, OpenCommandManager, OpenConnectionManager, OpenDocs,
-            ToggleTheme,
+            OpenSshKeyManager, ToggleTheme,
         },
         DragDropTarget, ScreenBounds, SharedWindowRegistry, TabDragState,
     },
@@ -47,6 +49,11 @@ pub struct RootView {
     pending_host_verification: Option<PendingHostVerification>,
     pending_authentication: Option<PendingAuthentication>,
     pending_connection_editor: Option<PendingConnectionEditor>,
+    pending_ssh_key_editor: Option<PendingSshKeyEditor>,
+    pending_ssh_key_delete: Option<(String, String)>,
+    ssh_key_query: String,
+    ssh_key_search_focused: bool,
+    active_ssh_key_folder: Option<String>,
     pending_command_editor: Option<PendingCommandEditor>,
     pending_command_delete: Option<(String, String)>,
     pending_webdav_editor: Option<PendingWebDavEditor>,
@@ -145,6 +152,23 @@ impl RootView {
         })
         .detach();
 
+        let state_for_keys = state.downgrade();
+        let api_for_keys = api.clone();
+        cx.spawn(async move |_, cx| {
+            let result = tokio::try_join!(
+                api_for_keys.ssh_keys_list(),
+                api_for_keys.ssh_keys_get_layout()
+            );
+            let _ = state_for_keys.update(cx, |state, cx| {
+                match result {
+                    Ok((keys, layout)) => state.apply_ssh_key_library(keys, layout),
+                    Err(error) => state.data_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+
         let view = Self {
             api: api.clone(),
             window_registry,
@@ -158,6 +182,11 @@ impl RootView {
             pending_host_verification: None,
             pending_authentication: None,
             pending_connection_editor: None,
+            pending_ssh_key_editor: None,
+            pending_ssh_key_delete: None,
+            ssh_key_query: String::new(),
+            ssh_key_search_focused: false,
+            active_ssh_key_folder: None,
             pending_command_editor: None,
             pending_command_delete: None,
             pending_webdav_editor: None,
@@ -214,6 +243,9 @@ impl RootView {
     }
 
     fn select_navigation(&mut self, section: NavigationSection, cx: &mut Context<Self>) {
+        if section != NavigationSection::SshKeys {
+            self.ssh_key_search_focused = false;
+        }
         self.update_state(cx, |state| state.select_navigation(section));
     }
 
@@ -258,6 +290,20 @@ impl RootView {
             "command-manager",
             "FileTerm · 命令管理器",
             NavigationSection::Commands,
+            cx,
+        );
+    }
+
+    fn open_ssh_key_manager(
+        &mut self,
+        _: &OpenSshKeyManager,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_standalone_manager(
+            "ssh-key-manager",
+            "FileTerm · 密钥管理器",
+            NavigationSection::SshKeys,
             cx,
         );
     }
@@ -705,6 +751,8 @@ impl RootView {
     ) {
         if self.pending_connection_editor.is_some() {
             self.handle_connection_editor_key(event, cx);
+        } else if self.pending_ssh_key_editor.is_some() {
+            self.handle_ssh_key_editor_key(event, cx);
         } else if self.pending_webdav_editor.is_some() {
             self.handle_webdav_editor_key(event, cx);
         } else if self.pending_authentication.is_some() {
@@ -713,6 +761,23 @@ impl RootView {
             self.handle_command_editor_key(event, cx);
         } else if self.pending_command_delete.is_some() && event.keystroke.key == "escape" {
             self.pending_command_delete = None;
+            cx.notify();
+        } else if self.pending_ssh_key_delete.is_some() && event.keystroke.key == "escape" {
+            self.pending_ssh_key_delete = None;
+            cx.notify();
+        } else if self.ssh_key_search_focused {
+            match event.keystroke.key.as_str() {
+                "escape" => self.ssh_key_search_focused = false,
+                "backspace" => {
+                    self.ssh_key_query.pop();
+                }
+                _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
+                    if let Some(text) = event.keystroke.key_char.as_deref() {
+                        self.ssh_key_query.push_str(text);
+                    }
+                }
+                _ => {}
+            }
             cx.notify();
         }
     }
@@ -2175,6 +2240,12 @@ impl RootView {
                 .into_any_element();
         }
 
+        if section == NavigationSection::SshKeys {
+            return self
+                .render_ssh_key_manager(state, palette, cx)
+                .into_any_element();
+        }
+
         if section == NavigationSection::Settings {
             let dark = state.theme == ThemeMode::Dark;
             let english = state.locale == "enUS";
@@ -2330,6 +2401,8 @@ impl Render for RootView {
         let pending_host_verification = self.pending_host_verification.clone();
         let pending_authentication = self.pending_authentication.clone();
         let pending_connection_editor = self.pending_connection_editor.clone();
+        let pending_ssh_key_editor = self.pending_ssh_key_editor.clone();
+        let pending_ssh_key_delete = self.pending_ssh_key_delete.clone();
         let pending_command_editor = self.pending_command_editor.clone();
         let pending_command_delete = self.pending_command_delete.clone();
         let pending_webdav_editor = self.pending_webdav_editor.clone();
@@ -2384,6 +2457,7 @@ impl Render for RootView {
             .on_action(cx.listener(Self::new_connection))
             .on_action(cx.listener(Self::open_connection_manager))
             .on_action(cx.listener(Self::open_command_manager))
+            .on_action(cx.listener(Self::open_ssh_key_manager))
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::open_docs))
             .on_mouse_up(
@@ -2408,6 +2482,12 @@ impl Render for RootView {
             })
             .when_some(pending_connection_editor, |view, editor| {
                 view.child(self.render_connection_editor(editor, palette, cx))
+            })
+            .when_some(pending_ssh_key_editor, |view, editor| {
+                view.child(self.render_ssh_key_editor(editor, palette, cx))
+            })
+            .when_some(pending_ssh_key_delete, |view, (key_id, key_name)| {
+                view.child(self.render_ssh_key_delete_confirmation(key_id, key_name, palette, cx))
             })
             .when_some(pending_command_editor, |view, pending| {
                 view.child(self.render_command_editor(pending, palette, cx))

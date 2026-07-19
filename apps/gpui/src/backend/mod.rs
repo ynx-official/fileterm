@@ -24,9 +24,7 @@ pub use commands::{UiPreferences, UiPreferencesInput};
 use crate::{
     error::Result,
     ftp::{FtpProfile, FtpSession},
-    services::ssh_keys::{
-        SshKeyFileSelection, SshKeyImportResult, SshKeyLayout, SshKeyMetadata,
-    },
+    services::ssh_keys::{SshKeyFileSelection, SshKeyImportResult, SshKeyLayout, SshKeyMetadata},
     ssh::SshController,
     term::{SerialConfig, StreamController, TermChunk},
 };
@@ -144,11 +142,7 @@ pub trait FileTermDesktopApi: Send + Sync {
         source_path: String,
         note: String,
     ) -> Result<SshKeyImportResult>;
-    async fn ssh_keys_update_note(
-        &self,
-        key_id: String,
-        note: String,
-    ) -> Result<SshKeyMetadata>;
+    async fn ssh_keys_update_note(&self, key_id: String, note: String) -> Result<SshKeyMetadata>;
     async fn ssh_keys_rename(&self, key_id: String, name: String) -> Result<SshKeyMetadata>;
     async fn ssh_keys_delete(&self, key_id: String) -> Result<()>;
     async fn ssh_keys_get_layout(&self) -> Result<SshKeyLayout>;
@@ -297,11 +291,7 @@ impl FileTermDesktopApi for GpuiDesktopApi {
         crate::services::ssh_keys::import(&self.app, &source_path, &note)
     }
 
-    async fn ssh_keys_update_note(
-        &self,
-        key_id: String,
-        note: String,
-    ) -> Result<SshKeyMetadata> {
+    async fn ssh_keys_update_note(&self, key_id: String, note: String) -> Result<SshKeyMetadata> {
         crate::services::ssh_keys::update_note(&self.app, &key_id, &note)
     }
 

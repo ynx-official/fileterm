@@ -14,6 +14,7 @@ use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc},
 };
+use zeroize::Zeroize;
 
 use crate::{
     ssh::tunnel::{
@@ -33,6 +34,15 @@ pub struct PrivateKeyCredential {
     pub passphrase: Option<String>,
 }
 
+impl Drop for PrivateKeyCredential {
+    fn drop(&mut self) {
+        self.private_key.zeroize();
+        if let Some(passphrase) = self.passphrase.as_mut() {
+            passphrase.zeroize();
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SshConfig {
     pub host: String,
@@ -44,6 +54,15 @@ pub struct SshConfig {
     pub trusted_host_fingerprint: Option<String>,
     pub cols: u16,
     pub rows: u16,
+}
+
+impl Drop for SshConfig {
+    fn drop(&mut self) {
+        if let Some(password) = self.password.as_mut() {
+            password.zeroize();
+        }
+        self.keyboard_interactive_answers.zeroize();
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

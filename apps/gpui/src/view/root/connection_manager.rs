@@ -1,5 +1,6 @@
 use gpui::{div, prelude::*, px, AnyElement, Context, KeyDownEvent};
 use serde_json::{json, Value};
+use zeroize::Zeroize;
 
 use super::RootView;
 use crate::{state::AppState, theme::ThemePalette};
@@ -16,6 +17,7 @@ pub(super) struct PendingConnectionEditor {
     group: String,
     remote_path: String,
     auth_type: String,
+    private_key_id: String,
     private_key_path: String,
     passphrase: String,
     security_mode: String,
@@ -31,6 +33,14 @@ pub(super) struct PendingConnectionEditor {
     delete_confirmation: bool,
 }
 
+impl Drop for PendingConnectionEditor {
+    fn drop(&mut self) {
+        self.password.zeroize();
+        self.passphrase.zeroize();
+        self.private_key_path.zeroize();
+    }
+}
+
 impl PendingConnectionEditor {
     pub(super) fn new() -> Self {
         Self {
@@ -44,6 +54,7 @@ impl PendingConnectionEditor {
             group: "默认".to_string(),
             remote_path: "/".to_string(),
             auth_type: "password".to_string(),
+            private_key_id: String::new(),
             private_key_path: String::new(),
             passphrase: String::new(),
             security_mode: "none".to_string(),
@@ -78,6 +89,7 @@ impl PendingConnectionEditor {
         editor.group = text(profile, "group", "默认");
         editor.remote_path = text(profile, "remotePath", "/");
         editor.auth_type = text(profile, "authType", "password");
+        editor.private_key_id = text(profile, "privateKeyId", "");
         editor.security_mode = text(profile, "securityMode", "none");
         editor.device_path = text(profile, "devicePath", "");
         editor.baud_rate = profile
@@ -193,7 +205,18 @@ impl PendingConnectionEditor {
         input["password"] = Value::String(self.password.clone());
         input["remotePath"] = Value::String(self.remote_path.trim().to_string());
         if self.protocol == "ssh" {
+            if self.auth_type == "privateKey"
+                && self.private_key_id.is_empty()
+                && self.private_key_path.trim().is_empty()
+            {
+                return Err("请选择托管密钥或填写私钥路径".to_string());
+            }
             input["authType"] = Value::String(self.auth_type.clone());
+            input["privateKeyId"] = if self.private_key_id.is_empty() {
+                Value::Null
+            } else {
+                Value::String(self.private_key_id.clone())
+            };
             input["privateKeyPath"] = Value::String(self.private_key_path.clone());
             input["passphrase"] = Value::String(self.passphrase.clone());
         } else if self.protocol == "ftp" {
@@ -669,6 +692,103 @@ impl RootView {
                             ),
                         )
                     })
+                    .when(
+                        editor.protocol == "ssh" && editor.auth_type == "privateKey",
+                        |view| {
+                            view.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div().text_xs().text_color(palette.text_muted).child(
+                                            "托管密钥（点击选择；也可填写下方路径作为回退）",
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .id("connection-managed-key-none")
+                                                    .px_3()
+                                                    .py_1()
+                                                    .rounded_md()
+                                                    .cursor_pointer()
+                                                    .border_1()
+                                                    .border_color(
+                                                        if editor.private_key_id.is_empty() {
+                                                            palette.accent
+                                                        } else {
+                                                            palette.border
+                                                        },
+                                                    )
+                                                    .text_xs()
+                                                    .text_color(palette.text_muted)
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        if let Some(editor) =
+                                                            this.pending_connection_editor.as_mut()
+                                                        {
+                                                            editor.private_key_id.clear();
+                                                        }
+                                                        cx.notify();
+                                                    }))
+                                                    .child("使用文件路径"),
+                                            )
+                                            .children(
+                                                self.state
+                                                    .read(cx)
+                                                    .ssh_keys
+                                                    .iter()
+                                                    .enumerate()
+                                                    .map(|(index, key)| {
+                                                        let key_id = key.id.clone();
+                                                        let active =
+                                                            editor.private_key_id == key.id;
+                                                        div()
+                                                            .id(("connection-managed-key", index))
+                                                            .px_3()
+                                                            .py_1()
+                                                            .rounded_md()
+                                                            .cursor_pointer()
+                                                            .border_1()
+                                                            .border_color(if active {
+                                                                palette.accent
+                                                            } else {
+                                                                palette.border
+                                                            })
+                                                            .text_xs()
+                                                            .text_color(if active {
+                                                                palette.accent
+                                                            } else {
+                                                                palette.text_muted
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    if let Some(editor) = this
+                                                                        .pending_connection_editor
+                                                                        .as_mut()
+                                                                    {
+                                                                        editor.private_key_id =
+                                                                            key_id.clone();
+                                                                        editor
+                                                                            .private_key_path
+                                                                            .clear();
+                                                                    }
+                                                                    cx.notify();
+                                                                },
+                                                            ))
+                                                            .child(key.note.clone().unwrap_or_else(
+                                                                || key.name.clone(),
+                                                            ))
+                                                    }),
+                                            ),
+                                    ),
+                            )
+                        },
+                    )
                     .when(editor.protocol == "ftp", |view| {
                         view.child(
                             div().flex().gap_2().children(

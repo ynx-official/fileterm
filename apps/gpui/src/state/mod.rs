@@ -29,6 +29,7 @@ impl NavigationSection {
             Self::Overview => "概览",
             Self::Connections => "连接管理器",
             Self::Commands => "命令管理器",
+            Self::SshKeys => "密钥管理器",
             Self::Settings => "设置",
         }
     }
@@ -38,6 +39,7 @@ impl NavigationSection {
             Self::Overview => "O",
             Self::Connections => "C",
             Self::Commands => ">_",
+            Self::SshKeys => "K",
             Self::Settings => "S",
         }
     }
@@ -118,6 +120,8 @@ pub struct AppState {
     pub connection_folders: Vec<ConnectionFolderItem>,
     pub commands: Vec<CommandListItem>,
     pub command_folders: Vec<CommandFolderItem>,
+    pub ssh_keys: Vec<SshKeyMetadata>,
+    pub ssh_key_layout: SshKeyLayout,
 }
 
 impl Default for AppState {
@@ -142,6 +146,8 @@ impl Default for AppState {
             connection_folders: Vec::new(),
             commands: Vec::new(),
             command_folders: Vec::new(),
+            ssh_keys: Vec::new(),
+            ssh_key_layout: SshKeyLayout::default(),
         }
     }
 }
@@ -153,6 +159,7 @@ impl AppState {
             NavigationSection::Overview => "overview",
             NavigationSection::Connections => "connections",
             NavigationSection::Commands => "commands",
+            NavigationSection::SshKeys => "ssh-keys",
             NavigationSection::Settings => "settings",
         }
         .to_string();
@@ -263,6 +270,11 @@ impl AppState {
             .iter()
             .filter_map(command_folder_item)
             .collect();
+    }
+
+    pub fn apply_ssh_key_library(&mut self, keys: Vec<SshKeyMetadata>, layout: SshKeyLayout) {
+        self.ssh_keys = keys;
+        self.ssh_key_layout = layout;
     }
 
     pub fn fail_data_load(&mut self, error: impl Into<String>) {

@@ -1,9 +1,14 @@
-use std::{collections::HashMap, fs, path::{Path, PathBuf}};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
-use anyhow::{bail, Context, Result as AnyResult};
+use anyhow::{Context, Result as AnyResult};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     backend::{storage, AppHandle},
@@ -145,10 +150,20 @@ pub fn import(app: &AppHandle, source_path: &str, note: &str) -> Result<SshKeyIm
         return Err(AppError::Command("请输入密钥备注。".to_string()));
     }
     if note.chars().count() > 120 {
-        return Err(AppError::Command("密钥备注不能超过 120 个字符。".to_string()));
+        return Err(AppError::Command(
+            "密钥备注不能超过 120 个字符。".to_string(),
+        ));
     }
 
     let inspected = inspect_private_key(Path::new(source_path))?;
+    import_inspected(app, inspected, note)
+}
+
+fn import_inspected(
+    app: &AppHandle,
+    inspected: InspectedPrivateKey,
+    note: &str,
+) -> Result<SshKeyImportResult> {
     let paths = ensure_store(app)?;
     let mut index = read_index(&paths)?;
     if let Some(existing) = index
@@ -192,7 +207,9 @@ pub fn update_note(app: &AppHandle, key_id: &str, note: &str) -> Result<SshKeyMe
         return Err(AppError::Command("密钥备注不能为空。".to_string()));
     }
     if note.chars().count() > 120 {
-        return Err(AppError::Command("密钥备注不能超过 120 个字符。".to_string()));
+        return Err(AppError::Command(
+            "密钥备注不能超过 120 个字符。".to_string(),
+        ));
     }
     let paths = ensure_store(app)?;
     let mut index = read_index(&paths)?;
@@ -214,7 +231,9 @@ pub fn rename(app: &AppHandle, key_id: &str, name: &str) -> Result<SshKeyMetadat
         return Err(AppError::Command("密钥名称不能为空。".to_string()));
     }
     if name.chars().count() > 120 {
-        return Err(AppError::Command("密钥名称不能超过 120 个字符。".to_string()));
+        return Err(AppError::Command(
+            "密钥名称不能超过 120 个字符。".to_string(),
+        ));
     }
     let paths = ensure_store(app)?;
     let mut index = read_index(&paths)?;
@@ -256,7 +275,9 @@ pub fn delete(app: &AppHandle, key_id: &str) -> Result<()> {
     }
     let mut secrets = read_secrets(&paths)?;
     secrets.passphrases.remove(key_id);
-    write_secrets(&paths, &secrets)?;
+    let result = write_secrets(&paths, &secrets);
+    secrets.passphrases.values_mut().for_each(Zeroize::zeroize);
+    result?;
     let mut layout = read_layout(&paths)?;
     layout.assignments.remove(key_id);
     layout.item_order.remove(key_id);
@@ -292,11 +313,12 @@ pub fn resolve_managed_key(app: &AppHandle, key_id: &str) -> AnyResult<ResolvedP
     lock_down_file(&key_path).map_err(anyhow::Error::from)?;
     let private_key = fs::read_to_string(&key_path)
         .with_context(|| format!("read managed SSH private key {}", key_path.display()))?;
-    let passphrase = read_secrets(&paths)
-        .map_err(anyhow::Error::from)?
+    let mut secrets = read_secrets(&paths).map_err(anyhow::Error::from)?;
+    let passphrase = secrets
         .passphrases
         .remove(key_id)
         .filter(|value| !value.is_empty());
+    secrets.passphrases.values_mut().for_each(Zeroize::zeroize);
     Ok(ResolvedPrivateKey {
         private_key,
         passphrase,
@@ -345,9 +367,39 @@ fn ensure_store(app: &AppHandle) -> Result<KeyPaths> {
         lock_down_file(&paths.secrets_path)?;
     }
     if !paths.layout_path.exists() {
-        write_layout(&paths, &SshKeyLayout::default())?;
+        let layout = read_legacy_layout(app).unwrap_or_default();
+        write_layout(&paths, &layout)?;
     }
     Ok(paths)
+}
+
+fn read_legacy_layout(app: &AppHandle) -> Option<SshKeyLayout> {
+    let path = storage::workspace_file(app, "ui-state.json").ok()?;
+    let root: serde_json::Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
+    let raw = root
+        .get("values")
+        .and_then(|values| values.get("ssh-key-manager-ui"))
+        .or_else(|| root.get("ssh-key-manager-ui"))?
+        .as_str()?;
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    Some(SshKeyLayout {
+        folders: serde_json::from_value(value.get("folders")?.clone()).ok()?,
+        assignments: serde_json::from_value(
+            value
+                .get("assignments")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+        .ok()?,
+        item_order: serde_json::from_value(
+            value
+                .get("itemOrder")
+                .or_else(|| value.get("keyOrder"))
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+        )
+        .ok()?,
+    })
 }
 
 fn read_index(paths: &KeyPaths) -> Result<StoredSshKeyIndex> {
@@ -404,7 +456,7 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(&temporary);
         return Err(error);
     }
-    if let Err(error) = storage::replace_file_atomically(temporary.clone(), path) {
+    if let Err(error) = storage::replace_file_atomically(&temporary, path) {
         let _ = fs::remove_file(temporary);
         return Err(error);
     }
@@ -447,7 +499,7 @@ fn metadata(key: StoredSshKey, usage: &HashMap<String, Vec<String>>) -> SshKeyMe
 }
 
 struct InspectedPrivateKey {
-    bytes: Vec<u8>,
+    bytes: Zeroizing<Vec<u8>>,
     name: String,
     algorithm: String,
     fingerprint: String,
@@ -457,28 +509,35 @@ struct InspectedPrivateKey {
 fn inspect_private_key(path: &Path) -> Result<InspectedPrivateKey> {
     let file_metadata = fs::metadata(path)
         .map_err(|error| AppError::Storage(format!("无法读取私钥文件: {error}")))?;
-    if !file_metadata.is_file() || file_metadata.len() == 0 || file_metadata.len() > MAX_PRIVATE_KEY_BYTES {
+    if !file_metadata.is_file()
+        || file_metadata.len() == 0
+        || file_metadata.len() > MAX_PRIVATE_KEY_BYTES
+    {
         return Err(AppError::Command(
             "私钥文件为空、无效或超过 1 MB 限制。".to_string(),
         ));
     }
-    let bytes = fs::read(path)
-        .map_err(|error| AppError::Storage(format!("无法读取私钥文件: {error}")))?;
-    let content = String::from_utf8(bytes.clone()).map_err(|_| {
+    let bytes = Zeroizing::new(
+        fs::read(path).map_err(|error| AppError::Storage(format!("无法读取私钥文件: {error}")))?,
+    );
+    let content = Zeroizing::new(String::from_utf8(bytes.to_vec()).map_err(|_| {
         AppError::Command("无法识别该文件，请选择文本格式的 SSH 私钥。".to_string())
-    })?;
+    })?);
     if !content.contains("PRIVATE KEY") {
         return Err(AppError::Command("选择的文件不是 SSH 私钥。".to_string()));
     }
-    let decoded = russh::keys::decode_secret_key(&content, None);
+    let decoded = russh_keys::decode_secret_key(&content, None);
     let (algorithm, fingerprint, encrypted) = match decoded {
-        Ok(key) => (
-            key.public_key().algorithm().as_str().to_string(),
-            key.public_key()
-                .fingerprint(russh::keys::HashAlg::Sha256)
-                .to_string(),
-            false,
-        ),
+        Ok(key) => {
+            let public = key
+                .clone_public_key()
+                .map_err(|_| AppError::Command("无法从 SSH 私钥提取公钥。".to_string()))?;
+            (
+                key.name().to_string(),
+                format!("SHA256:{}", public.fingerprint()),
+                false,
+            )
+        }
         Err(_) if probably_encrypted(&content) => (
             "encrypted".to_string(),
             format!(
@@ -530,15 +589,18 @@ fn validate_layout(layout: &SshKeyLayout) -> Result<()> {
 }
 
 fn heal_layout(layout: &mut SshKeyLayout, keys: &[StoredSshKey]) {
-    let key_ids = keys.iter().map(|key| key.id.as_str()).collect::<std::collections::HashSet<_>>();
+    let key_ids = keys
+        .iter()
+        .map(|key| key.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
     let folder_ids = layout
         .folders
         .iter()
         .map(|folder| folder.id.as_str())
         .collect::<std::collections::HashSet<_>>();
-    layout
-        .assignments
-        .retain(|key_id, folder_id| key_ids.contains(key_id.as_str()) && folder_ids.contains(folder_id.as_str()));
+    layout.assignments.retain(|key_id, folder_id| {
+        key_ids.contains(key_id.as_str()) && folder_ids.contains(folder_id.as_str())
+    });
     layout
         .item_order
         .retain(|id, _| key_ids.contains(id.as_str()) || folder_ids.contains(id.as_str()));
@@ -609,7 +671,11 @@ mod tests {
         fs::write(&public, "ssh-ed25519 AAAA test").unwrap();
         assert!(select_file(&app, &public).is_err());
         let malformed = directory.join("bad.key");
-        fs::write(&malformed, "-----BEGIN PRIVATE KEY-----\ninvalid\n-----END PRIVATE KEY-----").unwrap();
+        fs::write(
+            &malformed,
+            "-----BEGIN PRIVATE KEY-----\ninvalid\n-----END PRIVATE KEY-----",
+        )
+        .unwrap();
         assert!(select_file(&app, &malformed).is_err());
         fs::remove_dir_all(directory).unwrap();
     }
@@ -618,7 +684,9 @@ mod tests {
     fn layout_rejects_path_like_ids_and_unknown_folders() {
         let (app, directory) = test_app();
         let mut layout = SshKeyLayout::default();
-        layout.assignments.insert("../secret".to_string(), "missing".to_string());
+        layout
+            .assignments
+            .insert("../secret".to_string(), "missing".to_string());
         assert!(save_layout(&app, layout).is_err());
         fs::remove_dir_all(directory).unwrap();
     }
@@ -631,13 +699,159 @@ mod tests {
         let paths = KeyPaths::for_app(&app).unwrap();
         let key_path = paths.key_path(&key_id).unwrap();
         write_bytes_atomic(&key_path, b"private material").unwrap();
-        assert!(!fs::read_to_string(&paths.index_path).unwrap().contains("private material"));
+        assert!(!fs::read_to_string(&paths.index_path)
+            .unwrap()
+            .contains("private material"));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(key_path).unwrap().permissions().mode() & 0o777, 0o600);
-            assert_eq!(fs::metadata(paths.keys_dir).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                fs::metadata(key_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                fs::metadata(paths.keys_dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    fn inspected(fingerprint: &str, bytes: &[u8]) -> InspectedPrivateKey {
+        InspectedPrivateKey {
+            bytes: Zeroizing::new(bytes.to_vec()),
+            name: "id_ed25519".to_string(),
+            algorithm: "ssh-ed25519".to_string(),
+            fingerprint: fingerprint.to_string(),
+            encrypted: false,
+        }
+    }
+
+    #[test]
+    fn import_duplicate_rename_and_delete_preserve_library_invariants() {
+        let (app, directory) = test_app();
+        let first =
+            import_inspected(&app, inspected("SHA256:first", b"PRIVATE ONE"), "生产").unwrap();
+        assert!(!first.duplicate);
+        let duplicate = import_inspected(
+            &app,
+            inspected("SHA256:first", b"DIFFERENT CONTENT"),
+            "重复",
+        )
+        .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.key.id, first.key.id);
+        assert_eq!(list(&app).unwrap().len(), 1);
+
+        let renamed = rename(&app, &first.key.id, "deploy-key").unwrap();
+        assert_eq!(renamed.name, "deploy-key");
+        let updated = update_note(&app, &first.key.id, "新的备注").unwrap();
+        assert_eq!(updated.note.as_deref(), Some("新的备注"));
+        let paths = KeyPaths::for_app(&app).unwrap();
+        let mut passphrases = HashMap::new();
+        passphrases.insert(first.key.id.clone(), "secret".to_string());
+        write_secrets(
+            &paths,
+            &StoredSshKeySecrets {
+                version: STORE_VERSION,
+                passphrases,
+            },
+        )
+        .unwrap();
+        let resolved = resolve_managed_key(&app, &first.key.id).unwrap();
+        assert_eq!(resolved.private_key, "PRIVATE ONE");
+        assert_eq!(resolved.passphrase.as_deref(), Some("secret"));
+
+        delete(&app, &first.key.id).unwrap();
+        assert!(list(&app).unwrap().is_empty());
+        assert!(!directory
+            .join("ssh-keys")
+            .join(format!("{}.key", first.key.id))
+            .exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn referenced_key_cannot_be_deleted_and_secret_never_enters_public_json() {
+        let (app, directory) = test_app();
+        let imported = import_inspected(
+            &app,
+            inspected("SHA256:referenced", b"TOP SECRET PRIVATE KEY"),
+            "引用测试",
+        )
+        .unwrap();
+        storage::write_json_array(
+            &app,
+            "profiles.json",
+            &[serde_json::json!({
+                "id": "profile-1",
+                "type": "ssh",
+                "name": "production",
+                "privateKeyId": imported.key.id,
+            })],
+        )
+        .unwrap();
+
+        let error = delete(&app, &imported.key.id).unwrap_err().to_string();
+        assert!(error.contains("production"));
+        let public_json = fs::read_to_string(directory.join("ssh-keys.json")).unwrap();
+        assert!(!public_json.contains("TOP SECRET PRIVATE KEY"));
+        assert!(!error.contains("TOP SECRET PRIVATE KEY"));
+        assert_eq!(list(&app).unwrap()[0].usage_count, 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_electron_folder_layout_is_migrated_once() {
+        let (app, directory) = test_app();
+        let folder_id = uuid::Uuid::new_v4().to_string();
+        fs::write(
+            directory.join("ui-state.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "values": {
+                    "ssh-key-manager-ui": serde_json::json!({
+                        "folders": [{ "id": folder_id, "name": "历史分组" }],
+                        "assignments": {},
+                        "itemOrder": {}
+                    }).to_string()
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let layout = get_layout(&app).unwrap();
+        assert_eq!(layout.folders[0].name, "历史分组");
+        assert!(directory.join("ssh-key-layout.json").is_file());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn layout_persists_folders_and_heals_deleted_key_assignments() {
+        let (app, directory) = test_app();
+        let imported = import_inspected(
+            &app,
+            inspected("SHA256:layout", b"PRIVATE LAYOUT"),
+            "布局测试",
+        )
+        .unwrap();
+        let folder_id = uuid::Uuid::new_v4().to_string();
+        let mut layout = SshKeyLayout {
+            folders: vec![SshKeyFolder {
+                id: folder_id.clone(),
+                name: "生产".to_string(),
+            }],
+            ..SshKeyLayout::default()
+        };
+        layout
+            .assignments
+            .insert(imported.key.id.clone(), folder_id.clone());
+        save_layout(&app, layout).unwrap();
+        assert_eq!(
+            get_layout(&app).unwrap().assignments.get(&imported.key.id),
+            Some(&folder_id)
+        );
+        delete(&app, &imported.key.id).unwrap();
+        assert!(get_layout(&app).unwrap().assignments.is_empty());
         fs::remove_dir_all(directory).unwrap();
     }
 }
