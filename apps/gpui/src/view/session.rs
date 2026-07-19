@@ -1,8 +1,6 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
-use gpui::{
-    div, prelude::*, px, Context, Entity, IntoElement, KeyDownEvent, Render, Subscription, Window,
-};
+use gpui::{div, prelude::*, px, Context, Entity, IntoElement, Render, Subscription, Window};
 
 use crate::{
     sftp::{
@@ -20,7 +18,10 @@ use crate::{
     state::{AppState, TabStatus},
     term::{ssh_transport, TermChunk, TermView},
     theme::ThemePalette,
-    view::{text_editor, SshTunnelPanel},
+    view::{
+        text_editor::{TextInput, TextInputEvent, TextInputMode},
+        SshTunnelPanel,
+    },
 };
 
 pub struct SessionWorkspace {
@@ -52,14 +53,15 @@ enum FileOperationKind {
 struct PendingFileOperation {
     kind: FileOperationKind,
     title: &'static str,
-    input: String,
+    input: Entity<TextInput>,
+    value: String,
 }
 
 #[derive(Clone)]
 struct PendingFileEditor {
     path: String,
+    input: Entity<TextInput>,
     content: String,
-    cursor_byte: usize,
     original_size: u64,
     original_modified: Option<u64>,
     busy: bool,
@@ -263,23 +265,51 @@ impl SessionWorkspace {
                 let bytes = client.read(&path).await?;
                 let content = String::from_utf8(bytes)
                     .map_err(|_| anyhow::anyhow!("文件不是 UTF-8 文本，无法在内置编辑器中打开"))?;
-                let cursor_byte = content.len();
-                Ok::<_, anyhow::Error>(PendingFileEditor {
-                    path,
-                    content,
-                    cursor_byte,
-                    original_size: metadata.size,
-                    original_modified: metadata.modified,
-                    busy: false,
-                    dirty: false,
-                    discard_armed: false,
-                    error: None,
-                })
+                Ok::<_, anyhow::Error>((path, content, metadata.size, metadata.modified))
             }
             .await;
             let _ = this.update(cx, |workspace, cx| {
                 match result {
-                    Ok(editor) => workspace.pending_file_editor = Some(editor),
+                    Ok((path, content, original_size, original_modified)) => {
+                        let palette = ThemePalette::for_mode(workspace.app_state.read(cx).theme);
+                        let input = cx.new(|cx| {
+                            let mut input = TextInput::new(
+                                content.clone(),
+                                "",
+                                TextInputMode::MultiLine,
+                                false,
+                                palette,
+                                cx,
+                            );
+                            input.set_height(px(520.0), cx);
+                            input.set_headless(true, cx);
+                            input.request_focus(cx);
+                            input
+                        });
+                        cx.subscribe(&input, |workspace, _, event, cx| match event {
+                            TextInputEvent::Changed(value) => {
+                                if let Some(editor) = workspace.pending_file_editor.as_mut() {
+                                    editor.content = value.clone();
+                                    mark_editor_changed(editor);
+                                }
+                            }
+                            TextInputEvent::Save => workspace.save_file_editor(cx),
+                            TextInputEvent::Cancel => workspace.cancel_file_editor(cx),
+                            TextInputEvent::Submit => {}
+                        })
+                        .detach();
+                        workspace.pending_file_editor = Some(PendingFileEditor {
+                            path,
+                            input,
+                            content,
+                            original_size,
+                            original_modified,
+                            busy: false,
+                            dirty: false,
+                            discard_armed: false,
+                            error: None,
+                        });
+                    }
                     Err(error) => workspace.connection_error = Some(error.to_string()),
                 }
                 cx.notify();
@@ -331,121 +361,59 @@ impl SessionWorkspace {
         .detach();
     }
 
+    fn cancel_file_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.pending_file_editor.as_mut() else {
+            return;
+        };
+        if editor.dirty && !editor.discard_armed {
+            editor.discard_armed = true;
+            editor.error = Some("内容尚未保存；再次按 Esc 放弃修改".to_string());
+        } else {
+            self.pending_file_editor = None;
+        }
+        cx.notify();
+    }
+
     fn begin_file_operation(
         &mut self,
         kind: FileOperationKind,
         title: &'static str,
-        input: String,
+        value: String,
         cx: &mut Context<Self>,
     ) {
-        self.pending_file_operation = Some(PendingFileOperation { kind, title, input });
+        let palette = ThemePalette::for_mode(self.app_state.read(cx).theme);
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(
+                value.clone(),
+                "输入后按 Enter",
+                TextInputMode::SingleLine,
+                false,
+                palette,
+                cx,
+            );
+            input.request_focus(cx);
+            input
+        });
+        cx.subscribe(&input, |workspace, _, event, cx| match event {
+            TextInputEvent::Changed(value) => {
+                if let Some(pending) = workspace.pending_file_operation.as_mut() {
+                    pending.value = value.clone();
+                }
+            }
+            TextInputEvent::Submit | TextInputEvent::Save => workspace.submit_file_operation(cx),
+            TextInputEvent::Cancel => {
+                workspace.pending_file_operation = None;
+                cx.notify();
+            }
+        })
+        .detach();
+        self.pending_file_operation = Some(PendingFileOperation {
+            kind,
+            title,
+            input,
+            value,
+        });
         cx.notify();
-    }
-
-    fn handle_file_operation_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.pending_file_editor.is_some() {
-            self.handle_file_editor_key(event, cx);
-            return;
-        }
-        let Some(pending) = self.pending_file_operation.as_mut() else {
-            return;
-        };
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.pending_file_operation = None;
-                cx.notify();
-            }
-            "enter" | "return" => self.submit_file_operation(cx),
-            "backspace" => {
-                pending.input.pop();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    pending.input.push_str(text);
-                    cx.notify();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_file_editor_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(editor) = self.pending_file_editor.as_mut() else {
-            return;
-        };
-        if editor.busy {
-            return;
-        }
-        let save_shortcut = event.keystroke.key == "s"
-            && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control);
-        if save_shortcut {
-            self.save_file_editor(cx);
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "escape" if editor.dirty && !editor.discard_armed => {
-                editor.discard_armed = true;
-                editor.error = Some("内容尚未保存；再次按 Esc 放弃修改".to_string());
-                cx.notify();
-            }
-            "escape" => {
-                self.pending_file_editor = None;
-                cx.notify();
-            }
-            "left" => {
-                editor.cursor_byte =
-                    text_editor::previous_char_boundary(&editor.content, editor.cursor_byte);
-                cx.notify();
-            }
-            "right" => {
-                editor.cursor_byte =
-                    text_editor::next_char_boundary(&editor.content, editor.cursor_byte);
-                cx.notify();
-            }
-            "up" => {
-                editor.cursor_byte =
-                    text_editor::move_cursor_vertically(&editor.content, editor.cursor_byte, -1);
-                cx.notify();
-            }
-            "down" => {
-                editor.cursor_byte =
-                    text_editor::move_cursor_vertically(&editor.content, editor.cursor_byte, 1);
-                cx.notify();
-            }
-            "home" => {
-                editor.cursor_byte = text_editor::line_start(&editor.content, editor.cursor_byte);
-                cx.notify();
-            }
-            "end" => {
-                editor.cursor_byte = text_editor::line_end(&editor.content, editor.cursor_byte);
-                cx.notify();
-            }
-            "enter" | "return" => {
-                insert_editor_text(editor, "\n");
-                cx.notify();
-            }
-            "backspace" => {
-                backspace_editor(editor);
-                cx.notify();
-            }
-            "delete" => {
-                delete_editor_char(editor);
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    insert_editor_text(editor, text);
-                    cx.notify();
-                }
-            }
-            _ => {}
-        }
     }
 
     fn submit_file_operation(&mut self, cx: &mut Context<Self>) {
@@ -457,7 +425,7 @@ impl SessionWorkspace {
             return;
         };
         let cwd = self.files.cwd.to_string_lossy().to_string();
-        let input = pending.input.trim().to_string();
+        let input = pending.value.trim().to_string();
         if input.is_empty() {
             self.connection_error = Some("文件名或权限不能为空".to_string());
             cx.notify();
@@ -1029,7 +997,7 @@ impl SessionWorkspace {
         } else {
             "已保存".to_string()
         };
-        let visible_content = text_editor::with_visible_cursor(&editor.content, editor.cursor_byte);
+        let visible_content = editor.input.read(cx).content_with_cursor();
         div()
             .absolute()
             .inset_0()
@@ -1071,6 +1039,7 @@ impl SessionWorkspace {
                     )
                     .child(
                         div()
+                            .relative()
                             .min_h(px(0.0))
                             .flex_1()
                             .overflow_hidden()
@@ -1082,7 +1051,8 @@ impl SessionWorkspace {
                             .font_family("monospace")
                             .text_sm()
                             .text_color(palette.text)
-                            .child(visible_content),
+                            .child(visible_content)
+                            .child(editor.input.clone()),
                     )
                     .when_some(editor.error, |view, error| {
                         view.child(div().text_xs().text_color(palette.danger).child(error))
@@ -1100,24 +1070,9 @@ impl SessionWorkspace {
                                     .cursor_pointer()
                                     .text_sm()
                                     .text_color(palette.text_muted)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let dirty = this
-                                            .pending_file_editor
-                                            .as_ref()
-                                            .is_some_and(|editor| editor.dirty);
-                                        if dirty {
-                                            if let Some(editor) = this.pending_file_editor.as_mut()
-                                            {
-                                                editor.discard_armed = true;
-                                                editor.error = Some(
-                                                    "内容尚未保存；再次按 Esc 放弃修改".to_string(),
-                                                );
-                                            }
-                                        } else {
-                                            this.pending_file_editor = None;
-                                        }
-                                        cx.notify();
-                                    }))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.cancel_file_editor(cx)),
+                                    )
                                     .child("关闭"),
                             )
                             .child(
@@ -1169,23 +1124,7 @@ impl SessionWorkspace {
                             .text_color(palette.text)
                             .child(pending.title),
                     )
-                    .child(
-                        div()
-                            .h(px(40.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .rounded_md()
-                            .bg(palette.background)
-                            .border_1()
-                            .border_color(palette.accent)
-                            .text_color(palette.text)
-                            .child(if pending.input.is_empty() {
-                                "输入后按 Enter".to_string()
-                            } else {
-                                pending.input
-                            }),
-                    )
+                    .child(pending.input.clone())
                     .child(
                         div()
                             .flex()
@@ -1374,7 +1313,6 @@ impl Render for SessionWorkspace {
         div()
             .size_full()
             .relative()
-            .on_key_down(cx.listener(Self::handle_file_operation_key))
             .flex()
             .bg(palette.background)
             .child(
@@ -1425,24 +1363,6 @@ fn mark_editor_changed(editor: &mut PendingFileEditor) {
     editor.dirty = true;
     editor.discard_armed = false;
     editor.error = None;
-}
-
-fn insert_editor_text(editor: &mut PendingFileEditor, text: &str) {
-    if text_editor::insert(&mut editor.content, &mut editor.cursor_byte, text) {
-        mark_editor_changed(editor);
-    }
-}
-
-fn backspace_editor(editor: &mut PendingFileEditor) {
-    if text_editor::backspace(&mut editor.content, &mut editor.cursor_byte) {
-        mark_editor_changed(editor);
-    }
-}
-
-fn delete_editor_char(editor: &mut PendingFileEditor) {
-    if text_editor::delete(&mut editor.content, &mut editor.cursor_byte) {
-        mark_editor_changed(editor);
-    }
 }
 
 async fn inspect_transfer(
@@ -1623,37 +1543,5 @@ mod tests {
     fn byte_sizes_are_compact() {
         assert_eq!(format_bytes(42), "42 B");
         assert_eq!(format_bytes(2048), "2.0 KB");
-    }
-
-    #[test]
-    fn editor_inserts_and_deletes_at_utf8_cursor() {
-        let mut editor = editor("甲乙");
-        editor.cursor_byte = "甲".len();
-
-        insert_editor_text(&mut editor, "A");
-        assert_eq!(editor.content, "甲A乙");
-        assert_eq!(editor.cursor_byte, "甲A".len());
-
-        backspace_editor(&mut editor);
-        assert_eq!(editor.content, "甲乙");
-        assert_eq!(editor.cursor_byte, "甲".len());
-
-        delete_editor_char(&mut editor);
-        assert_eq!(editor.content, "甲");
-        assert!(editor.dirty);
-    }
-
-    fn editor(content: &str) -> PendingFileEditor {
-        PendingFileEditor {
-            path: "/tmp/file".to_string(),
-            content: content.to_string(),
-            cursor_byte: content.len(),
-            original_size: content.len() as u64,
-            original_modified: None,
-            busy: false,
-            dirty: false,
-            discard_armed: false,
-            error: None,
-        }
     }
 }

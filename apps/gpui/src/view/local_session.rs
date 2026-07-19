@@ -1,6 +1,6 @@
 use std::{path::Path, sync::Arc};
 
-use gpui::{div, prelude::*, px, Context, Entity, IntoElement, KeyDownEvent, Render, Window};
+use gpui::{div, prelude::*, px, Context, Entity, IntoElement, Render, Window};
 
 use crate::{
     backend::sessions::local_files::{
@@ -10,6 +10,7 @@ use crate::{
     state::AppState,
     term::{PtyHandle, TermView},
     theme::ThemePalette,
+    view::text_editor::{TextInput, TextInputEvent, TextInputMode},
 };
 
 const MAX_EDITOR_BYTES: u64 = 1024 * 1024;
@@ -27,8 +28,8 @@ pub struct LocalSessionWorkspace {
 #[derive(Clone)]
 struct LocalFileEditor {
     path: String,
+    input: Entity<TextInput>,
     content: String,
-    cursor_byte: usize,
     original_size: u64,
     original_modified_nanos: u128,
     original_sha256: String,
@@ -137,10 +138,38 @@ impl LocalSessionWorkspace {
         }
         match app_read_local_text_file(&item.path, MAX_EDITOR_BYTES) {
             Ok(file) => {
+                let palette = ThemePalette::for_mode(self.app_state.read(cx).theme);
+                let content = file.content;
+                let input = cx.new(|cx| {
+                    let mut input = TextInput::new(
+                        content.clone(),
+                        "",
+                        TextInputMode::MultiLine,
+                        false,
+                        palette,
+                        cx,
+                    );
+                    input.set_height(px(520.0), cx);
+                    input.set_headless(true, cx);
+                    input.request_focus(cx);
+                    input
+                });
+                cx.subscribe(&input, |workspace, _, event, cx| match event {
+                    TextInputEvent::Changed(value) => {
+                        if let Some(editor) = workspace.editor.as_mut() {
+                            editor.content = value.clone();
+                            mark_editor_changed(editor);
+                        }
+                    }
+                    TextInputEvent::Save => workspace.save_editor(cx),
+                    TextInputEvent::Cancel => workspace.cancel_editor(cx),
+                    TextInputEvent::Submit => {}
+                })
+                .detach();
                 self.editor = Some(LocalFileEditor {
                     path: item.path,
-                    cursor_byte: file.content.len(),
-                    content: file.content,
+                    input,
+                    content,
                     original_size: file.size,
                     original_modified_nanos: file.modified_nanos,
                     original_sha256: file.sha256,
@@ -186,69 +215,15 @@ impl LocalSessionWorkspace {
         cx.notify();
     }
 
-    fn handle_editor_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn cancel_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_mut() else {
             return;
         };
-        if editor.busy {
-            return;
-        }
-        if event.keystroke.key == "s"
-            && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
-        {
-            self.save_editor(cx);
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "escape" if editor.dirty && !editor.discard_armed => {
-                editor.discard_armed = true;
-                editor.error = Some("内容尚未保存；再次按 Esc 放弃修改".to_string());
-            }
-            "escape" => self.editor = None,
-            "left" => {
-                editor.cursor_byte =
-                    super::text_editor::previous_char_boundary(&editor.content, editor.cursor_byte)
-            }
-            "right" => {
-                editor.cursor_byte =
-                    super::text_editor::next_char_boundary(&editor.content, editor.cursor_byte)
-            }
-            "up" => {
-                editor.cursor_byte = super::text_editor::move_cursor_vertically(
-                    &editor.content,
-                    editor.cursor_byte,
-                    -1,
-                )
-            }
-            "down" => {
-                editor.cursor_byte = super::text_editor::move_cursor_vertically(
-                    &editor.content,
-                    editor.cursor_byte,
-                    1,
-                )
-            }
-            "home" => {
-                editor.cursor_byte =
-                    super::text_editor::line_start(&editor.content, editor.cursor_byte)
-            }
-            "end" => {
-                editor.cursor_byte =
-                    super::text_editor::line_end(&editor.content, editor.cursor_byte)
-            }
-            "enter" | "return" => edit_content(editor, Some("\n"), false),
-            "backspace" => edit_content(editor, None, true),
-            "delete" => delete_content(editor),
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    edit_content(editor, Some(text), false);
-                }
-            }
-            _ => return,
+        if editor.dirty && !editor.discard_armed {
+            editor.discard_armed = true;
+            editor.error = Some("内容尚未保存；再次按 Esc 放弃修改".to_string());
+        } else {
+            self.editor = None;
         }
         cx.notify();
     }
@@ -316,7 +291,7 @@ impl LocalSessionWorkspace {
         palette: ThemePalette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let visible = super::text_editor::with_visible_cursor(&editor.content, editor.cursor_byte);
+        let visible = editor.input.read(cx).content_with_cursor();
         div()
             .absolute()
             .inset_0()
@@ -359,6 +334,7 @@ impl LocalSessionWorkspace {
                     )
                     .child(
                         div()
+                            .relative()
                             .min_h(px(0.0))
                             .flex_1()
                             .overflow_hidden()
@@ -369,7 +345,8 @@ impl LocalSessionWorkspace {
                             .border_color(palette.accent)
                             .font_family("monospace")
                             .text_sm()
-                            .child(visible),
+                            .child(visible)
+                            .child(editor.input.clone()),
                     )
                     .when_some(editor.error, |view, error| {
                         view.child(div().text_xs().text_color(palette.danger).child(error))
@@ -385,20 +362,7 @@ impl LocalSessionWorkspace {
                                     .px_3()
                                     .py_2()
                                     .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let dirty = this.editor.as_ref().is_some_and(|e| e.dirty);
-                                        if dirty {
-                                            if let Some(editor) = this.editor.as_mut() {
-                                                editor.discard_armed = true;
-                                                editor.error = Some(
-                                                    "内容尚未保存；再次按 Esc 放弃修改".to_string(),
-                                                );
-                                            }
-                                        } else {
-                                            this.editor = None;
-                                        }
-                                        cx.notify();
-                                    }))
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_editor(cx)))
                                     .child("关闭"),
                             )
                             .child(
@@ -415,25 +379,6 @@ impl LocalSessionWorkspace {
                             ),
                     ),
             )
-    }
-}
-
-fn edit_content(editor: &mut LocalFileEditor, text: Option<&str>, backspace: bool) {
-    let changed = if backspace {
-        super::text_editor::backspace(&mut editor.content, &mut editor.cursor_byte)
-    } else {
-        text.is_some_and(|text| {
-            super::text_editor::insert(&mut editor.content, &mut editor.cursor_byte, text)
-        })
-    };
-    if changed {
-        mark_editor_changed(editor);
-    }
-}
-
-fn delete_content(editor: &mut LocalFileEditor) {
-    if super::text_editor::delete(&mut editor.content, &mut editor.cursor_byte) {
-        mark_editor_changed(editor);
     }
 }
 
@@ -466,7 +411,6 @@ impl Render for LocalSessionWorkspace {
         div()
             .size_full()
             .relative()
-            .on_key_down(cx.listener(Self::handle_editor_key))
             .flex()
             .bg(palette.background)
             .child(
@@ -612,27 +556,5 @@ mod tests {
     #[test]
     fn shell_resolution_never_returns_empty() {
         assert!(!default_shell().trim().is_empty());
-    }
-
-    #[test]
-    fn local_editor_changes_utf8_at_cursor() {
-        let mut editor = LocalFileEditor {
-            path: "/tmp/test".to_string(),
-            content: "甲乙".to_string(),
-            cursor_byte: "甲".len(),
-            original_size: 6,
-            original_modified_nanos: 0,
-            original_sha256: String::new(),
-            busy: false,
-            dirty: false,
-            discard_armed: false,
-            error: None,
-        };
-        edit_content(&mut editor, Some("A"), false);
-        assert_eq!(editor.content, "甲A乙");
-        edit_content(&mut editor, None, true);
-        assert_eq!(editor.content, "甲乙");
-        delete_content(&mut editor);
-        assert_eq!(editor.content, "甲");
     }
 }

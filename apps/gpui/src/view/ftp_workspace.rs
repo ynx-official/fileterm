@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use gpui::{div, prelude::*, px, Context, IntoElement, KeyDownEvent, Render, Window};
+use gpui::{div, prelude::*, px, Context, Entity, IntoElement, Render, Window};
 
 use crate::{
     ftp::client::{join_remote_path, FtpSession},
@@ -14,6 +14,7 @@ use crate::{
     },
     state::AppState,
     theme::ThemePalette,
+    view::text_editor::{TextInput, TextInputEvent, TextInputMode},
 };
 
 pub struct FtpWorkspace {
@@ -30,8 +31,8 @@ pub struct FtpWorkspace {
 #[derive(Clone)]
 struct FtpFileEditor {
     path: String,
+    input: Entity<TextInput>,
     content: String,
-    cursor_byte: usize,
     original_size: u64,
     original_sha256: String,
     busy: bool,
@@ -191,10 +192,38 @@ impl FtpWorkspace {
             let _ = this.update(cx, |workspace, cx| {
                 match result {
                     Ok(file) => {
+                        let palette = ThemePalette::for_mode(workspace.app_state.read(cx).theme);
+                        let content = file.content;
+                        let input = cx.new(|cx| {
+                            let mut input = TextInput::new(
+                                content.clone(),
+                                "",
+                                TextInputMode::MultiLine,
+                                false,
+                                palette,
+                                cx,
+                            );
+                            input.set_height(px(520.0), cx);
+                            input.set_headless(true, cx);
+                            input.request_focus(cx);
+                            input
+                        });
+                        cx.subscribe(&input, |workspace, _, event, cx| match event {
+                            TextInputEvent::Changed(value) => {
+                                if let Some(editor) = workspace.editor.as_mut() {
+                                    editor.content = value.clone();
+                                    mark_editor_changed(editor);
+                                }
+                            }
+                            TextInputEvent::Save => workspace.save_editor(cx),
+                            TextInputEvent::Cancel => workspace.cancel_editor(cx),
+                            TextInputEvent::Submit => {}
+                        })
+                        .detach();
                         workspace.editor = Some(FtpFileEditor {
                             path,
-                            cursor_byte: file.content.len(),
-                            content: file.content,
+                            input,
+                            content,
                             original_size: file.size,
                             original_sha256: file.sha256,
                             busy: false,
@@ -255,73 +284,15 @@ impl FtpWorkspace {
         .detach();
     }
 
-    fn handle_editor_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn cancel_editor(&mut self, cx: &mut Context<Self>) {
         let Some(editor) = self.editor.as_mut() else {
             return;
         };
-        if editor.busy {
-            return;
-        }
-        if event.keystroke.key == "s"
-            && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control)
-        {
-            self.save_editor(cx);
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "escape" if editor.dirty && !editor.discard_armed => {
-                editor.discard_armed = true;
-                editor.error = Some("内容尚未保存；再次按 Esc 放弃修改".to_string());
-                cx.notify();
-            }
-            "escape" => {
-                self.editor = None;
-                cx.notify();
-            }
-            "left" => {
-                editor.cursor_byte =
-                    super::text_editor::previous_char_boundary(&editor.content, editor.cursor_byte)
-            }
-            "right" => {
-                editor.cursor_byte =
-                    super::text_editor::next_char_boundary(&editor.content, editor.cursor_byte)
-            }
-            "up" => {
-                editor.cursor_byte = super::text_editor::move_cursor_vertically(
-                    &editor.content,
-                    editor.cursor_byte,
-                    -1,
-                )
-            }
-            "down" => {
-                editor.cursor_byte = super::text_editor::move_cursor_vertically(
-                    &editor.content,
-                    editor.cursor_byte,
-                    1,
-                )
-            }
-            "home" => {
-                editor.cursor_byte =
-                    super::text_editor::line_start(&editor.content, editor.cursor_byte)
-            }
-            "end" => {
-                editor.cursor_byte =
-                    super::text_editor::line_end(&editor.content, editor.cursor_byte)
-            }
-            "enter" | "return" => edit_ftp_content(editor, Some("\n"), false),
-            "backspace" => edit_ftp_content(editor, None, true),
-            "delete" => delete_ftp_content(editor),
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    edit_ftp_content(editor, Some(text), false);
-                }
-            }
-            _ => return,
+        if editor.dirty && !editor.discard_armed {
+            editor.discard_armed = true;
+            editor.error = Some("内容尚未保存；再次按 Esc 放弃修改".to_string());
+        } else {
+            self.editor = None;
         }
         cx.notify();
     }
@@ -576,7 +547,7 @@ impl FtpWorkspace {
         palette: ThemePalette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let visible = super::text_editor::with_visible_cursor(&editor.content, editor.cursor_byte);
+        let visible = editor.input.read(cx).content_with_cursor();
         div()
             .absolute()
             .inset_0()
@@ -619,6 +590,7 @@ impl FtpWorkspace {
                     )
                     .child(
                         div()
+                            .relative()
                             .min_h(px(0.0))
                             .flex_1()
                             .overflow_hidden()
@@ -629,7 +601,8 @@ impl FtpWorkspace {
                             .border_color(palette.accent)
                             .font_family("monospace")
                             .text_sm()
-                            .child(visible),
+                            .child(visible)
+                            .child(editor.input.clone()),
                     )
                     .when_some(editor.error, |view, error| {
                         view.child(div().text_xs().text_color(palette.danger).child(error))
@@ -645,20 +618,7 @@ impl FtpWorkspace {
                                     .px_3()
                                     .py_2()
                                     .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let dirty = this.editor.as_ref().is_some_and(|e| e.dirty);
-                                        if dirty {
-                                            if let Some(editor) = this.editor.as_mut() {
-                                                editor.discard_armed = true;
-                                                editor.error = Some(
-                                                    "内容尚未保存；再次按 Esc 放弃修改".to_string(),
-                                                );
-                                            }
-                                        } else {
-                                            this.editor = None;
-                                        }
-                                        cx.notify();
-                                    }))
+                                    .on_click(cx.listener(|this, _, _, cx| this.cancel_editor(cx)))
                                     .child("关闭"),
                             )
                             .child(
@@ -775,25 +735,6 @@ impl FtpWorkspace {
     }
 }
 
-fn edit_ftp_content(editor: &mut FtpFileEditor, text: Option<&str>, backspace: bool) {
-    let changed = if backspace {
-        super::text_editor::backspace(&mut editor.content, &mut editor.cursor_byte)
-    } else {
-        text.is_some_and(|text| {
-            super::text_editor::insert(&mut editor.content, &mut editor.cursor_byte, text)
-        })
-    };
-    if changed {
-        mark_editor_changed(editor);
-    }
-}
-
-fn delete_ftp_content(editor: &mut FtpFileEditor) {
-    if super::text_editor::delete(&mut editor.content, &mut editor.cursor_byte) {
-        mark_editor_changed(editor);
-    }
-}
-
 fn mark_editor_changed(editor: &mut FtpFileEditor) {
     editor.dirty = true;
     editor.discard_armed = false;
@@ -816,7 +757,6 @@ impl Render for FtpWorkspace {
         div()
             .size_full()
             .relative()
-            .on_key_down(cx.listener(Self::handle_editor_key))
             .flex()
             .flex_col()
             .bg(palette.background)

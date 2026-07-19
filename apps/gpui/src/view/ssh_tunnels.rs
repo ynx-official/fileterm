@@ -1,41 +1,37 @@
 use std::sync::Arc;
 
 use gpui::{
-    div, prelude::*, px, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, Render, Window,
+    div, prelude::*, px, Context, Entity, FocusHandle, Focusable, IntoElement, Render, Window,
 };
 
 use crate::{
     ssh::{SshController, SshTunnelRule, SshTunnelSnapshot},
     state::AppState,
     theme::ThemePalette,
+    view::text_editor::{TextInput, TextInputEvent, TextInputMode},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TunnelField {
     Name,
-    Kind,
     BindHost,
     BindPort,
     TargetHost,
     TargetPort,
 }
 
-impl TunnelField {
-    fn next(self) -> Self {
-        match self {
-            Self::Name => Self::Kind,
-            Self::Kind => Self::BindHost,
-            Self::BindHost => Self::BindPort,
-            Self::BindPort => Self::TargetHost,
-            Self::TargetHost => Self::TargetPort,
-            Self::TargetPort => Self::Name,
-        }
-    }
+#[derive(Clone)]
+struct TunnelInputs {
+    name: Entity<TextInput>,
+    bind_host: Entity<TextInput>,
+    bind_port: Entity<TextInput>,
+    target_host: Entity<TextInput>,
+    target_port: Entity<TextInput>,
 }
 
 #[derive(Clone)]
 struct TunnelForm {
-    active: TunnelField,
+    inputs: Option<TunnelInputs>,
     name: String,
     kind: String,
     bind_host: String,
@@ -47,7 +43,7 @@ struct TunnelForm {
 impl Default for TunnelForm {
     fn default() -> Self {
         Self {
-            active: TunnelField::Name,
+            inputs: None,
             name: String::new(),
             kind: "local".into(),
             bind_host: "127.0.0.1".into(),
@@ -59,14 +55,13 @@ impl Default for TunnelForm {
 }
 
 impl TunnelForm {
-    fn active_value_mut(&mut self) -> Option<&mut String> {
-        match self.active {
-            TunnelField::Name => Some(&mut self.name),
-            TunnelField::Kind => None,
-            TunnelField::BindHost => Some(&mut self.bind_host),
-            TunnelField::BindPort => Some(&mut self.bind_port),
-            TunnelField::TargetHost => Some(&mut self.target_host),
-            TunnelField::TargetPort => Some(&mut self.target_port),
+    fn set_field(&mut self, field: TunnelField, value: String) {
+        match field {
+            TunnelField::Name => self.name = value,
+            TunnelField::BindHost => self.bind_host = value,
+            TunnelField::BindPort => self.bind_port = value,
+            TunnelField::TargetHost => self.target_host = value,
+            TunnelField::TargetPort => self.target_port = value,
         }
     }
 
@@ -141,33 +136,55 @@ impl SshTunnelPanel {
         }
     }
 
-    fn handle_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = self.form.as_mut() else {
-            return;
+    fn begin_form(&mut self, cx: &mut Context<Self>) {
+        let palette = ThemePalette::for_mode(self.app_state.read(cx).theme);
+        let create_input = |value: &str, placeholder: &'static str, cx: &mut Context<Self>| {
+            cx.new(|cx| {
+                TextInput::new(
+                    value,
+                    placeholder,
+                    TextInputMode::SingleLine,
+                    false,
+                    palette,
+                    cx,
+                )
+            })
         };
-        match event.keystroke.key.as_str() {
-            "escape" => self.form = None,
-            "tab" => form.active = form.active.next(),
-            "enter" if form.active == TunnelField::Kind => form.cycle_kind(),
-            "enter" => {
-                self.submit(cx);
-                return;
-            }
-            "backspace" => {
-                if let Some(value) = form.active_value_mut() {
-                    value.pop();
+        let form = TunnelForm::default();
+        let inputs = TunnelInputs {
+            name: create_input(&form.name, "隧道名称", cx),
+            bind_host: create_input(&form.bind_host, "127.0.0.1", cx),
+            bind_port: create_input(&form.bind_port, "监听端口", cx),
+            target_host: create_input(&form.target_host, "目标地址", cx),
+            target_port: create_input(&form.target_port, "目标端口", cx),
+        };
+        for (field, input) in [
+            (TunnelField::Name, inputs.name.clone()),
+            (TunnelField::BindHost, inputs.bind_host.clone()),
+            (TunnelField::BindPort, inputs.bind_port.clone()),
+            (TunnelField::TargetHost, inputs.target_host.clone()),
+            (TunnelField::TargetPort, inputs.target_port.clone()),
+        ] {
+            cx.subscribe(&input, move |panel, _, event, cx| match event {
+                TextInputEvent::Changed(value) => {
+                    if let Some(form) = panel.form.as_mut() {
+                        form.set_field(field, value.clone());
+                    }
                 }
-            }
-            "space" if form.active == TunnelField::Kind => form.cycle_kind(),
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let (Some(value), Some(text)) =
-                    (form.active_value_mut(), event.keystroke.key_char.as_deref())
-                {
-                    value.push_str(text);
+                TextInputEvent::Submit | TextInputEvent::Save => panel.submit(cx),
+                TextInputEvent::Cancel => {
+                    panel.form = None;
+                    cx.notify();
                 }
-            }
-            _ => {}
+            })
+            .detach();
         }
+        inputs.name.update(cx, |input, cx| input.request_focus(cx));
+        self.form = Some(TunnelForm {
+            inputs: Some(inputs),
+            ..form
+        });
+        self.error = None;
         cx.notify();
     }
 
@@ -235,11 +252,9 @@ impl SshTunnelPanel {
     fn render_field(
         &self,
         label: &'static str,
-        value: String,
-        field: TunnelField,
+        input: Entity<TextInput>,
         palette: ThemePalette,
     ) -> impl IntoElement {
-        let active = self.form.as_ref().is_some_and(|form| form.active == field);
         div()
             .flex()
             .items_center()
@@ -251,27 +266,7 @@ impl SshTunnelPanel {
                     .text_color(palette.text_muted)
                     .child(label),
             )
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .flex_1()
-                    .px_2()
-                    .py_1()
-                    .border_1()
-                    .border_color(if active {
-                        palette.accent
-                    } else {
-                        palette.border
-                    })
-                    .rounded_sm()
-                    .text_xs()
-                    .text_color(palette.text)
-                    .child(if value.is_empty() {
-                        " ".to_string()
-                    } else {
-                        value
-                    }),
-            )
+            .child(div().min_w(px(0.0)).flex_1().child(input))
     }
 }
 
@@ -377,7 +372,6 @@ impl Render for SshTunnelPanel {
         let form = self.form.clone();
         div()
             .track_focus(&self.focus)
-            .on_key_down(cx.listener(Self::handle_key))
             .flex()
             .flex_col()
             .border_t_1()
@@ -396,17 +390,13 @@ impl Render for SshTunnelPanel {
                             .cursor_pointer()
                             .text_xs()
                             .text_color(palette.accent)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.form = Some(TunnelForm::default());
-                                this.error = None;
-                                this.focus.focus(window, cx);
-                                cx.notify();
-                            }))
+                            .on_click(cx.listener(|this, _, _, cx| this.begin_form(cx)))
                             .child("新增"),
                     ),
             )
             .children(rows)
             .when_some(form, |view, form| {
+                let inputs = form.inputs.expect("SSH tunnel inputs initialized");
                 view.child(
                     div()
                         .flex()
@@ -416,45 +406,52 @@ impl Render for SshTunnelPanel {
                         .py_2()
                         .border_t_1()
                         .border_color(palette.border)
-                        .child(self.render_field("名称", form.name, TunnelField::Name, palette))
-                        .child(self.render_field(
-                            "类型",
-                            form.kind.clone(),
-                            TunnelField::Kind,
-                            palette,
-                        ))
-                        .child(self.render_field(
-                            "监听地址",
-                            form.bind_host,
-                            TunnelField::BindHost,
-                            palette,
-                        ))
-                        .child(self.render_field(
-                            "监听端口",
-                            form.bind_port,
-                            TunnelField::BindPort,
-                            palette,
-                        ))
-                        .when(form.kind != "dynamic", |form_view| {
-                            form_view
-                                .child(self.render_field(
-                                    "目标地址",
-                                    form.target_host,
-                                    TunnelField::TargetHost,
-                                    palette,
-                                ))
-                                .child(self.render_field(
-                                    "目标端口",
-                                    form.target_port,
-                                    TunnelField::TargetPort,
-                                    palette,
-                                ))
-                        })
+                        .child(self.render_field("名称", inputs.name, palette))
                         .child(
                             div()
-                                .text_xs()
-                                .text_color(palette.text_soft)
-                                .child("Tab 切换字段，类型字段按空格切换，Enter 创建，Esc 取消"),
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .w(px(68.0))
+                                        .text_xs()
+                                        .text_color(palette.text_muted)
+                                        .child("类型"),
+                                )
+                                .child(
+                                    div()
+                                        .id("ssh-tunnel-kind")
+                                        .flex_1()
+                                        .px_3()
+                                        .py_2()
+                                        .rounded_md()
+                                        .cursor_pointer()
+                                        .bg(palette.background)
+                                        .border_1()
+                                        .border_color(palette.border)
+                                        .text_xs()
+                                        .text_color(palette.text)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(form) = this.form.as_mut() {
+                                                form.cycle_kind();
+                                            }
+                                            cx.notify();
+                                        }))
+                                        .child(form.kind.clone()),
+                                ),
+                        )
+                        .child(self.render_field("监听地址", inputs.bind_host, palette))
+                        .child(self.render_field("监听端口", inputs.bind_port, palette))
+                        .when(form.kind != "dynamic", |form_view| {
+                            form_view
+                                .child(self.render_field("目标地址", inputs.target_host, palette))
+                                .child(self.render_field("目标端口", inputs.target_port, palette))
+                        })
+                        .child(
+                            div().text_xs().text_color(palette.text_soft).child(
+                                "点击类型切换；Tab/Shift+Tab 切换输入项，Enter 创建，Esc 取消",
+                            ),
                         ),
                 )
             })

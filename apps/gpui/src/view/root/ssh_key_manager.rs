@@ -157,7 +157,7 @@ impl RootView {
             }
             match event {
                 TextInputEvent::Changed(value) => editor.set_value(value.clone()),
-                TextInputEvent::Submit => root.save_ssh_key_editor(cx),
+                TextInputEvent::Submit | TextInputEvent::Save => root.save_ssh_key_editor(cx),
                 TextInputEvent::Cancel => {
                     root.pending_ssh_key_editor = None;
                     cx.notify();
@@ -165,6 +165,8 @@ impl RootView {
             }
         })
         .detach();
+        input.update(cx, |input, cx| input.request_focus(cx));
+        editor.auto_focus = false;
         editor.input = Some(input);
         self.pending_ssh_key_editor = Some(editor);
         cx.notify();
@@ -689,38 +691,7 @@ impl RootView {
                             )),
                     ),
             )
-            .child(
-                div()
-                    .id("ssh-key-search")
-                    .h(px(38.0))
-                    .flex()
-                    .items_center()
-                    .px_3()
-                    .rounded_md()
-                    .bg(palette.surface)
-                    .border_1()
-                    .border_color(if self.ssh_key_search_focused {
-                        palette.accent
-                    } else {
-                        palette.border
-                    })
-                    .cursor_pointer()
-                    .text_sm()
-                    .text_color(if self.ssh_key_query.is_empty() {
-                        palette.text_soft
-                    } else {
-                        palette.text
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.ssh_key_search_focused = true;
-                        cx.notify();
-                    }))
-                    .child(if self.ssh_key_query.is_empty() {
-                        "筛选名称、备注、算法或指纹…".to_string()
-                    } else {
-                        self.ssh_key_query.clone()
-                    }),
-            )
+            .child(self.ssh_key_search.clone())
             .when_some(state.data_error.clone(), |view, error| {
                 view.child(
                     div()

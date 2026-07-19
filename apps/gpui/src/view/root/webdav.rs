@@ -1,9 +1,20 @@
-use gpui::{div, prelude::*, px, Context, IntoElement, KeyDownEvent};
+use gpui::{div, prelude::*, px, Context, Entity, IntoElement};
 use serde_json::Value;
 use zeroize::Zeroize;
 
 use super::RootView;
-use crate::theme::ThemePalette;
+use crate::{
+    theme::ThemePalette,
+    view::text_editor::{TextInput, TextInputEvent, TextInputMode},
+};
+
+#[derive(Clone)]
+struct WebDavInputs {
+    url: Entity<TextInput>,
+    username: Entity<TextInput>,
+    password: Entity<TextInput>,
+    remote_path: Entity<TextInput>,
+}
 
 #[derive(Clone)]
 pub(super) struct PendingWebDavEditor {
@@ -13,7 +24,7 @@ pub(super) struct PendingWebDavEditor {
     pub(super) username: String,
     pub(super) password: String,
     pub(super) remote_path: String,
-    pub(super) active_field: usize,
+    inputs: WebDavInputs,
 }
 
 impl Drop for PendingWebDavEditor {
@@ -28,66 +39,85 @@ impl RootView {
             .webdav_config
             .clone()
             .unwrap_or_else(|| serde_json::json!({}));
-        self.pending_webdav_editor = Some(PendingWebDavEditor {
-            enabled: config
-                .get("enabled")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            allow_insecure_tls: config
-                .get("allowInsecureTls")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            url: config
-                .get("url")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            username: config
-                .get("username")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            password: String::new(),
-            remote_path: config
-                .get("remotePath")
-                .and_then(Value::as_str)
-                .unwrap_or("fileterm-connections.json")
-                .to_string(),
-            active_field: 0,
-        });
-        cx.notify();
-    }
-
-    pub(super) fn handle_webdav_editor_key(
-        &mut self,
-        event: &KeyDownEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(editor) = self.pending_webdav_editor.as_mut() else {
-            return;
+        let enabled = config
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let allow_insecure_tls = config
+            .get("allowInsecureTls")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let url = config
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let username = config
+            .get("username")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let remote_path = config
+            .get("remotePath")
+            .and_then(Value::as_str)
+            .unwrap_or("fileterm-connections.json")
+            .to_string();
+        let palette = ThemePalette::for_mode(self.state.read(cx).theme);
+        let create_input =
+            |value: &str, placeholder: &'static str, secret: bool, cx: &mut Context<Self>| {
+                cx.new(|cx| {
+                    TextInput::new(
+                        value,
+                        placeholder,
+                        TextInputMode::SingleLine,
+                        secret,
+                        palette,
+                        cx,
+                    )
+                })
+            };
+        let inputs = WebDavInputs {
+            url: create_input(&url, "https://example.com/dav/", false, cx),
+            username: create_input(&username, "用户名", false, cx),
+            password: create_input("", "留空保留已保存密码", true, cx),
+            remote_path: create_input(&remote_path, "fileterm-connections.json", false, cx),
         };
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.pending_webdav_editor = None;
-                cx.notify();
-            }
-            "tab" => {
-                editor.active_field = (editor.active_field + 1) % 4;
-                cx.notify();
-            }
-            "enter" | "return" => self.save_webdav_config(cx),
-            "backspace" => {
-                active_value(editor).pop();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    active_value(editor).push_str(text);
+        for (field, input) in [
+            (0usize, inputs.url.clone()),
+            (1, inputs.username.clone()),
+            (2, inputs.password.clone()),
+            (3, inputs.remote_path.clone()),
+        ] {
+            cx.subscribe(&input, move |root, _, event, cx| match event {
+                TextInputEvent::Changed(value) => {
+                    if let Some(editor) = root.pending_webdav_editor.as_mut() {
+                        match field {
+                            0 => editor.url = value.clone(),
+                            1 => editor.username = value.clone(),
+                            2 => editor.password = value.clone(),
+                            _ => editor.remote_path = value.clone(),
+                        }
+                    }
+                }
+                TextInputEvent::Submit | TextInputEvent::Save => root.save_webdav_config(cx),
+                TextInputEvent::Cancel => {
+                    root.pending_webdav_editor = None;
                     cx.notify();
                 }
-            }
-            _ => {}
+            })
+            .detach();
         }
+        inputs.url.update(cx, |input, cx| input.request_focus(cx));
+        self.pending_webdav_editor = Some(PendingWebDavEditor {
+            enabled,
+            allow_insecure_tls,
+            url,
+            username,
+            password: String::new(),
+            remote_path,
+            inputs,
+        });
+        cx.notify();
     }
 
     fn save_webdav_config(&mut self, cx: &mut Context<Self>) {
@@ -324,41 +354,13 @@ impl RootView {
                             "Tab 切换输入项，Enter 保存，Esc 取消。密码留空会保留已保存凭据。",
                         ),
                     )
-                    .child(input(
-                        "地址",
-                        &editor.url,
-                        0,
-                        editor.active_field,
-                        false,
-                        palette,
-                        cx,
-                    ))
-                    .child(input(
-                        "用户名",
-                        &editor.username,
-                        1,
-                        editor.active_field,
-                        false,
-                        palette,
-                        cx,
-                    ))
-                    .child(input(
-                        "密码",
-                        &editor.password,
-                        2,
-                        editor.active_field,
-                        true,
-                        palette,
-                        cx,
-                    ))
+                    .child(input("地址", editor.inputs.url.clone(), palette))
+                    .child(input("用户名", editor.inputs.username.clone(), palette))
+                    .child(input("密码", editor.inputs.password.clone(), palette))
                     .child(input(
                         "远端路径",
-                        &editor.remote_path,
-                        3,
-                        editor.active_field,
-                        false,
+                        editor.inputs.remote_path.clone(),
                         palette,
-                        cx,
                     ))
                     .child(
                         div()
@@ -424,66 +426,13 @@ impl RootView {
     }
 }
 
-fn active_value(editor: &mut PendingWebDavEditor) -> &mut String {
-    match editor.active_field {
-        0 => &mut editor.url,
-        1 => &mut editor.username,
-        2 => &mut editor.password,
-        _ => &mut editor.remote_path,
-    }
-}
-
-fn input(
-    label: &'static str,
-    value: &str,
-    field: usize,
-    active_field: usize,
-    secret: bool,
-    palette: ThemePalette,
-    cx: &mut Context<RootView>,
-) -> impl IntoElement {
-    let display = if secret && !value.is_empty() {
-        "•".repeat(value.chars().count())
-    } else if value.is_empty() {
-        "输入内容".to_string()
-    } else {
-        value.to_string()
-    };
+fn input(label: &'static str, input: Entity<TextInput>, palette: ThemePalette) -> impl IntoElement {
     div()
         .flex()
         .flex_col()
         .gap_1()
         .child(div().text_xs().text_color(palette.text_muted).child(label))
-        .child(
-            div()
-                .id(("webdav-input", field))
-                .h(px(38.0))
-                .flex()
-                .items_center()
-                .px_3()
-                .rounded_md()
-                .cursor_pointer()
-                .bg(palette.background)
-                .border_1()
-                .border_color(if active_field == field {
-                    palette.accent
-                } else {
-                    palette.border
-                })
-                .text_sm()
-                .text_color(if display == "输入内容" {
-                    palette.text_soft
-                } else {
-                    palette.text
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(editor) = this.pending_webdav_editor.as_mut() {
-                        editor.active_field = field;
-                    }
-                    cx.notify();
-                }))
-                .child(display),
-        )
+        .child(input)
 }
 
 fn action(

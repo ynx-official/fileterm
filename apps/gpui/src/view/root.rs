@@ -26,6 +26,7 @@ use crate::{
     state::{AppState, DataLoadState, NavigationSection, TabStatus},
     theme::{ThemeMode, ThemePalette},
     view::{
+        text_editor::{TextInput, TextInputEvent, TextInputMode},
         DetachedSessionContent, DetachedSessionTab, DetachedSessionWindow, FtpWorkspace,
         LocalSessionWorkspace, SessionWorkspace, StreamSessionWorkspace,
     },
@@ -57,7 +58,7 @@ pub struct RootView {
     ssh_key_dragging: Option<SshKeyDragItem>,
     expanded_ssh_key_folders: HashSet<String>,
     ssh_key_query: String,
-    ssh_key_search_focused: bool,
+    ssh_key_search: Entity<TextInput>,
     active_ssh_key_folder: Option<String>,
     pending_command_editor: Option<PendingCommandEditor>,
     pending_command_delete: Option<(String, String)>,
@@ -87,19 +88,18 @@ struct PendingAuthentication {
     title: String,
     prompts: Vec<crate::error::SshAuthenticationPrompt>,
     answers: Vec<String>,
-    input: String,
+    input: Entity<TextInput>,
     options: SshConnectOptions,
 }
 
 #[derive(Clone)]
 struct PendingCommandEditor {
     command_id: Option<String>,
-    input: String,
+    input: Entity<TextInput>,
 }
 
 impl Drop for PendingAuthentication {
     fn drop(&mut self) {
-        self.input.zeroize();
         self.answers.zeroize();
         self.options.clear_transient_secrets();
     }
@@ -174,6 +174,29 @@ impl RootView {
         })
         .detach();
 
+        let palette = ThemePalette::for_mode(state.read(cx).theme);
+        let ssh_key_search = cx.new(|cx| {
+            TextInput::new(
+                "",
+                "筛选名称、备注、算法或指纹…",
+                TextInputMode::SingleLine,
+                false,
+                palette,
+                cx,
+            )
+        });
+        cx.subscribe(&ssh_key_search, |root, _, event, cx| match event {
+            TextInputEvent::Changed(value) => {
+                root.ssh_key_query = value.clone();
+                cx.notify();
+            }
+            TextInputEvent::Cancel => {
+                root.ssh_key_search.update(cx, |input, cx| input.clear(cx));
+            }
+            TextInputEvent::Submit | TextInputEvent::Save => {}
+        })
+        .detach();
+
         let view = Self {
             api: api.clone(),
             window_registry,
@@ -192,7 +215,7 @@ impl RootView {
             ssh_key_dragging: None,
             expanded_ssh_key_folders: HashSet::new(),
             ssh_key_query: String::new(),
-            ssh_key_search_focused: false,
+            ssh_key_search,
             active_ssh_key_folder: None,
             pending_command_editor: None,
             pending_command_delete: None,
@@ -250,9 +273,6 @@ impl RootView {
     }
 
     fn select_navigation(&mut self, section: NavigationSection, cx: &mut Context<Self>) {
-        if section != NavigationSection::SshKeys {
-            self.ssh_key_search_focused = false;
-        }
         self.update_state(cx, |state| state.select_navigation(section));
     }
 
@@ -640,7 +660,30 @@ impl RootView {
         .detach();
     }
 
-    fn edit_command(&mut self, command_id: Option<String>, input: String, cx: &mut Context<Self>) {
+    fn edit_command(&mut self, command_id: Option<String>, value: String, cx: &mut Context<Self>) {
+        let palette = ThemePalette::for_mode(self.state.read(cx).theme);
+        let input = cx.new(|cx| {
+            let mut input = TextInput::new(
+                value,
+                "例如：journalctl -u nginx -n 100",
+                TextInputMode::SingleLine,
+                false,
+                palette,
+                cx,
+            );
+            input.set_height(px(72.0), cx);
+            input.request_focus(cx);
+            input
+        });
+        cx.subscribe(&input, |root, _, event, cx| match event {
+            TextInputEvent::Submit | TextInputEvent::Save => root.save_command(cx),
+            TextInputEvent::Cancel => {
+                root.pending_command_editor = None;
+                cx.notify();
+            }
+            TextInputEvent::Changed(_) => {}
+        })
+        .detach();
         self.pending_command_editor = Some(PendingCommandEditor { command_id, input });
         cx.notify();
     }
@@ -649,10 +692,11 @@ impl RootView {
         let Some(pending) = self.pending_command_editor.take() else {
             return;
         };
+        let command = pending.input.read(cx).value().to_string();
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
             let result = api
-                .app_save_command_template(pending.command_id, pending.input)
+                .app_save_command_template(pending.command_id, command)
                 .await;
             let _ = this.update(cx, |root, cx| {
                 match result {
@@ -726,34 +770,10 @@ impl RootView {
         }
     }
 
-    fn handle_command_editor_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(pending) = self.pending_command_editor.as_mut() else {
-            return;
-        };
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.pending_command_editor = None;
-                cx.notify();
-            }
-            "enter" | "return" => self.save_command(cx),
-            "backspace" => {
-                pending.input.pop();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    pending.input.push_str(text);
-                    cx.notify();
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn handle_root_key(
         &mut self,
         event: &KeyDownEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.pending_connection_editor.is_some() {
@@ -767,30 +787,24 @@ impl RootView {
                 cx.notify();
             }
         } else if self.pending_webdav_editor.is_some() {
-            self.handle_webdav_editor_key(event, cx);
+            if event.keystroke.key == "escape" {
+                self.pending_webdav_editor = None;
+                cx.notify();
+            }
         } else if self.pending_authentication.is_some() {
-            self.handle_authentication_key(event, window, cx);
+            if event.keystroke.key == "escape" {
+                self.cancel_authentication(cx);
+            }
         } else if self.pending_command_editor.is_some() {
-            self.handle_command_editor_key(event, cx);
+            if event.keystroke.key == "escape" {
+                self.pending_command_editor = None;
+                cx.notify();
+            }
         } else if self.pending_command_delete.is_some() && event.keystroke.key == "escape" {
             self.pending_command_delete = None;
             cx.notify();
         } else if self.pending_ssh_key_delete.is_some() && event.keystroke.key == "escape" {
             self.pending_ssh_key_delete = None;
-            cx.notify();
-        } else if self.ssh_key_search_focused {
-            match event.keystroke.key.as_str() {
-                "escape" => self.ssh_key_search_focused = false,
-                "backspace" => {
-                    self.ssh_key_query.pop();
-                }
-                _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                    if let Some(text) = event.keystroke.key_char.as_deref() {
-                        self.ssh_key_query.push_str(text);
-                    }
-                }
-                _ => {}
-            }
             cx.notify();
         }
     }
@@ -950,12 +964,32 @@ impl RootView {
                             }
                         }
                     }
+                    let palette = ThemePalette::for_mode(root.state.read(cx).theme);
+                    let secret = prompts.first().is_none_or(|prompt| !prompt.echo);
+                    let input = cx.new(|cx| {
+                        let mut input = TextInput::new(
+                            "",
+                            "输入后按 Enter",
+                            TextInputMode::SingleLine,
+                            secret,
+                            palette,
+                            cx,
+                        );
+                        input.request_focus(cx);
+                        input
+                    });
+                    cx.subscribe(&input, |root, _, event, cx| match event {
+                        TextInputEvent::Submit => root.advance_authentication(cx),
+                        TextInputEvent::Cancel => root.cancel_authentication(cx),
+                        TextInputEvent::Changed(_) | TextInputEvent::Save => {}
+                    })
+                    .detach();
                     root.pending_authentication = Some(PendingAuthentication {
                         profile_id: profile_id.clone(),
                         title: title.clone(),
                         prompts,
                         answers: Vec::new(),
-                        input: String::new(),
+                        input,
                         options,
                     });
                     root.update_state(cx, |state| {
@@ -1033,8 +1067,18 @@ impl RootView {
         let Some(pending) = self.pending_authentication.as_mut() else {
             return;
         };
-        pending.answers.push(std::mem::take(&mut pending.input));
+        let answer = pending.input.read(cx).value().to_string();
+        pending.answers.push(answer);
         if pending.answers.len() < pending.prompts.len() {
+            let secret = pending
+                .prompts
+                .get(pending.answers.len())
+                .is_none_or(|prompt| !prompt.echo);
+            pending.input.update(cx, |input, cx| {
+                input.clear(cx);
+                input.set_secret(secret, cx);
+                input.request_focus(cx);
+            });
             cx.notify();
             return;
         }
@@ -1065,32 +1109,6 @@ impl RootView {
         self.connect_ssh_profile(profile_id, title, options, cx);
     }
 
-    fn handle_authentication_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(pending) = self.pending_authentication.as_mut() else {
-            return;
-        };
-        match event.keystroke.key.as_str() {
-            "escape" => self.cancel_authentication(cx),
-            "enter" | "return" => self.advance_authentication(cx),
-            "backspace" => {
-                pending.input.pop();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    pending.input.push_str(text);
-                    cx.notify();
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn render_authentication(
         &self,
         pending: &PendingAuthentication,
@@ -1102,11 +1120,6 @@ impl RootView {
             .len()
             .min(pending.prompts.len().saturating_sub(1));
         let prompt = pending.prompts.get(prompt_index);
-        let value = match prompt {
-            Some(prompt) if prompt.echo => pending.input.clone(),
-            Some(_) => "•".repeat(pending.input.chars().count()),
-            None => String::new(),
-        };
 
         div()
             .absolute()
@@ -1149,23 +1162,7 @@ impl RootView {
                                 .unwrap_or_default(),
                         ),
                     )
-                    .child(
-                        div()
-                            .h(px(40.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .rounded_md()
-                            .bg(palette.background)
-                            .border_1()
-                            .border_color(palette.accent)
-                            .text_color(palette.text)
-                            .child(if value.is_empty() {
-                                "输入后按 Enter".to_string()
-                            } else {
-                                value
-                            }),
-                    )
+                    .child(pending.input.clone())
                     .child(
                         div()
                             .flex()
@@ -1366,22 +1363,7 @@ impl RootView {
                             .text_color(palette.text_muted)
                             .child("输入完整命令，Enter 保存，Esc 取消。"),
                     )
-                    .child(
-                        div()
-                            .min_h(px(72.0))
-                            .p_3()
-                            .rounded_md()
-                            .bg(palette.background)
-                            .border_1()
-                            .border_color(palette.accent)
-                            .text_sm()
-                            .text_color(palette.text)
-                            .child(if pending.input.is_empty() {
-                                "例如：journalctl -u nginx -n 100".to_string()
-                            } else {
-                                pending.input
-                            }),
-                    )
+                    .child(pending.input)
                     .child(
                         div()
                             .flex()

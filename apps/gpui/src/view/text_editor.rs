@@ -21,6 +21,7 @@ pub(crate) enum TextInputMode {
 pub(crate) enum TextInputEvent {
     Changed(String),
     Submit,
+    Save,
     Cancel,
 }
 
@@ -36,6 +37,9 @@ pub(crate) struct TextInput {
     is_selecting: bool,
     mode: TextInputMode,
     secret: bool,
+    height: Pixels,
+    headless: bool,
+    auto_focus: bool,
     palette: ThemePalette,
 }
 
@@ -72,6 +76,12 @@ impl TextInput {
             is_selecting: false,
             mode,
             secret,
+            height: match mode {
+                TextInputMode::SingleLine => px(38.0),
+                TextInputMode::MultiLine => px(76.0),
+            },
+            headless: false,
+            auto_focus: false,
             palette,
         }
     }
@@ -95,6 +105,40 @@ impl TextInput {
 
     pub(crate) fn clear(&mut self, cx: &mut Context<Self>) {
         self.set_value(String::new(), cx);
+    }
+
+    pub(crate) fn value(&self) -> &str {
+        &self.content
+    }
+
+    pub(crate) fn content_with_cursor(&self) -> String {
+        with_visible_cursor(&self.content, self.cursor_offset())
+    }
+
+    pub(crate) fn set_secret(&mut self, secret: bool, cx: &mut Context<Self>) {
+        if self.secret != secret {
+            self.secret = secret;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_height(&mut self, height: Pixels, cx: &mut Context<Self>) {
+        if self.height != height {
+            self.height = height;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn set_headless(&mut self, headless: bool, cx: &mut Context<Self>) {
+        if self.headless != headless {
+            self.headless = headless;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn request_focus(&mut self, cx: &mut Context<Self>) {
+        self.auto_focus = true;
+        cx.notify();
     }
 
     pub(crate) fn set_palette(&mut self, palette: ThemePalette) {
@@ -218,6 +262,11 @@ impl TextInput {
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let command = event.keystroke.modifiers.platform || event.keystroke.modifiers.control;
         let shift = event.keystroke.modifiers.shift;
+        if command && event.keystroke.key == "s" {
+            cx.stop_propagation();
+            cx.emit(TextInputEvent::Save);
+            return;
+        }
         match event.keystroke.key.as_str() {
             "escape" => {
                 cx.stop_propagation();
@@ -259,6 +308,24 @@ impl TextInput {
                     self.move_to(offset, cx);
                 } else {
                     self.move_to(self.selected_range.end, cx);
+                }
+            }
+            "up" if self.mode == TextInputMode::MultiLine => {
+                cx.stop_propagation();
+                let offset = move_cursor_vertically(&self.content, self.cursor_offset(), -1);
+                if shift {
+                    self.select_to(offset, cx);
+                } else {
+                    self.move_to(offset, cx);
+                }
+            }
+            "down" if self.mode == TextInputMode::MultiLine => {
+                cx.stop_propagation();
+                let offset = move_cursor_vertically(&self.content, self.cursor_offset(), 1);
+                if shift {
+                    self.select_to(offset, cx);
+                } else {
+                    self.move_to(offset, cx);
                 }
             }
             "home" => {
@@ -646,29 +713,34 @@ impl Element for TextInputElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let focus_handle = self.input.read(cx).focus_handle.clone();
+        let (focus_handle, headless) = {
+            let input = self.input.read(cx);
+            (input.focus_handle.clone(), input.headless)
+        };
         window.handle_input(
             &focus_handle,
             ElementInputHandler::new(bounds, self.input.clone()),
             cx,
         );
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection);
-        }
-        prepaint
-            .line
-            .paint(
-                bounds.origin,
-                window.line_height(),
-                gpui::TextAlign::Left,
-                None,
-                window,
-                cx,
-            )
-            .expect("paint text input");
-        if focus_handle.is_focused(window) {
-            if let Some(cursor) = prepaint.cursor.take() {
-                window.paint_quad(cursor);
+        if !headless {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection);
+            }
+            prepaint
+                .line
+                .paint(
+                    bounds.origin,
+                    window.line_height(),
+                    gpui::TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                )
+                .expect("paint text input");
+            if focus_handle.is_focused(window) {
+                if let Some(cursor) = prepaint.cursor.take() {
+                    window.paint_quad(cursor);
+                }
             }
         }
         self.input.update(cx, |input, _| {
@@ -680,10 +752,10 @@ impl Element for TextInputElement {
 
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let height = match self.mode {
-            TextInputMode::SingleLine => px(38.0),
-            TextInputMode::MultiLine => px(76.0),
-        };
+        if self.auto_focus {
+            self.auto_focus = false;
+            self.focus_handle.focus(window, cx);
+        }
         div()
             .key_context("TextInput")
             .track_focus(&self.focus_handle)
@@ -692,22 +764,25 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .h(height)
+            .h(self.height)
             .w_full()
             .flex()
             .items_center()
-            .px_3()
             .overflow_hidden()
-            .rounded_md()
             .cursor(CursorStyle::IBeam)
-            .bg(self.palette.background)
-            .border_1()
-            .border_color(if self.focus_handle.is_focused(window) {
-                self.palette.accent
-            } else {
-                self.palette.border
+            .when(self.headless, |view| view.absolute().inset_0())
+            .when(!self.headless, |view| {
+                view.px_3()
+                    .rounded_md()
+                    .bg(self.palette.background)
+                    .border_1()
+                    .border_color(if self.focus_handle.is_focused(window) {
+                        self.palette.accent
+                    } else {
+                        self.palette.border
+                    })
+                    .text_sm()
             })
-            .text_sm()
             .child(TextInputElement { input: cx.entity() })
     }
 }
@@ -806,6 +881,7 @@ pub(crate) fn move_cursor_vertically(content: &str, cursor: usize, direction: i8
         .unwrap_or(target_end)
 }
 
+#[cfg(test)]
 pub(crate) fn insert(content: &mut String, cursor: &mut usize, text: &str) -> bool {
     *cursor = valid_cursor(content, *cursor);
     content.insert_str(*cursor, text);
@@ -813,6 +889,7 @@ pub(crate) fn insert(content: &mut String, cursor: &mut usize, text: &str) -> bo
     !text.is_empty()
 }
 
+#[cfg(test)]
 pub(crate) fn backspace(content: &mut String, cursor: &mut usize) -> bool {
     *cursor = valid_cursor(content, *cursor);
     let previous = previous_char_boundary(content, *cursor);
@@ -824,6 +901,7 @@ pub(crate) fn backspace(content: &mut String, cursor: &mut usize) -> bool {
     true
 }
 
+#[cfg(test)]
 pub(crate) fn delete(content: &mut String, cursor: &mut usize) -> bool {
     *cursor = valid_cursor(content, *cursor);
     let next = next_char_boundary(content, *cursor);
