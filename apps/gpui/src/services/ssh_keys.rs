@@ -538,7 +538,7 @@ fn inspect_private_key(path: &Path) -> Result<InspectedPrivateKey> {
                 false,
             )
         }
-        Err(_) if probably_encrypted(&content) => (
+        Err(russh_keys::Error::KeyIsEncrypted) => (
             "encrypted".to_string(),
             format!(
                 "FILE-SHA256:{}",
@@ -612,10 +612,6 @@ fn validate_key_id(id: &str) -> Result<()> {
         .map_err(|_| AppError::Command("无效的 SSH 密钥 ID".to_string()))
 }
 
-fn probably_encrypted(content: &str) -> bool {
-    content.contains("ENCRYPTED") || content.contains("BEGIN OPENSSH PRIVATE KEY")
-}
-
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -677,6 +673,85 @@ mod tests {
         )
         .unwrap();
         assert!(select_file(&app, &malformed).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn accepts_real_ed25519_pkcs8_and_rsa_pem_keys() {
+        let (_, directory) = test_app();
+
+        let ed25519 = russh_keys::key::KeyPair::generate_ed25519().unwrap();
+        let mut ed25519_pem = Vec::new();
+        russh_keys::encode_pkcs8_pem(&ed25519, &mut ed25519_pem).unwrap();
+        let ed25519_path = directory.join("id_ed25519");
+        fs::write(&ed25519_path, ed25519_pem).unwrap();
+        let inspected_ed25519 = inspect_private_key(&ed25519_path).unwrap();
+        assert_eq!(inspected_ed25519.algorithm, "ssh-ed25519");
+        assert!(!inspected_ed25519.encrypted);
+        assert!(inspected_ed25519.fingerprint.starts_with("SHA256:"));
+
+        let rsa =
+            russh_keys::key::KeyPair::generate_rsa(2048, russh_keys::key::SignatureHash::SHA2_256)
+                .unwrap();
+        let rsa_pem = match &rsa {
+            russh_keys::key::KeyPair::RSA { key, .. } => key.private_key_to_pem().unwrap(),
+            _ => unreachable!(),
+        };
+        let rsa_path = directory.join("id_rsa");
+        fs::write(&rsa_path, rsa_pem).unwrap();
+        let inspected_rsa = inspect_private_key(&rsa_path).unwrap();
+        assert_eq!(inspected_rsa.algorithm, "rsa-sha2-256");
+        assert!(!inspected_rsa.encrypted);
+        assert!(inspected_rsa.fingerprint.starts_with("SHA256:"));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn accepts_ssh_keygen_openssh_rsa_when_available() {
+        use std::process::Command;
+
+        if Command::new("ssh-keygen").arg("-V").output().is_err() {
+            return;
+        }
+        let (_, directory) = test_app();
+        let key_path = directory.join("id_rsa_openssh");
+        let output = Command::new("ssh-keygen")
+            .args(["-q", "-t", "rsa", "-b", "2048", "-N", "", "-f"])
+            .arg(&key_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "ssh-keygen failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let inspected = inspect_private_key(&key_path).unwrap();
+        assert!(inspected.algorithm.starts_with("rsa-sha2-"));
+        assert!(!inspected.encrypted);
+        assert!(inspected.fingerprint.starts_with("SHA256:"));
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_malformed_openssh_key_instead_of_treating_it_as_encrypted() {
+        let (_, directory) = test_app();
+        let malformed = directory.join("malformed-openssh");
+        fs::write(
+            &malformed,
+            "-----BEGIN OPENSSH PRIVATE KEY-----\naW52YWxpZA==\n-----END OPENSSH PRIVATE KEY-----\n",
+        )
+        .unwrap();
+
+        let error = match inspect_private_key(&malformed) {
+            Ok(_) => panic!("malformed OpenSSH key must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("无法识别"));
+
         fs::remove_dir_all(directory).unwrap();
     }
 

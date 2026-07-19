@@ -52,8 +52,8 @@ sum_tree = { package = "sum-tree-gpui-unofficial", version = "=1.8.2" }
 media = { package = "media-gpui-unofficial", version = "=1.8.2" }
 vte = "0.13"
 portable-pty = "0.8"
-russh = "0.40"
-russh-keys = "0.40"
+russh = { version = "0.40", features = ["vendored-openssl"] }
+russh-keys = { version = "0.40", features = ["vendored-openssl"] }
 russh-sftp = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["rt"] }
