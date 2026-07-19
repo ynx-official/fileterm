@@ -1,33 +1,13 @@
-//! Error types for the GPUI runtime.
+//! Error types shared by the GPUI bridge and runtime services.
 //!
-//! G0 phase of `docs/plans/active/gpui-refactor.md` section 6.1.
-//!
-//! Unlike Tauri's `AppError` (which needs `serde::Serialize` because it
-//! crosses the IPC boundary to the WebView), the GPUI runtime is a single
-//! process: bridge fns return `Result<T, AppError>` directly to the view
-//! layer, no serialization. So this enum is a plain `thiserror::Error`
-//! without the `serde::Serialize` impl.
+//! GPUI runs the bridge and backend in one process, so errors are returned
+//! directly without the serialization layer required by a WebView IPC boundary.
 
 use thiserror::Error;
 
-/// Top-level error type returned by every `FileTermDesktopApi` method.
-///
-/// Variants are coarse-grained on purpose: G0's `GpuiDesktopApi` stub
-/// returns `AppError::Unsupported` for *everything*; as real backends
-/// land in G1–G5, methods will start returning `Storage` / `Window` /
-/// `Command` / etc. variants with concrete string context. We keep the
-/// Tauri-side variant names so the migration is line-for-line where
-/// possible, and add `Unsupported` for the stub-only "not wired yet"
-/// case.
+/// Top-level error type returned by GPUI bridge methods and runtime services.
 #[derive(Debug, Error)]
 pub enum AppError {
-    /// Returned by the G0 `GpuiDesktopApi` stub for every method, and by
-    /// later phases for any method that hasn't been wired up yet. Once a
-    /// method gets a real backend, it must stop returning this variant —
-    /// `Unsupported` is a migration placeholder, not a runtime fallback.
-    #[error("unsupported: {0} (not yet wired up in GPUI runtime)")]
-    Unsupported(&'static str),
-
     #[error("clipboard error: {0}")]
     Clipboard(String),
 

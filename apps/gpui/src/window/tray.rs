@@ -1,117 +1,149 @@
-//! System tray handler.
-//!
-//! G2 phase of `docs/plans/active/gpui-refactor.md` section 6.3.
-//!
-//! ## What G2 delivers
-//!
-//! The `TrayHandler` struct + platform branches. Real platform glue
-//! (native icon, click → show/hide) needs platform-specific APIs that
-//! GPUI 1.8.2 exposes via `cx.os_actions()` / `Window::activate_window`;
-//! G2 ships the structure with a `setup` method that G3+ calls from
-//! `main.rs`.
-//!
-//! ## Platform differences (mirroring Tauri's tray.rs)
-//!
-//! * **macOS**: tray icon in the menu bar; left-click toggles dock
-//!   visibility. `Window::show` / `Window::hide` are no-ops when the app
-//!   is in the background — must call `NSApplication::activateIgnoringOtherApps`.
-//! * **Windows**: tray icon in the system tray; left-click restores the
-//!   window. Right-click shows the context menu.
-//! * **Linux**: tray icon depends on the desktop environment (StatusNotifierItem
-//!   on modern KDE/GNOME; legacy XEmbed on older WMs). GPUI's `TrayHandle`
-//!   abstracts this; we just provide the menu + click handler.
+use anyhow::Context as _;
+use gpui::{App, Global, WindowHandle};
+use tokio::sync::mpsc;
+use tray_icon::{
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+    Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+};
 
-use gpui::App;
+use crate::{
+    view::RootView,
+    window::menu::{OpenCommandManager, OpenConnectionManager},
+};
 
-use super::menu::build_tray_menu;
+const SHOW_MAIN: &str = "fileterm-tray-show-main";
+const CONNECTIONS: &str = "fileterm-tray-connections";
+const COMMANDS: &str = "fileterm-tray-commands";
+const QUIT: &str = "fileterm-tray-quit";
 
-/// Handles the system tray icon + menu.
-///
-/// Held as `Option<TrayHandler>` in the app — on platforms without tray
-/// support (or when the user disabled it), this stays `None`.
-pub struct TrayHandler {
-    /// Whether the tray menu uses English labels. Matches the app menu
-    /// locale so a Chinese user sees Chinese tray items.
-    is_english: bool,
+#[derive(Clone, Copy)]
+enum TrayCommand {
+    ShowMain,
+    Connections,
+    Commands,
+    Quit,
 }
+
+pub struct TrayHandler {
+    _icon: TrayIcon,
+}
+
+impl Global for TrayHandler {}
 
 impl TrayHandler {
-    /// Construct with the given locale. Doesn't actually create the
-    /// tray icon yet — call [`setup`](Self::setup) to do that.
-    pub fn new(is_english: bool) -> Self {
-        Self { is_english }
-    }
+    pub fn setup(
+        is_english: bool,
+        main_window: WindowHandle<RootView>,
+        cx: &mut App,
+    ) -> anyhow::Result<Self> {
+        let label = |en: &'static str, zh: &'static str| -> &'static str {
+            if is_english {
+                en
+            } else {
+                zh
+            }
+        };
+        let menu = Menu::new();
+        let show = MenuItem::with_id(
+            SHOW_MAIN,
+            label("Show FileTerm", "显示 FileTerm"),
+            true,
+            None,
+        );
+        let connections = MenuItem::with_id(
+            CONNECTIONS,
+            label("Connection Manager", "连接管理器"),
+            true,
+            None,
+        );
+        let commands =
+            MenuItem::with_id(COMMANDS, label("Command Manager", "命令管理器"), true, None);
+        let separator = PredefinedMenuItem::separator();
+        let quit = MenuItem::with_id(QUIT, label("Quit FileTerm", "退出 FileTerm"), true, None);
+        menu.append_items(&[&show, &connections, &commands, &separator, &quit])
+            .context("build FileTerm tray menu")?;
 
-    /// Create the tray icon + attach the menu.
-    ///
-    /// G2 stub: logs the intent but doesn't call GPUI's tray API yet
-    /// (which is `cx.add_tray_icon(...)` and needs an image asset we
-    /// don't have in the spike). G3+ fills this in with a real icon.
-    pub fn setup(&self, _cx: &mut App) {
-        // G3+: cx.add_tray_icon(TrayIconBuilder::new()
-        //     .icon(default_icon())
-        //     .menu(build_tray_menu(self.is_english))
-        //     .on_tray_icon_event(|event| match event.click {
-        //         TrayClick::Left => { show_main_window(cx); }
-        //         _ => {}
-        //     })
-        //     .build(cx)?);
-        let _menu = build_tray_menu(self.is_english);
-        // Intentionally no-op for G2.
-    }
+        let icon = TrayIconBuilder::new()
+            .with_tooltip("FileTerm")
+            .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
+            .with_icon(fileterm_icon()?)
+            .build()
+            .context("create FileTerm tray icon")?;
 
-    /// Toggle the main window's visibility (macOS dock show/hide
-    /// semantics). Called from the tray's left-click handler.
-    ///
-    /// G2 stub — G3+ wires to `Window::show` / `Window::hide` via the
-    /// `WindowRegistry`'s main-window handle.
-    pub fn toggle_main_window(&self, _cx: &mut App) {
-        // G3+: let handle = registry.handle_for("main")?;
-        //         handle.update(cx, |_, window| {
-        //             if window.is_window_visible() { window.hide(); }
-        //             else { window.show(); }
-        //         });
-    }
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let tray_sender = sender.clone();
+        TrayIconEvent::set_event_handler(Some(move |event| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+            ) {
+                let _ = tray_sender.send(TrayCommand::ShowMain);
+            }
+        }));
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            let command = match event.id.as_ref() {
+                SHOW_MAIN => Some(TrayCommand::ShowMain),
+                CONNECTIONS => Some(TrayCommand::Connections),
+                COMMANDS => Some(TrayCommand::Commands),
+                QUIT => Some(TrayCommand::Quit),
+                _ => None,
+            };
+            if let Some(command) = command {
+                let _ = sender.send(command);
+            }
+        }));
 
-    /// Update the locale of the tray menu at runtime. Called when the
-    /// user changes the UI language preference.
-    ///
-    /// G2 stub — G3+ calls `tray_icon.set_menu(...)` with the rebuilt menu.
-    pub fn set_locale(&mut self, is_english: bool, _cx: &mut App) {
-        self.is_english = is_english;
-        // G3+: rebuild + reattach menu.
+        let mut async_cx = cx.to_async();
+        cx.foreground_executor()
+            .spawn(async move {
+                while let Some(command) = receiver.recv().await {
+                    let _ = main_window.update(&mut async_cx, |_, window, cx| match command {
+                        TrayCommand::ShowMain => window.activate_window(),
+                        TrayCommand::Connections => {
+                            window.activate_window();
+                            window.dispatch_action(Box::new(OpenConnectionManager), cx);
+                        }
+                        TrayCommand::Commands => {
+                            window.activate_window();
+                            window.dispatch_action(Box::new(OpenCommandManager), cx);
+                        }
+                        TrayCommand::Quit => cx.quit(),
+                    });
+                }
+            })
+            .detach();
+
+        Ok(Self { _icon: icon })
     }
 }
 
-/// Default tray icon as raw bytes (PNG). G2 uses a 1x1 transparent
-/// placeholder — G3+ replaces with the real FileTerm brand icon.
-///
-/// Embedded via `include_bytes!` so the binary is self-contained (per
-/// the workspace rule "离线资源就地化：严禁运行时动态拉取外部 CDN 资源").
-#[cfg(not(target_os = "macos"))]
-const DEFAULT_TRAY_ICON: &[u8] = &[
-    // Minimal 1x1 transparent PNG (67 bytes). Real icon lands in G3.
-    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
-    0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
-    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
-    0x42, 0x60, 0x82,
-];
-
-#[cfg(target_os = "macos")]
-const DEFAULT_TRAY_ICON: &[u8] = DEFAULT_TRAY_ICON_PLACEHOLDER;
-#[cfg(target_os = "macos")]
-const DEFAULT_TRAY_ICON_PLACEHOLDER: &[u8] = &[
-    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
-    0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
-    0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
-    0x42, 0x60, 0x82,
-];
-
-/// Get the default tray icon bytes. G3+ replaces with the real brand icon.
-pub fn default_tray_icon() -> &'static [u8] {
-    DEFAULT_TRAY_ICON
+fn fileterm_icon() -> anyhow::Result<Icon> {
+    const SIZE: u32 = 32;
+    let mut rgba = vec![0_u8; (SIZE * SIZE * 4) as usize];
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let index = ((y * SIZE + x) * 4) as usize;
+            let inside = (3..29).contains(&x) && (3..29).contains(&y);
+            let mark = ((8..13).contains(&x) && (8..24).contains(&y))
+                || ((8..23).contains(&x) && (8..12).contains(&y))
+                || ((8..20).contains(&x) && (15..19).contains(&y))
+                || ((20..25).contains(&x) && (15..24).contains(&y));
+            let (red, green, blue, alpha) = if mark {
+                (255, 255, 255, 255)
+            } else if inside {
+                (37, 99, 235, 255)
+            } else {
+                (0, 0, 0, 0)
+            };
+            rgba[index..index + 4].copy_from_slice(&[red, green, blue, alpha]);
+        }
+    }
+    Icon::from_rgba(rgba, SIZE, SIZE).context("build FileTerm tray icon")
 }
 
 #[cfg(test)]
@@ -119,20 +151,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tray_handler_construction() {
-        let handler = TrayHandler::new(true);
-        // Just verify construction doesn't panic; setup is a no-op in G2.
-        assert!(handler.is_english);
-    }
-
-    #[test]
-    fn default_icon_is_non_empty_png() {
-        let icon = default_tray_icon();
-        // PNG magic bytes.
-        assert_eq!(
-            &icon[..8],
-            &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
-        );
-        assert!(icon.len() > 50);
+    fn generated_icon_is_valid() {
+        assert!(fileterm_icon().is_ok());
     }
 }

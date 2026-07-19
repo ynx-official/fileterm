@@ -71,7 +71,9 @@ fn normalize_base_url(value: &str, allow_insecure_tls: bool) -> Result<String> {
         return Err(command_error("WebDAV 地址不得包含片段"));
     }
     if url.scheme() != "https" && !(allow_insecure_tls && url.scheme() == "http") {
-        return Err(command_error("WebDAV 地址必须使用 HTTPS；HTTP 需要明确启用高风险选项。"));
+        return Err(command_error(
+            "WebDAV 地址必须使用 HTTPS；HTTP 需要明确启用高风险选项。",
+        ));
     }
     url.set_query(None);
     Ok(url.to_string().trim_end_matches('/').to_string())
@@ -153,7 +155,10 @@ pub fn get_config(app: &AppHandle) -> Result<Value> {
 
 pub fn save_config(app: &AppHandle, input: Value) -> Result<Value> {
     let previous = read_config(app)?;
-    let enabled = input.get("enabled").and_then(Value::as_bool).unwrap_or(previous.enabled);
+    let enabled = input
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(previous.enabled);
     let allow_insecure_tls = input
         .get("allowInsecureTls")
         .and_then(Value::as_bool)
@@ -218,7 +223,10 @@ fn client() -> Result<Client> {
         .map_err(|error| command_error(format!("无法初始化 WebDAV 客户端: {error}")))
 }
 
-fn authenticated(request: reqwest::RequestBuilder, config: &StoredConfig) -> reqwest::RequestBuilder {
+fn authenticated(
+    request: reqwest::RequestBuilder,
+    config: &StoredConfig,
+) -> reqwest::RequestBuilder {
     match config.username.as_deref() {
         Some(username) => request.basic_auth(username, config.password.as_deref()),
         None => request,
@@ -226,7 +234,10 @@ fn authenticated(request: reqwest::RequestBuilder, config: &StoredConfig) -> req
 }
 
 fn etag(headers: &HeaderMap) -> Option<String> {
-    headers.get(ETAG).and_then(|value| value.to_str().ok()).map(ToOwned::to_owned)
+    headers
+        .get(ETAG)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned)
 }
 
 fn response_error(action: &str, status: StatusCode) -> AppError {
@@ -255,7 +266,11 @@ pub async fn upload(app: &AppHandle) -> Result<Value> {
     Ok(serde_json::json!({ "action": "upload", "message": "连接配置已上传到 WebDAV。" }))
 }
 
-async fn upload_payload(client: &Client, config: &StoredConfig, payload: Vec<u8>) -> Result<Option<String>> {
+async fn upload_payload(
+    client: &Client,
+    config: &StoredConfig,
+    payload: Vec<u8>,
+) -> Result<Option<String>> {
     let remote = remote_url(config)?;
     let head = authenticated(client.head(remote.clone()), config)
         .send()
@@ -267,10 +282,18 @@ async fn upload_payload(client: &Client, config: &StoredConfig, payload: Vec<u8>
     }
     let remote_etag = etag(head.headers());
     if remote_exists && config.last_etag.is_none() {
-        return Err(command_error("远端已存在配置包。请先下载并确认内容，再上传以避免首次同步覆盖。"));
+        return Err(command_error(
+            "远端已存在配置包。请先下载并确认内容，再上传以避免首次同步覆盖。",
+        ));
     }
-    if config.last_etag.as_deref().is_some_and(|last| remote_etag.as_deref() != Some(last)) {
-        return Err(command_error("远端配置自上次同步后已变更。请先下载并确认冲突，再上传。"));
+    if config
+        .last_etag
+        .as_deref()
+        .is_some_and(|last| remote_etag.as_deref() != Some(last))
+    {
+        return Err(command_error(
+            "远端配置自上次同步后已变更。请先下载并确认冲突，再上传。",
+        ));
     }
     let request = authenticated(
         client
@@ -305,7 +328,10 @@ pub async fn download(app: &AppHandle) -> Result<Value> {
     if !response.status().is_success() {
         return Err(response_error("下载", response.status()));
     }
-    if response.content_length().is_some_and(|size| size as usize > MAX_BUNDLE_BYTES) {
+    if response
+        .content_length()
+        .is_some_and(|size| size as usize > MAX_BUNDLE_BYTES)
+    {
         return Err(command_error("WebDAV 配置包超过 5 MB 限制"));
     }
     let remote_etag = etag(response.headers());
@@ -347,7 +373,9 @@ fn parse_bundle(bytes: &[u8]) -> Result<Vec<Value>> {
         let canonical = serde_json::to_vec(&profiles)
             .map_err(|error| AppError::Serialization(error.to_string()))?;
         if sha256_hex(&canonical) != expected {
-            return Err(command_error("WebDAV 配置包 hash 校验失败，文件可能已损坏或被篡改"));
+            return Err(command_error(
+                "WebDAV 配置包 hash 校验失败，文件可能已损坏或被篡改",
+            ));
         }
     }
     Ok(profiles.into_iter().filter_map(sanitize_profile).collect())
@@ -359,24 +387,44 @@ fn sanitize_profile(value: Value) -> Option<Value> {
     if !matches!(kind.as_str(), "ssh" | "ftp" | "telnet" | "serial") {
         return None;
     }
-    if object.get("name").and_then(Value::as_str).is_none_or(|name| name.trim().is_empty()) {
+    if object
+        .get("name")
+        .and_then(Value::as_str)
+        .is_none_or(|name| name.trim().is_empty())
+    {
         return None;
     }
     if kind == "serial" {
-        if object.get("devicePath").and_then(Value::as_str).is_none_or(|path| path.trim().is_empty()) {
+        if object
+            .get("devicePath")
+            .and_then(Value::as_str)
+            .is_none_or(|path| path.trim().is_empty())
+        {
             return None;
         }
     } else {
-        let host_valid = object.get("host").and_then(Value::as_str).is_some_and(|host| !host.trim().is_empty());
-        let port_valid = object.get("port").and_then(Value::as_u64).is_some_and(|port| (1..=65535).contains(&port));
+        let host_valid = object
+            .get("host")
+            .and_then(Value::as_str)
+            .is_some_and(|host| !host.trim().is_empty());
+        let port_valid = object
+            .get("port")
+            .and_then(Value::as_u64)
+            .is_some_and(|port| (1..=65535).contains(&port));
         if !host_valid || !port_valid {
             return None;
         }
     }
     object.insert("type".to_string(), Value::String(kind));
-    object.entry("group".to_string()).or_insert_with(|| Value::String("默认".to_string()));
-    object.entry("remotePath".to_string()).or_insert_with(|| Value::String("/".to_string()));
-    object.entry("username".to_string()).or_insert_with(|| Value::String(String::new()));
+    object
+        .entry("group".to_string())
+        .or_insert_with(|| Value::String("默认".to_string()));
+    object
+        .entry("remotePath".to_string())
+        .or_insert_with(|| Value::String("/".to_string()));
+    object
+        .entry("username".to_string())
+        .or_insert_with(|| Value::String(String::new()));
     for key in ["id", "parentId", "order", "lastUsedAt"] {
         object.remove(key);
     }
@@ -391,7 +439,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 fn timestamp() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let seconds = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
     format!("{seconds}")
 }
 
@@ -414,11 +465,13 @@ mod tests {
         let canonical = serde_json::to_vec(&profiles).unwrap();
         let bytes = serde_json::to_vec(&serde_json::json!({
             "contentHash": sha256_hex(&canonical), "profiles": profiles
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(parse_bundle(&bytes).unwrap().len(), 1);
         let tampered = serde_json::to_vec(&serde_json::json!({
             "contentHash": "deadbeef", "profiles": []
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(parse_bundle(&tampered).is_err());
     }
 }

@@ -1,20 +1,68 @@
-//! Minimal logging shim forked from `apps/tauri/src-tauri/src/services/logging.rs`
-//! for the GPUI runtime's G1 phase.
-//!
-//! Only the `_global` entry points called by the forked
-//! `backend::sessions::local_files` module are surfaced here. Full file-backed
-//! logging (redaction, rotation, `LOG_DIRECTORY` `OnceLock`, `init(app)`, and
-//! the `warn_global` / `write` / `session` / `ssh_debug` helpers) lands in a
-//! later G-phase when the first session controller that needs richer logging
-//! is forked.
-//!
-//! For G1 these are no-ops, which is semantically identical to Tauri's
-//! behavior before `logging::init()` is called: `write_global` returns early
-//! when `LOG_DIRECTORY` is unset, so none of the `*_global` helpers write
-//! anything until the runtime is initialized.
+//! Process-wide file logging for GPUI services.
 
-pub fn debug_global(_scope: &str, _message: impl AsRef<str>) {}
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-pub fn info_global(_scope: &str, _message: impl AsRef<str>) {}
+use crate::{backend::AppHandle, error::AppError};
 
-pub fn error_global(_scope: &str, _message: impl AsRef<str>) {}
+static LOG_FILE: OnceLock<PathBuf> = OnceLock::new();
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn init(app: &AppHandle) -> Result<(), AppError> {
+    let directory = app.app_data_dir().join("logs");
+    fs::create_dir_all(&directory).map_err(|error| AppError::Storage(error.to_string()))?;
+    let _ = LOG_FILE.set(directory.join("fileterm-gpui.log"));
+    Ok(())
+}
+
+pub fn debug_global(scope: &str, message: impl AsRef<str>) {
+    write_global("DEBUG", scope, message.as_ref());
+}
+
+pub fn info_global(scope: &str, message: impl AsRef<str>) {
+    write_global("INFO", scope, message.as_ref());
+}
+
+pub fn error_global(scope: &str, message: impl AsRef<str>) {
+    write_global("ERROR", scope, message.as_ref());
+}
+
+fn write_global(level: &str, scope: &str, message: &str) {
+    let Some(path) = LOG_FILE.get() else {
+        return;
+    };
+    let Ok(_guard) = WRITE_LOCK.lock() else {
+        return;
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let sanitized = message.replace(['\r', '\n'], " ");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{timestamp} {level} [{scope}] {sanitized}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logger_writes_one_line_records() {
+        let directory =
+            std::env::temp_dir().join(format!("fileterm-gpui-log-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let app = AppHandle::new(directory.clone());
+        init(&app).unwrap();
+        info_global("test", "first\nsecond");
+        let content = fs::read_to_string(directory.join("logs/fileterm-gpui.log")).unwrap();
+        assert!(content.contains("INFO [test] first second"));
+        let _ = fs::remove_dir_all(directory);
+    }
+}

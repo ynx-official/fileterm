@@ -1,22 +1,7 @@
 //! File manager — directory listing + virtual-scroll table + context menu.
 //!
-//! G4 phase of `docs/plans/active/gpui-refactor.md` section 6.5.
-//!
-//! Renders remote directory contents with virtual scrolling (only the
-//! visible rows + small overscan are shaped/painted) so 10k-file dirs
-//! stay smooth. Right-click opens a context menu (rename / delete /
-//! chmod / download).
-//!
-//! ## View structure
-//!
-//! `FileManager` is a GPUI `Entity` that holds:
-//! * `cwd: PathBuf` — current directory
-//! * `entries: Vec<RemoteFileEntry>` — full listing (not just visible)
-//! * `selection: HashSet<String>` — selected entry names
-//! * `sort: SortKey` — name / size / modified / type
-//!
-//! G4 stub — the struct + types are here; the `Render` impl (GPUI view)
-//! lands in G4.2 when we wire it into the workspace layout.
+//! The protocol-independent selection and sorting model is kept separate from
+//! the GPUI workspace renderer in `view/session.rs`.
 
 use std::collections::HashSet;
 use std::path::PathBuf;

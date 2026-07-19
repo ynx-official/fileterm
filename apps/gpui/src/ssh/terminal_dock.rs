@@ -125,32 +125,6 @@ impl Default for CommandHistory {
     }
 }
 
-/// Path completion engine.
-///
-/// G3 stub — real impl queries the remote filesystem via SFTP (G4) or
-/// SSH exec `ls -d <prefix>*`. Returns candidate paths to complete the
-/// user's Tab press.
-#[allow(dead_code)]
-#[derive(Default)]
-pub struct PathCompleter {
-    /// Cached last-completion prefix to avoid re-querying on every
-    /// keystroke. Cleared when the input changes.
-    last_prefix: Option<String>,
-    /// Cached candidates for `last_prefix`.
-    candidates: Vec<String>,
-}
-
-impl PathCompleter {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// G3 stub — returns empty. G3.4 TODO: query remote FS.
-    pub async fn complete(&mut self, _prefix: &str) -> Vec<String> {
-        Vec::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

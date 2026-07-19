@@ -104,7 +104,7 @@ impl WindowRegistry {
         self.detached_tabs
             .read()
             .get(window_id)
-            .map_or(true, Vec::is_empty)
+            .is_none_or(Vec::is_empty)
     }
 
     /// Detach a tab from its current window into a target window.

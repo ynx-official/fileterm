@@ -34,6 +34,7 @@ pub struct SessionWorkspace {
     transfer_controls: HashMap<String, TransferControl>,
     connection_error: Option<String>,
     pending_file_operation: Option<PendingFileOperation>,
+    pending_file_editor: Option<PendingFileEditor>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -50,6 +51,19 @@ struct PendingFileOperation {
     kind: FileOperationKind,
     title: &'static str,
     input: String,
+}
+
+#[derive(Clone)]
+struct PendingFileEditor {
+    path: String,
+    content: String,
+    cursor_byte: usize,
+    original_size: u64,
+    original_modified: Option<u64>,
+    busy: bool,
+    dirty: bool,
+    discard_armed: bool,
+    error: Option<String>,
 }
 
 impl SessionWorkspace {
@@ -87,9 +101,8 @@ impl SessionWorkspace {
                 session.model.terminal_elevated,
             );
             if let Some(path) = cwd {
-                let path = path.to_string_lossy().to_string();
-                if this.files.cwd != PathBuf::from(&path) {
-                    this.load_remote_path(path, cx);
+                if this.files.cwd != path {
+                    this.load_remote_path(path.to_string_lossy().into_owned(), cx);
                 }
             }
             cx.notify();
@@ -109,6 +122,7 @@ impl SessionWorkspace {
             transfer_controls: HashMap::new(),
             connection_error: transfer_load_error,
             pending_file_operation: None,
+            pending_file_editor: None,
             _subscriptions: vec![runtime_subscription],
         };
         workspace.spawn_session_events(cx);
@@ -225,6 +239,94 @@ impl SessionWorkspace {
         self.load_remote_path(client.parent_path(), cx);
     }
 
+    fn open_file_editor(&mut self, entry: RemoteFileEntry, cx: &mut Context<Self>) {
+        const MAX_EDITOR_BYTES: u64 = 1024 * 1024;
+        let Some(client) = self.sftp.clone() else {
+            return;
+        };
+        if entry.size > MAX_EDITOR_BYTES {
+            self.connection_error = Some("文件超过 1 MB，请下载后使用外部编辑器".to_string());
+            cx.notify();
+            return;
+        }
+        let path = entry.path.clone();
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let metadata = client.stat(&path).await?;
+                if metadata.size > MAX_EDITOR_BYTES {
+                    anyhow::bail!("文件超过 1 MB，请下载后使用外部编辑器");
+                }
+                let bytes = client.read(&path).await?;
+                let content = String::from_utf8(bytes)
+                    .map_err(|_| anyhow::anyhow!("文件不是 UTF-8 文本，无法在内置编辑器中打开"))?;
+                let cursor_byte = content.len();
+                Ok::<_, anyhow::Error>(PendingFileEditor {
+                    path,
+                    content,
+                    cursor_byte,
+                    original_size: metadata.size,
+                    original_modified: metadata.modified,
+                    busy: false,
+                    dirty: false,
+                    discard_armed: false,
+                    error: None,
+                })
+            }
+            .await;
+            let _ = this.update(cx, |workspace, cx| {
+                match result {
+                    Ok(editor) => workspace.pending_file_editor = Some(editor),
+                    Err(error) => workspace.connection_error = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn save_file_editor(&mut self, cx: &mut Context<Self>) {
+        let Some(editor) = self.pending_file_editor.as_mut() else {
+            return;
+        };
+        let Some(client) = self.sftp.clone() else {
+            editor.error = Some("SFTP 尚未连接".to_string());
+            return;
+        };
+        editor.busy = true;
+        editor.error = None;
+        let path = editor.path.clone();
+        let content = editor.content.clone();
+        let original_size = editor.original_size;
+        let original_modified = editor.original_modified;
+        cx.spawn(async move |this, cx| {
+            let result = async {
+                let current = client.stat(&path).await?;
+                if current.size != original_size || current.modified != original_modified {
+                    anyhow::bail!("远端文件已被其他进程修改，请关闭编辑器并重新打开");
+                }
+                client.write(&path, content.as_bytes()).await?;
+                client.stat(&path).await
+            }
+            .await;
+            let _ = this.update(cx, |workspace, cx| {
+                if let Some(editor) = workspace.pending_file_editor.as_mut() {
+                    editor.busy = false;
+                    match result {
+                        Ok(metadata) => {
+                            editor.original_size = metadata.size;
+                            editor.original_modified = metadata.modified;
+                            editor.dirty = false;
+                            editor.error = None;
+                        }
+                        Err(error) => editor.error = Some(error.to_string()),
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     fn begin_file_operation(
         &mut self,
         kind: FileOperationKind,
@@ -242,6 +344,10 @@ impl SessionWorkspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pending_file_editor.is_some() {
+            self.handle_file_editor_key(event, cx);
+            return;
+        }
         let Some(pending) = self.pending_file_operation.as_mut() else {
             return;
         };
@@ -258,6 +364,76 @@ impl SessionWorkspace {
             _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
                 if let Some(text) = event.keystroke.key_char.as_deref() {
                     pending.input.push_str(text);
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_file_editor_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(editor) = self.pending_file_editor.as_mut() else {
+            return;
+        };
+        if editor.busy {
+            return;
+        }
+        let save_shortcut = event.keystroke.key == "s"
+            && (event.keystroke.modifiers.platform || event.keystroke.modifiers.control);
+        if save_shortcut {
+            self.save_file_editor(cx);
+            return;
+        }
+        match event.keystroke.key.as_str() {
+            "escape" if editor.dirty && !editor.discard_armed => {
+                editor.discard_armed = true;
+                editor.error = Some("内容尚未保存；再次按 Esc 放弃修改".to_string());
+                cx.notify();
+            }
+            "escape" => {
+                self.pending_file_editor = None;
+                cx.notify();
+            }
+            "left" => {
+                editor.cursor_byte = previous_char_boundary(&editor.content, editor.cursor_byte);
+                cx.notify();
+            }
+            "right" => {
+                editor.cursor_byte = next_char_boundary(&editor.content, editor.cursor_byte);
+                cx.notify();
+            }
+            "up" => {
+                editor.cursor_byte =
+                    move_cursor_vertically(&editor.content, editor.cursor_byte, -1);
+                cx.notify();
+            }
+            "down" => {
+                editor.cursor_byte = move_cursor_vertically(&editor.content, editor.cursor_byte, 1);
+                cx.notify();
+            }
+            "home" => {
+                editor.cursor_byte = line_start(&editor.content, editor.cursor_byte);
+                cx.notify();
+            }
+            "end" => {
+                editor.cursor_byte = line_end(&editor.content, editor.cursor_byte);
+                cx.notify();
+            }
+            "enter" | "return" => {
+                insert_editor_text(editor, "\n");
+                cx.notify();
+            }
+            "backspace" => {
+                backspace_editor(editor);
+                cx.notify();
+            }
+            "delete" => {
+                delete_editor_char(editor);
+                cx.notify();
+            }
+            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
+                if let Some(text) = event.keystroke.key_char.as_deref() {
+                    insert_editor_text(editor, text);
                     cx.notify();
                 }
             }
@@ -608,6 +784,7 @@ impl SessionWorkspace {
             .enumerate()
             .map(|(index, entry)| {
                 let path = entry.path.clone();
+                let edit_entry = entry.clone();
                 let download_entry = entry.clone();
                 let rename_entry = entry.clone();
                 let chmod_entry = entry.clone();
@@ -658,6 +835,20 @@ impl SessionWorkspace {
                     )
                     .when(!is_dir, |row| {
                         row.child(
+                            div()
+                                .id(("edit-remote-file", index))
+                                .px_1()
+                                .py_1()
+                                .rounded_sm()
+                                .text_xs()
+                                .text_color(palette.accent)
+                                .hover(move |style| style.bg(palette.surface_hover))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_file_editor(edit_entry.clone(), cx)
+                                }))
+                                .child("编"),
+                        )
+                        .child(
                             div()
                                 .id(("download-remote-file", index))
                                 .px_1()
@@ -815,6 +1006,133 @@ impl SessionWorkspace {
                     .when(!self.files.loading && self.files.error.is_none(), |view| {
                         view.children(rows)
                     }),
+            )
+    }
+
+    fn render_file_editor(
+        &self,
+        editor: PendingFileEditor,
+        palette: ThemePalette,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let status = if editor.busy {
+            "保存中".to_string()
+        } else if editor.dirty {
+            "未保存".to_string()
+        } else {
+            "已保存".to_string()
+        };
+        let mut visible_content = editor.content.clone();
+        let cursor_byte = editor.cursor_byte.min(visible_content.len());
+        if visible_content.is_char_boundary(cursor_byte) {
+            visible_content.insert(cursor_byte, '│');
+        }
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::black().opacity(0.7))
+            .child(
+                div()
+                    .w(px(820.0))
+                    .h(px(620.0))
+                    .p_5()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .rounded_lg()
+                    .bg(palette.surface)
+                    .border_1()
+                    .border_color(palette.border_strong)
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .truncate()
+                                    .text_lg()
+                                    .text_color(palette.text)
+                                    .child(editor.path.clone()),
+                            )
+                            .child(div().text_xs().text_color(palette.text_muted).child(status)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(palette.text_soft)
+                            .child("UTF-8 文本编辑器 · Cmd/Ctrl+S 保存 · Esc 关闭"),
+                    )
+                    .child(
+                        div()
+                            .min_h(px(0.0))
+                            .flex_1()
+                            .overflow_hidden()
+                            .p_3()
+                            .rounded_md()
+                            .bg(palette.background)
+                            .border_1()
+                            .border_color(palette.accent)
+                            .font_family("monospace")
+                            .text_sm()
+                            .text_color(palette.text)
+                            .child(visible_content),
+                    )
+                    .when_some(editor.error, |view, error| {
+                        view.child(div().text_xs().text_color(palette.danger).child(error))
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("close-file-editor")
+                                    .px_3()
+                                    .py_2()
+                                    .cursor_pointer()
+                                    .text_sm()
+                                    .text_color(palette.text_muted)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let dirty = this
+                                            .pending_file_editor
+                                            .as_ref()
+                                            .is_some_and(|editor| editor.dirty);
+                                        if dirty {
+                                            if let Some(editor) = this.pending_file_editor.as_mut()
+                                            {
+                                                editor.discard_armed = true;
+                                                editor.error = Some(
+                                                    "内容尚未保存；再次按 Esc 放弃修改".to_string(),
+                                                );
+                                            }
+                                        } else {
+                                            this.pending_file_editor = None;
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child("关闭"),
+                            )
+                            .child(
+                                div()
+                                    .id("save-file-editor")
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .bg(palette.accent)
+                                    .text_sm()
+                                    .text_color(palette.background)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.save_file_editor(cx)),
+                                    )
+                                    .child("保存"),
+                            ),
+                    ),
             )
     }
 
@@ -1048,6 +1366,7 @@ impl Drop for SessionWorkspace {
 impl Render for SessionWorkspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = ThemePalette::for_mode(self.app_state.read(cx).theme);
+        let pending_file_editor = self.pending_file_editor.clone();
         let pending_file_operation = self.pending_file_operation.clone();
         div()
             .size_full()
@@ -1084,10 +1403,113 @@ impl Render for SessionWorkspace {
                         )
                     }),
             )
+            .when_some(pending_file_editor, |view, editor| {
+                view.child(self.render_file_editor(editor, palette, cx))
+            })
             .when_some(pending_file_operation, |view, pending| {
                 view.child(self.render_file_operation(pending, palette, cx))
             })
     }
+}
+
+fn valid_cursor(content: &str, cursor: usize) -> usize {
+    let mut cursor = cursor.min(content.len());
+    while !content.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    cursor
+}
+
+pub(super) fn previous_char_boundary(content: &str, cursor: usize) -> usize {
+    let cursor = valid_cursor(content, cursor);
+    content[..cursor]
+        .char_indices()
+        .next_back()
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+pub(super) fn next_char_boundary(content: &str, cursor: usize) -> usize {
+    let cursor = valid_cursor(content, cursor);
+    content[cursor..]
+        .chars()
+        .next()
+        .map(|character| cursor + character.len_utf8())
+        .unwrap_or(content.len())
+}
+
+pub(super) fn line_start(content: &str, cursor: usize) -> usize {
+    let cursor = valid_cursor(content, cursor);
+    content[..cursor]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0)
+}
+
+pub(super) fn line_end(content: &str, cursor: usize) -> usize {
+    let cursor = valid_cursor(content, cursor);
+    content[cursor..]
+        .find('\n')
+        .map(|offset| cursor + offset)
+        .unwrap_or(content.len())
+}
+
+pub(super) fn move_cursor_vertically(content: &str, cursor: usize, direction: i8) -> usize {
+    let cursor = valid_cursor(content, cursor);
+    let current_start = line_start(content, cursor);
+    let column = content[current_start..cursor].chars().count();
+    let target_start = if direction < 0 {
+        if current_start == 0 {
+            return cursor;
+        }
+        line_start(content, current_start - 1)
+    } else {
+        let current_end = line_end(content, cursor);
+        if current_end == content.len() {
+            return cursor;
+        }
+        current_end + 1
+    };
+    let target_end = line_end(content, target_start);
+    content[target_start..target_end]
+        .char_indices()
+        .map(|(offset, _)| target_start + offset)
+        .nth(column)
+        .unwrap_or(target_end)
+}
+
+fn mark_editor_changed(editor: &mut PendingFileEditor) {
+    editor.dirty = true;
+    editor.discard_armed = false;
+    editor.error = None;
+}
+
+fn insert_editor_text(editor: &mut PendingFileEditor, text: &str) {
+    editor.cursor_byte = valid_cursor(&editor.content, editor.cursor_byte);
+    editor.content.insert_str(editor.cursor_byte, text);
+    editor.cursor_byte += text.len();
+    mark_editor_changed(editor);
+}
+
+fn backspace_editor(editor: &mut PendingFileEditor) {
+    editor.cursor_byte = valid_cursor(&editor.content, editor.cursor_byte);
+    let previous = previous_char_boundary(&editor.content, editor.cursor_byte);
+    if previous == editor.cursor_byte {
+        return;
+    }
+    editor.content.drain(previous..editor.cursor_byte);
+    editor.cursor_byte = previous;
+    mark_editor_changed(editor);
+}
+
+fn delete_editor_char(editor: &mut PendingFileEditor) {
+    editor.cursor_byte = valid_cursor(&editor.content, editor.cursor_byte);
+    let next = next_char_boundary(&editor.content, editor.cursor_byte);
+    if next == editor.cursor_byte {
+        return;
+    }
+    editor.content.drain(editor.cursor_byte..next);
+    mark_editor_changed(editor);
 }
 
 async fn inspect_transfer(
@@ -1268,5 +1690,52 @@ mod tests {
     fn byte_sizes_are_compact() {
         assert_eq!(format_bytes(42), "42 B");
         assert_eq!(format_bytes(2048), "2.0 KB");
+    }
+
+    #[test]
+    fn editor_inserts_and_deletes_at_utf8_cursor() {
+        let mut editor = editor("甲乙");
+        editor.cursor_byte = "甲".len();
+
+        insert_editor_text(&mut editor, "A");
+        assert_eq!(editor.content, "甲A乙");
+        assert_eq!(editor.cursor_byte, "甲A".len());
+
+        backspace_editor(&mut editor);
+        assert_eq!(editor.content, "甲乙");
+        assert_eq!(editor.cursor_byte, "甲".len());
+
+        delete_editor_char(&mut editor);
+        assert_eq!(editor.content, "甲");
+        assert!(editor.dirty);
+    }
+
+    #[test]
+    fn editor_vertical_navigation_preserves_character_column() {
+        let content = "ab甲\nx\n12345";
+        let first_line_column_three = "ab甲".len();
+        let second_line_end = move_cursor_vertically(content, first_line_column_three, 1);
+        assert_eq!(second_line_end, "ab甲\nx".len());
+
+        let third_line_column_one = move_cursor_vertically(content, second_line_end, 1);
+        assert_eq!(third_line_column_one, "ab甲\nx\n1".len());
+        assert_eq!(
+            move_cursor_vertically(content, third_line_column_one, -1),
+            second_line_end
+        );
+    }
+
+    fn editor(content: &str) -> PendingFileEditor {
+        PendingFileEditor {
+            path: "/tmp/file".to_string(),
+            content: content.to_string(),
+            cursor_byte: content.len(),
+            original_size: content.len() as u64,
+            original_modified: None,
+            busy: false,
+            dirty: false,
+            discard_armed: false,
+            error: None,
+        }
     }
 }

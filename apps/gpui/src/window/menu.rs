@@ -1,30 +1,14 @@
 //! Application menu builder.
 //!
-//! G2 phase of `docs/plans/active/gpui-refactor.md` section 6.3.
-//!
-//! Mirrors Tauri's `init_menu` (File / Edit / View / Window / Help) using
-//! GPUI's `MenuItem` enum. Each menu item dispatches a GPUI `Action`; the
-//! action types are defined here as stubs (`NewConnection`, `Quit`, etc.)
-//! and G3+ wires them to real handlers via `cx.on_action(...)`.
-//!
-//! ## Why stub actions
-//!
-//! GPUI menus dispatch via the `Action` trait, not string ids like Tauri.
-//! Defining the action types upfront means the menu builds today; G3+
-//! just adds `cx.on_action::<NewConnection>(...)` handlers. This matches
-//! the spike-first pattern: get the structure compiling, fill in behavior
-//! incrementally.
+//! Mirrors Tauri's File / Edit / View / Window / Help structure using
+//! GPUI actions. Handlers are registered by the main view and tray runtime.
 
-use gpui::{Menu, MenuItem, SharedString};
+use gpui::{Menu, MenuItem, OsAction, SharedString};
 
 // ---- Action types ----
 //
-// Each is a unit struct implementing `gpui::Action`. The `actions!` macro
-// generates the `Action` impl + `From` impls + registration. G3+ adds
-// `cx.on_action::<Foo>(handler)` calls in main.rs to wire them up.
-//
-// Naming mirrors Tauri's menu item ids (`tray-show-main`, `new-connection`,
-// etc.) so the migration is line-for-line where possible.
+// Each unit struct implements `gpui::Action`. The `actions!` macro generates
+// the action registration and conversion implementations.
 
 /// File → New Connection. Opens the connection form.
 #[derive(Clone, PartialEq, Eq, gpui::Action)]
@@ -91,11 +75,8 @@ pub struct OpenDocs;
 
 /// Build the application menu (File / Edit / View / Window / Help).
 ///
-/// Returns `Vec<Menu>` to be passed to `cx.set_menus(...)`. The
-/// `is_english` flag matches Tauri's localization: `true` → English
-/// labels, `false` → Chinese labels.
-///
-/// G2 returns the structure with stub actions. G3+ wires real handlers.
+/// Returns `Vec<Menu>` for `cx.set_menus(...)`. The `is_english` flag
+/// selects English or Chinese labels.
 pub fn build_application_menu(is_english: bool) -> Vec<Menu> {
     let label = |en: &str, zh: &str| -> SharedString { if is_english { en } else { zh }.into() };
 
@@ -113,13 +94,17 @@ pub fn build_application_menu(is_english: bool) -> Vec<Menu> {
     ]);
 
     let edit = Menu::new(label("Edit", "编辑")).items(vec![
-        MenuItem::action(label("Undo", "撤销"), EditUndo),
-        MenuItem::action(label("Redo", "重做"), EditRedo),
+        MenuItem::os_action(label("Undo", "撤销"), EditUndo, OsAction::Undo),
+        MenuItem::os_action(label("Redo", "重做"), EditRedo, OsAction::Redo),
         MenuItem::separator(),
-        MenuItem::action(label("Cut", "剪切"), EditCut),
-        MenuItem::action(label("Copy", "复制"), EditCopy),
-        MenuItem::action(label("Paste", "粘贴"), EditPaste),
-        MenuItem::action(label("Select All", "全选"), EditSelectAll),
+        MenuItem::os_action(label("Cut", "剪切"), EditCut, OsAction::Cut),
+        MenuItem::os_action(label("Copy", "复制"), EditCopy, OsAction::Copy),
+        MenuItem::os_action(label("Paste", "粘贴"), EditPaste, OsAction::Paste),
+        MenuItem::os_action(
+            label("Select All", "全选"),
+            EditSelectAll,
+            OsAction::SelectAll,
+        ),
     ]);
 
     let view = Menu::new(label("View", "视图")).items(vec![MenuItem::action(

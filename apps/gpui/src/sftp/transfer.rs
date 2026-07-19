@@ -2,11 +2,9 @@
 //!
 //! G4 phase of `docs/plans/active/gpui-refactor.md` section 6.5.
 //!
-//! Mirrors `apps/tauri/src-tauri/src/services/transfers.rs` line-for-line
-//! on the type surface (`TransferTask`, `TransferManifest`, journal file
-//! format) so on-disk state is interchangeable between the Tauri and
-//! GPUI runtimes. All operations are G4 stubs — the real russh-sftp
-//! I/O loop + journal write loop lands in G4.3.
+//! Mirrors `apps/tauri/src-tauri/src/services/transfers.rs` on the durable
+//! task and journal shape so on-disk state remains interchangeable. Active
+//! SFTP and FTP workspaces drive the real copy loops through this service.
 //!
 //! ## Journal format
 //!
@@ -260,13 +258,7 @@ struct TransferJournal {
 const JOURNAL_VERSION: u8 = 1;
 const PARTIAL_SUFFIX: &str = ".fileterm-part";
 
-/// Transfer service — owns the journal + the in-memory task list.
-///
-/// G4 stub — the real implementation (tokio task per active transfer,
-/// `CancellationToken` for pause/cancel, atomic journal rewrite, partial
-/// file stat-on-resume) lands in G4.3. The struct + types are here so
-/// `TransferCenter` (the GPUI view) and `commands::workspace_*` can
-/// hold a handle today.
+/// Transfer service owning the durable journal and in-memory task state.
 #[allow(dead_code)]
 pub struct TransferService {
     /// Path to `transfer-journal.json` (under `app_data_dir()`).

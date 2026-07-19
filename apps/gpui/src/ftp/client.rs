@@ -2,6 +2,7 @@ use std::{collections::HashMap, path::Path, sync::Arc, time::UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use suppaftp::{
     list::{File as ListedFile, ListParser},
     tokio::{
@@ -10,15 +11,13 @@ use suppaftp::{
     },
 };
 use tokio::{
-    io::{AsyncSeekExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
     sync::Mutex,
 };
 
-use crate::{
-    sftp::{
-        client::RemoteFileEntry,
-        transfer::{TransferControl, TransferIoOutcome, TransferProgress},
-    },
+use crate::sftp::{
+    client::RemoteFileEntry,
+    transfer::{TransferControl, TransferIoOutcome, TransferProgress},
 };
 
 #[derive(Clone, Debug)]
@@ -117,6 +116,13 @@ struct ParsedListing {
     type_is_trusted: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FtpTextFile {
+    pub content: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
 pub struct FtpSession {
     profile: FtpProfile,
     client: Mutex<Option<FtpClient>>,
@@ -150,7 +156,9 @@ impl FtpSession {
     pub async fn list_dir(&self, path: Option<&str>) -> Result<Vec<RemoteFileEntry>> {
         let path = path.map(ToOwned::to_owned).unwrap_or_else(|| self.cwd());
         let mut client = self.client.lock().await;
-        let client = client.as_mut().ok_or_else(|| anyhow!("FTP session is closed"))?;
+        let client = client
+            .as_mut()
+            .ok_or_else(|| anyhow!("FTP session is closed"))?;
         let mut state = self.listing_state.lock().await;
         let entries = client_list(client, &path, &mut state).await?;
         *self.cwd.write() = path;
@@ -185,6 +193,59 @@ impl FtpSession {
     pub async fn remote_file_identity(&self, path: &str) -> Result<(u64, Option<u64>)> {
         let mut client = self.client.lock().await;
         Ok((client_size(live_client(&mut client)?, path).await?, None))
+    }
+
+    pub async fn read_text_file(&self, path: &str, max_bytes: u64) -> Result<FtpTextFile> {
+        let mut client = self.client.lock().await;
+        let client = live_client(&mut client)?;
+        let size = client_size(client, path).await?;
+        if size > max_bytes {
+            bail!("file exceeds editor limit of {max_bytes} bytes");
+        }
+        let bytes = client_read(client, path, max_bytes).await?;
+        let sha256 = sha256_hex(&bytes);
+        let content =
+            String::from_utf8(bytes).map_err(|_| anyhow!("file is not valid UTF-8 text"))?;
+        Ok(FtpTextFile {
+            content,
+            size,
+            sha256,
+        })
+    }
+
+    pub async fn write_text_file_if_unchanged(
+        &self,
+        path: &str,
+        expected_size: u64,
+        expected_sha256: &str,
+        content: &str,
+        max_bytes: u64,
+    ) -> Result<FtpTextFile> {
+        let mut client = self.client.lock().await;
+        let client = live_client(&mut client)?;
+        let current_size = client_size(client, path).await?;
+        if current_size != expected_size {
+            bail!("remote file changed from {expected_size} to {current_size} bytes");
+        }
+        let current = client_read(client, path, max_bytes).await?;
+        if sha256_hex(&current) != expected_sha256 {
+            bail!("remote file content changed since it was opened");
+        }
+        let partial = format!("{path}.fileterm-edit-{}", uuid::Uuid::new_v4());
+        if let Err(error) = client_write(client, &partial, content.as_bytes()).await {
+            let _ = client_remove_if_exists(client, &partial).await;
+            return Err(error);
+        }
+        if let Err(error) = client_replace(client, &partial, path, true).await {
+            let _ = client_remove_if_exists(client, &partial).await;
+            return Err(error);
+        }
+        let bytes = content.as_bytes();
+        Ok(FtpTextFile {
+            content: content.to_string(),
+            size: client_size(client, path).await?,
+            sha256: sha256_hex(bytes),
+        })
     }
 
     pub async fn remote_file_size_if_exists(&self, path: &str) -> Result<u64> {
@@ -236,7 +297,12 @@ impl FtpSession {
         result
     }
 
-    pub async fn finalize_upload(&self, partial: &str, destination: &str, overwrite: bool) -> Result<()> {
+    pub async fn finalize_upload(
+        &self,
+        partial: &str,
+        destination: &str,
+        overwrite: bool,
+    ) -> Result<()> {
         let mut client = self.client.lock().await;
         client_replace(live_client(&mut client)?, partial, destination, overwrite).await
     }
@@ -255,7 +321,9 @@ impl FtpSession {
 }
 
 fn live_client(client: &mut Option<FtpClient>) -> Result<&mut FtpClient> {
-    client.as_mut().ok_or_else(|| anyhow!("FTP session is closed"))
+    client
+        .as_mut()
+        .ok_or_else(|| anyhow!("FTP session is closed"))
 }
 
 async fn connect_client(profile: &FtpProfile) -> Result<FtpClient> {
@@ -267,24 +335,19 @@ async fn connect_client(profile: &FtpProfile) -> Result<FtpClient> {
             Ok(FtpClient::Plain(client))
         }
         FtpSecurityMode::Explicit => {
-            let connector = AsyncNativeTlsConnector::from(
-                suppaftp::async_native_tls::TlsConnector::new(),
-            );
+            let connector =
+                AsyncNativeTlsConnector::from(suppaftp::async_native_tls::TlsConnector::new());
             let client = AsyncNativeTlsFtpStream::connect(address).await?;
             let mut client = client.into_secure(connector, &profile.host).await?;
             client.login(&profile.username, &profile.password).await?;
             Ok(FtpClient::Secure(client))
         }
         FtpSecurityMode::Implicit => {
-            let connector = AsyncNativeTlsConnector::from(
-                suppaftp::async_native_tls::TlsConnector::new(),
-            );
-            let mut client = AsyncNativeTlsFtpStream::connect_secure_implicit(
-                address,
-                connector,
-                &profile.host,
-            )
-            .await?;
+            let connector =
+                AsyncNativeTlsConnector::from(suppaftp::async_native_tls::TlsConnector::new());
+            let mut client =
+                AsyncNativeTlsFtpStream::connect_secure_implicit(address, connector, &profile.host)
+                    .await?;
             client.login(&profile.username, &profile.password).await?;
             Ok(FtpClient::Secure(client))
         }
@@ -300,7 +363,11 @@ macro_rules! ftp_match {
     };
 }
 
-async fn client_list(client: &mut FtpClient, path: &str, state: &mut ListingState) -> Result<Vec<RemoteFileEntry>> {
+async fn client_list(
+    client: &mut FtpClient,
+    path: &str,
+    state: &mut ListingState,
+) -> Result<Vec<RemoteFileEntry>> {
     ftp_match!(client, ftp => list_files(ftp, path, state))
 }
 
@@ -328,6 +395,10 @@ async fn client_size(client: &mut FtpClient, path: &str) -> Result<u64> {
     ftp_match!(client, ftp => size(ftp, path))
 }
 
+async fn client_read(client: &mut FtpClient, path: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    ftp_match!(client, ftp => read_file(ftp, path, max_bytes))
+}
+
 async fn client_upload(
     client: &mut FtpClient,
     local: &Path,
@@ -348,7 +419,12 @@ async fn client_download(
     ftp_match!(client, ftp => download(ftp, remote, local, control, progress))
 }
 
-async fn client_replace(client: &mut FtpClient, partial: &str, destination: &str, overwrite: bool) -> Result<()> {
+async fn client_replace(
+    client: &mut FtpClient,
+    partial: &str,
+    destination: &str,
+    overwrite: bool,
+) -> Result<()> {
     ftp_match!(client, ftp => replace(ftp, partial, destination, overwrite))
 }
 
@@ -382,7 +458,9 @@ async fn list_files<T: TokioTlsStream + Send>(
     };
     let mut entries = Vec::new();
     for line in lines {
-        let Some(parsed) = parse_listing(&line) else { continue };
+        let Some(parsed) = parse_listing(&line) else {
+            continue;
+        };
         let entry = parsed.entry;
         let name = entry.name();
         if matches!(name, "." | "..") {
@@ -390,7 +468,9 @@ async fn list_files<T: TokioTlsStream + Send>(
         }
         let full_path = join_remote_path(path, name);
         let (is_dir, size) = if parsed.type_is_trusted {
-            state.resolved_types.insert(full_path.clone(), entry.is_directory());
+            state
+                .resolved_types
+                .insert(full_path.clone(), entry.is_directory());
             (entry.is_directory(), entry.size())
         } else {
             let (is_dir, size) = resolve_type(ftp, &full_path, state).await;
@@ -402,14 +482,21 @@ async fn list_files<T: TokioTlsStream + Send>(
             is_dir,
             is_symlink: entry.is_symlink(),
             size: size as u64,
-            modified: entry.modified().duration_since(UNIX_EPOCH).ok().map(|value| value.as_secs()),
+            modified: entry
+                .modified()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|value| value.as_secs()),
             permissions: listing_permission(&line),
             owner: entry.uid().map(|value| value.to_string()),
             group: entry.gid().map(|value| value.to_string()),
         });
     }
     entries.sort_by(|left, right| {
-        right.is_dir.cmp(&left.is_dir).then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        right
+            .is_dir
+            .cmp(&left.is_dir)
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
     Ok(entries)
 }
@@ -426,7 +513,9 @@ async fn resolve_type<T: TokioTlsStream + Send>(
         match ftp.mlst(Some(path)).await {
             Ok(line) if looks_like_mlsd(&line) => {
                 if let Ok(entry) = ListParser::parse_mlst(&line) {
-                    state.resolved_types.insert(path.to_string(), entry.is_directory());
+                    state
+                        .resolved_types
+                        .insert(path.to_string(), entry.is_directory());
                     state.resolved_sizes.insert(path.to_string(), entry.size());
                     return (entry.is_directory(), Some(entry.size()));
                 }
@@ -457,12 +546,18 @@ async fn resolve_type<T: TokioTlsStream + Send>(
     (is_dir, None)
 }
 
-async fn mkdir<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, path: &str) -> Result<()> {
+async fn mkdir<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+) -> Result<()> {
     ftp.mkdir(path).await?;
     Ok(())
 }
 
-async fn ensure_dir<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, path: &str) -> Result<()> {
+async fn ensure_dir<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+) -> Result<()> {
     let mut current = String::new();
     for part in path.split('/').filter(|part| !part.is_empty()) {
         current.push('/');
@@ -472,7 +567,11 @@ async fn ensure_dir<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, p
     Ok(())
 }
 
-async fn write_file<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, path: &str, bytes: &[u8]) -> Result<()> {
+async fn write_file<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+    bytes: &[u8],
+) -> Result<()> {
     ensure_dir(ftp, &parent_remote_path(path)).await?;
     let mut stream = ftp.put_with_stream(path).await?;
     stream.write_all(bytes).await?;
@@ -480,17 +579,30 @@ async fn write_file<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, p
     Ok(())
 }
 
-async fn rename<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, from: &str, to: &str) -> Result<()> {
+async fn rename<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    from: &str,
+    to: &str,
+) -> Result<()> {
     ftp.rename(from, to).await?;
     Ok(())
 }
 
-async fn chmod<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, path: &str, mode: u32) -> Result<()> {
-    ftp.site(format!("CHMOD {:o} {path}", mode & 0o7777)).await?;
+async fn chmod<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+    mode: u32,
+) -> Result<()> {
+    ftp.site(format!("CHMOD {:o} {path}", mode & 0o7777))
+        .await?;
     Ok(())
 }
 
-async fn delete_path<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, path: &str, is_dir: bool) -> Result<()> {
+async fn delete_path<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+    is_dir: bool,
+) -> Result<()> {
     if !is_dir {
         ftp.rm(path).await?;
         return Ok(());
@@ -503,8 +615,34 @@ async fn delete_path<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, 
     Ok(())
 }
 
-async fn size<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, path: &str) -> Result<u64> {
+async fn size<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+) -> Result<u64> {
     Ok(ftp.size(path).await? as u64)
+}
+
+async fn read_file<T: TokioTlsStream + Send + 'static>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
+    let mut stream = ftp.retr_as_stream(path).await?;
+    let mut bytes = Vec::new();
+    let read_result = (&mut stream)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await;
+    if let Err(error) = read_result {
+        let _ = ftp.abort(stream).await;
+        return Err(error.into());
+    }
+    if bytes.len() as u64 > max_bytes {
+        let _ = ftp.abort(stream).await;
+        bail!("file exceeds editor limit of {max_bytes} bytes");
+    }
+    ftp.finalize_retr_stream(stream).await?;
+    Ok(bytes)
 }
 
 async fn upload<T: TokioTlsStream + Send + 'static>(
@@ -632,7 +770,10 @@ async fn replace<T: TokioTlsStream + Send>(
     Ok(())
 }
 
-async fn remove_if_exists<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>, path: &str) -> Result<()> {
+async fn remove_if_exists<T: TokioTlsStream + Send>(
+    ftp: &mut ImplAsyncFtpStream<T>,
+    path: &str,
+) -> Result<()> {
     match ftp.rm(path).await {
         Ok(()) => Ok(()),
         Err(error) if is_missing_message(&error.to_string()) => Ok(()),
@@ -645,40 +786,72 @@ async fn quit<T: TokioTlsStream + Send>(ftp: &mut ImplAsyncFtpStream<T>) -> Resu
     Ok(())
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 fn parse_listing(line: &str) -> Option<ParsedListing> {
     if let Ok(entry) = ListParser::parse_posix(line) {
-        return Some(ParsedListing { entry, type_is_trusted: true });
+        return Some(ParsedListing {
+            entry,
+            type_is_trusted: true,
+        });
     }
     if let Ok(entry) = ListParser::parse_dos(line) {
-        return Some(ParsedListing { entry, type_is_trusted: true });
+        return Some(ParsedListing {
+            entry,
+            type_is_trusted: true,
+        });
     }
     if looks_like_mlsd(line) {
         if let Ok(entry) = ListParser::parse_mlsd(line) {
-            return Some(ParsedListing { entry, type_is_trusted: true });
+            return Some(ParsedListing {
+                entry,
+                type_is_trusted: true,
+            });
         }
     }
-    line.parse::<ListedFile>().ok().map(|entry| ParsedListing { entry, type_is_trusted: false })
+    line.parse::<ListedFile>().ok().map(|entry| ParsedListing {
+        entry,
+        type_is_trusted: false,
+    })
 }
 
 fn looks_like_mlsd(line: &str) -> bool {
     line.trim_start()
         .split_once(' ')
         .map(|(facts, _)| facts)
-        .is_some_and(|facts| facts.contains(';') && facts.split(';').any(|fact| fact.split_once('=').is_some()))
+        .is_some_and(|facts| {
+            facts.contains(';') && facts.split(';').any(|fact| fact.split_once('=').is_some())
+        })
 }
 
 fn is_unsupported_command(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
-    ["500", "501", "502", "504", "unknown command", "not implemented", "unsupported"]
-        .iter()
-        .any(|needle| message.contains(needle))
+    [
+        "500",
+        "501",
+        "502",
+        "504",
+        "unknown command",
+        "not implemented",
+        "unsupported",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn is_missing_message(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
-    ["not found", "no such", "does not exist", "cannot find", "550"]
-        .iter()
-        .any(|needle| message.contains(needle))
+    [
+        "not found",
+        "no such",
+        "does not exist",
+        "cannot find",
+        "550",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
 }
 
 fn listing_permission(line: &str) -> Option<String> {
@@ -734,5 +907,11 @@ mod tests {
         assert_eq!(join_remote_path("/", "a"), "/a");
         assert_eq!(parent_remote_path("/a/b"), "/a");
         assert_eq!(parent_remote_path("/a"), "/");
+    }
+
+    #[test]
+    fn text_revision_hash_detects_same_size_changes() {
+        assert_ne!(sha256_hex(b"left"), sha256_hex(b"rift"));
+        assert_eq!(sha256_hex(b"left").len(), 64);
     }
 }

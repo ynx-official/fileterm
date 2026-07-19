@@ -13,9 +13,11 @@ use gpui::{
 
 use fileterm_gpui::{
     backend::{AppHandle, FileTermDesktopApi, GpuiDesktopApi},
+    services::logging,
     view::RootView,
     window::{
-        menu::{build_application_menu, Quit, ToggleTheme},
+        menu::{build_application_menu, Quit, ShowMain, ToggleTheme},
+        tray::TrayHandler,
         WindowRegistry,
     },
 };
@@ -31,6 +33,7 @@ fn main() {
     let app_handle = Arc::new(
         AppHandle::platform_default().expect("resolve FileTerm application data directory"),
     );
+    logging::init(&app_handle).expect("initialize FileTerm logging");
     let desktop_api: Arc<dyn FileTermDesktopApi> = Arc::new(GpuiDesktopApi::new(app_handle));
 
     gpui_platform::application().run(move |cx: &mut App| {
@@ -74,6 +77,14 @@ fn main() {
             .expect("open FileTerm main window");
         let main_window_id = main_handle.window_id();
         window_registry.register_handle("main", main_window_id);
+        let show_main_handle = main_handle;
+        cx.on_action(move |_: &ShowMain, cx| {
+            let _ = show_main_handle.update(cx, |_, window, _| window.activate_window());
+        });
+        match TrayHandler::setup(false, main_handle, cx) {
+            Ok(tray) => cx.set_global(tray),
+            Err(error) => eprintln!("FileTerm tray unavailable: {error:#}"),
+        }
         cx.on_window_closed(move |cx, window_id| {
             if window_id == main_window_id {
                 cx.quit();

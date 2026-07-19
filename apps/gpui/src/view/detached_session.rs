@@ -97,12 +97,7 @@ impl DetachedSessionWindow {
         cx.notify();
     }
 
-    fn finish_drag(
-        &mut self,
-        event: &MouseUpEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn finish_drag(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab_id) = self.drag.active_tab_id().map(str::to_string) else {
             return;
         };
@@ -250,11 +245,11 @@ impl Render for DetachedSessionWindow {
             .text_color(palette.text)
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, event, window, cx| this.finish_drag(&event, window, cx)),
+                cx.listener(|this, event, window, cx| this.finish_drag(event, window, cx)),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, event, window, cx| this.finish_drag(&event, window, cx)),
+                cx.listener(|this, event, window, cx| this.finish_drag(event, window, cx)),
             )
             .child(
                 div()
@@ -282,7 +277,11 @@ impl Render for DetachedSessionWindow {
                                 .items_center()
                                 .rounded_t_md()
                                 .cursor_pointer()
-                                .bg(if active { palette.background } else { palette.surface })
+                                .bg(if active {
+                                    palette.background
+                                } else {
+                                    palette.surface
+                                })
                                 .border_1()
                                 .border_b_0()
                                 .border_color(if active {
@@ -293,7 +292,7 @@ impl Render for DetachedSessionWindow {
                                 .on_mouse_down(
                                     MouseButton::Left,
                                     cx.listener(move |this, event, _, cx| {
-                                        this.start_drag(&drag_id, &event, cx)
+                                        this.start_drag(&drag_id, event, cx)
                                     }),
                                 )
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -320,12 +319,7 @@ impl Render for DetachedSessionWindow {
                             .child("返回主窗口"),
                     ),
             )
-            .child(
-                div()
-                    .min_h(px(0.0))
-                    .flex_1()
-                    .children(content),
-            )
+            .child(div().min_h(px(0.0)).flex_1().children(content))
     }
 }
 

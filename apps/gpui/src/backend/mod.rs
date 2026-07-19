@@ -1,33 +1,10 @@
-//! Bridge layer: the in-process async API surface that GPUI views call to
-//! reach backend services.
+//! In-process API boundary used by GPUI views to reach persistent services and
+//! create live protocol sessions.
 //!
-//! The bridge is migrated incrementally by runnable product capability. Shared
-//! storage and the public connection library are live; protocol/session,
-//! transfer, and multi-window methods remain explicit `Unsupported` boundaries
-//! until their service implementation is connected.
-//!
-//! ## Why a trait at all?
-//!
-//! Tauri's `invoke_handler!` macro registers 108 commands against a concrete
-//! `AppHandle`. In GPUI there's no IPC boundary, so views could in principle
-//! call backend fns directly. We still introduce a trait for three reasons:
-//!
-//! 1. **Testability**: views can be constructed against a mock
-//!    `FileTermDesktopApi` in unit tests, without spinning up real SSH/SFTP.
-//! 2. **Migration ordering**: the trait is the contract the view layer
-//!    compiles against today, so as G1–G5 fill in methods one by one, the
-//!    view layer never needs to change its call sites — only the impl
-//!    behind the trait grows.
-//! 3. **Future flexibility**: if we later split the backend into a separate
-//!    process (e.g. for sandboxing), the trait is the natural seam.
-//!
-//! ## Method shape
-//!
-//! Every method is `async fn` and returns `Result<T>`. This matches the
-//! Tauri-side `#[tauri::command] async fn` shape line-for-line, minus the
-//! `app: AppHandle` / `state: State<...>` / `window: WebviewWindow`
-//! framework params (which don't exist in-process). The inventory's 108
-//! commands map 1:1 to trait methods in the same domain groupings.
+//! The trait keeps framework-specific rendering and window ownership out of
+//! backend code while allowing tests to substitute the system boundary. Live
+//! SFTP and transfer operations remain session-scoped because they require a
+//! concrete authenticated controller rather than a process-global API.
 
 use std::sync::Arc;
 
@@ -121,23 +98,10 @@ pub struct CommandLibrary {
 
 /// In-process bridge between GPUI views and FileTerm backend services.
 ///
-/// Method categories mirror `docs/plans/active/gpui-migration-inventory.md`
-/// section 1's 14 groups. Methods land with the service and product view that
-/// consume them, keeping unsupported capabilities visible at the bridge seam.
-///
-/// The trait is `Send + Sync` because it's held inside gpui entities
-/// (`Arc<dyn FileTermDesktopApi>`) which must be `Send` for the foreground
-/// executor's `Task`s to capture them.
+/// The trait is `Send + Sync` because views retain it in shared entities and
+/// foreground tasks may capture it across await points.
 #[async_trait]
 pub trait FileTermDesktopApi: Send + Sync {
-    // ===== G1 (storage fork) — inventory 1.1 / 1.14 =====
-    // Profile-folder CRUD + local-files storage core land first because
-    // every other feature reads from / writes to storage.
-
-    /// Inventory 1.1 stub. Real signature lands in G1 when storage is forked.
-    ///
-    /// G0 returns `Unsupported` so view-layer scaffolding can compile
-    /// against the trait without waiting for storage migration.
     async fn app_get_platform(&self) -> Result<String>;
 
     /// Read and write plain text through the operating-system clipboard.
@@ -150,6 +114,16 @@ pub trait FileTermDesktopApi: Send + Sync {
 
     /// Read the shared Tauri/GPUI connection library with secrets redacted.
     async fn app_get_connection_library(&self) -> Result<ConnectionLibrary>;
+
+    /// Create, update, or delete a persisted connection profile. Secret fields
+    /// are split into the confidential profile store by the service layer.
+    async fn app_create_connection_profile(&self, input: Value) -> Result<Value>;
+    async fn app_update_connection_profile(
+        &self,
+        profile_id: String,
+        input: Value,
+    ) -> Result<Value>;
+    async fn app_delete_connection_profile(&self, profile_id: String) -> Result<()>;
 
     /// Read product UI preferences from the shared runtime store.
     async fn app_get_ui_preferences(&self) -> Result<UiPreferences>;
@@ -205,10 +179,7 @@ pub trait FileTermDesktopApi: Send + Sync {
     // methods here would create an invalid second ownership boundary.
 }
 
-/// Concrete in-process desktop API.
-///
-/// Implemented capabilities delegate to framework-independent services;
-/// remaining methods return an explicit phase-tagged `Unsupported` error.
+/// Concrete in-process desktop API backed by the application data directory.
 pub struct GpuiDesktopApi {
     app: Arc<AppHandle>,
 }
@@ -256,6 +227,22 @@ impl FileTermDesktopApi for GpuiDesktopApi {
         let (profiles, folders) =
             crate::services::profile_ops::read_public_connection_library(&self.app)?;
         Ok(ConnectionLibrary { profiles, folders })
+    }
+
+    async fn app_create_connection_profile(&self, input: Value) -> Result<Value> {
+        crate::services::profile_ops::create_profile(&self.app, input)
+    }
+
+    async fn app_update_connection_profile(
+        &self,
+        profile_id: String,
+        input: Value,
+    ) -> Result<Value> {
+        crate::services::profile_ops::update_profile(&self.app, &profile_id, input)
+    }
+
+    async fn app_delete_connection_profile(&self, profile_id: String) -> Result<()> {
+        crate::services::profile_ops::delete_profile(&self.app, &profile_id)
     }
 
     async fn app_get_ui_preferences(&self) -> Result<UiPreferences> {
@@ -563,6 +550,81 @@ mod tests {
         assert_eq!(library.profiles[0]["parentId"], "folder-1");
         assert_eq!(library.profiles[0]["hasSavedPassword"], true);
         assert!(library.profiles[0].get("password").is_none());
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[tokio::test]
+    async fn connection_profile_crud_splits_secrets_and_heals_groups() {
+        let directory =
+            std::env::temp_dir().join(format!("fileterm-gpui-crud-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let app = Arc::new(AppHandle::new(directory.clone()));
+        storage::write_json_array(
+            &app,
+            "folders.json",
+            &[serde_json::json!({ "id": "folder-1", "name": "生产" })],
+        )
+        .unwrap();
+        let api = GpuiDesktopApi::new(app.clone());
+
+        let created = api
+            .app_create_connection_profile(serde_json::json!({
+                "type": "ssh",
+                "name": "server",
+                "host": "example.test",
+                "port": 22,
+                "username": "root",
+                "password": "secret",
+                "group": "生产"
+            }))
+            .await
+            .unwrap();
+        let profile_id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["parentId"], "folder-1");
+        assert_eq!(created["hasSavedPassword"], true);
+        assert!(created.get("password").is_none());
+
+        let public_profiles: Vec<Value> = serde_json::from_str(
+            &std::fs::read_to_string(directory.join("profiles.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(public_profiles[0].get("password").is_none());
+        let secrets = storage::read_json_object(&app, "profile-secrets.json").unwrap();
+        assert_eq!(
+            secrets["profiles"][&profile_id]["password"]["value"],
+            "secret"
+        );
+
+        let updated = api
+            .app_update_connection_profile(
+                profile_id.clone(),
+                serde_json::json!({
+                    "type": "ssh",
+                    "name": "renamed",
+                    "host": "example.test",
+                    "port": 2222,
+                    "username": "root",
+                    "password": "",
+                    "group": "不存在"
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated["name"], "renamed");
+        assert_eq!(updated["group"], "默认");
+        assert_eq!(updated["hasSavedPassword"], true);
+
+        api.app_delete_connection_profile(profile_id.clone())
+            .await
+            .unwrap();
+        assert!(api
+            .app_get_connection_library()
+            .await
+            .unwrap()
+            .profiles
+            .is_empty());
+        let secrets = storage::read_json_object(&app, "profile-secrets.json").unwrap();
+        assert!(secrets["profiles"].get(&profile_id).is_none());
         let _ = std::fs::remove_dir_all(directory);
     }
 

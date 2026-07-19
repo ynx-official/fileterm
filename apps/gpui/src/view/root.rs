@@ -1,4 +1,8 @@
+mod connection_manager;
+
 use std::{collections::HashMap, sync::Arc};
+
+use connection_manager::PendingConnectionEditor;
 
 use serde_json::Value;
 
@@ -19,7 +23,10 @@ use crate::{
     },
     window::{
         detach_tab_to_new_window,
-        menu::{CloseTab, OpenCommandManager, OpenConnectionManager, OpenDocs, ToggleTheme},
+        menu::{
+            CloseTab, NewConnection, OpenCommandManager, OpenConnectionManager, OpenDocs,
+            ToggleTheme,
+        },
         DragDropTarget, ScreenBounds, SharedWindowRegistry, TabDragState,
     },
 };
@@ -36,12 +43,15 @@ pub struct RootView {
     tab_drag: TabDragState,
     pending_host_verification: Option<PendingHostVerification>,
     pending_authentication: Option<PendingAuthentication>,
+    pending_connection_editor: Option<PendingConnectionEditor>,
     pending_command_editor: Option<PendingCommandEditor>,
     pending_command_delete: Option<(String, String)>,
     pending_webdav_editor: Option<PendingWebDavEditor>,
     webdav_config: Option<Value>,
     webdav_busy: bool,
     webdav_message: Option<String>,
+    window_label: String,
+    standalone_section: Option<NavigationSection>,
     _state_subscription: Subscription,
 }
 
@@ -155,12 +165,15 @@ impl RootView {
             tab_drag: TabDragState::new(),
             pending_host_verification: None,
             pending_authentication: None,
+            pending_connection_editor: None,
             pending_command_editor: None,
             pending_command_delete: None,
             pending_webdav_editor: None,
             webdav_config: None,
             webdav_busy: false,
             webdav_message: None,
+            window_label: "main".to_string(),
+            standalone_section: None,
             _state_subscription: state_subscription,
         };
         cx.spawn(async move |this, cx| {
@@ -174,6 +187,23 @@ impl RootView {
             });
         })
         .detach();
+        view
+    }
+
+    pub fn new_standalone(
+        api: Arc<dyn FileTermDesktopApi>,
+        window_registry: SharedWindowRegistry,
+        window_label: impl Into<String>,
+        section: NavigationSection,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new(api, window_registry, cx);
+        view.window_label = window_label.into();
+        view.standalone_section = Some(section);
+        view.state.update(cx, |state, cx| {
+            state.select_navigation(section);
+            cx.notify();
+        });
         view
     }
 
@@ -201,7 +231,29 @@ impl RootView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_navigation(NavigationSection::Connections, cx);
+        self.open_standalone_manager(
+            "connection-manager",
+            "FileTerm · 连接管理器",
+            NavigationSection::Connections,
+            cx,
+        );
+    }
+
+    fn new_connection(&mut self, _: &NewConnection, _: &mut Window, cx: &mut Context<Self>) {
+        self.open_standalone_manager(
+            "connection-manager",
+            "FileTerm · 连接管理器",
+            NavigationSection::Connections,
+            cx,
+        );
+        if let Some(window_id) = self.window_registry.handle_for("connection-manager") {
+            let handle = WindowHandle::<RootView>::new(window_id);
+            let _ = handle.update(cx, |root, window, _| {
+                root.pending_connection_editor = Some(PendingConnectionEditor::new());
+                window.refresh();
+                window.activate_window();
+            });
+        }
     }
 
     fn open_command_manager(
@@ -210,7 +262,66 @@ impl RootView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.select_navigation(NavigationSection::Commands, cx);
+        self.open_standalone_manager(
+            "command-manager",
+            "FileTerm · 命令管理器",
+            NavigationSection::Commands,
+            cx,
+        );
+    }
+
+    fn open_standalone_manager(
+        &mut self,
+        window_label: &'static str,
+        title: &'static str,
+        section: NavigationSection,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(window_id) = self.window_registry.handle_for(window_label) {
+            let handle = WindowHandle::<RootView>::new(window_id);
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            return;
+        }
+
+        let api = self.api.clone();
+        let registry = self.window_registry.clone();
+        let registry_for_view = registry.clone();
+        let bounds = Bounds::centered(None, size(px(980.0), px(700.0)), cx);
+        match cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(title.into()),
+                    appears_transparent: cfg!(target_os = "macos"),
+                    ..Default::default()
+                }),
+                window_decorations: if cfg!(target_os = "windows") {
+                    Some(WindowDecorations::Client)
+                } else {
+                    Some(WindowDecorations::Server)
+                },
+                kind: GpuiWindowKind::Normal,
+                ..Default::default()
+            },
+            move |window, cx| {
+                let root = cx.new(|cx| {
+                    RootView::new_standalone(
+                        api.clone(),
+                        registry_for_view.clone(),
+                        window_label,
+                        section,
+                        cx,
+                    )
+                });
+                root.focus_handle(cx).focus(window, cx);
+                root
+            },
+        ) {
+            Ok(handle) => registry.register_handle(window_label, handle.window_id()),
+            Err(error) => self.update_state(cx, |state| {
+                state.data_error = Some(format!("打开{title}失败: {error}"));
+            }),
+        }
     }
 
     fn close_active_tab(&mut self, _: &CloseTab, _: &mut Window, cx: &mut Context<Self>) {
@@ -299,10 +410,9 @@ impl RootView {
             DetachedSessionContent::Ftp(session.clone())
         } else if let Some(session) = self.local_sessions.get(tab_id) {
             DetachedSessionContent::Local(session.clone())
-        } else if let Some(session) = self.stream_sessions.get(tab_id) {
-            DetachedSessionContent::Stream(session.clone())
         } else {
-            return None;
+            let session = self.stream_sessions.get(tab_id)?;
+            DetachedSessionContent::Stream(session.clone())
         };
         let title = self
             .state
@@ -319,12 +429,7 @@ impl RootView {
         })
     }
 
-    fn start_main_tab_drag(
-        &mut self,
-        tab_id: &str,
-        _: &MouseDownEvent,
-        cx: &mut Context<Self>,
-    ) {
+    fn start_main_tab_drag(&mut self, tab_id: &str, _: &MouseDownEvent, cx: &mut Context<Self>) {
         self.tab_drag.cancel();
         self.tab_drag.start(tab_id, "main");
         cx.notify();
@@ -342,9 +447,9 @@ impl RootView {
         let bounds = window.window_bounds().get_bounds();
         let screen_x = (f32::from(bounds.origin.x) + f32::from(event.position.x)) as i32;
         let screen_y = (f32::from(bounds.origin.y) + f32::from(event.position.y)) as i32;
-        let Some(target) = self
-            .tab_drag
-            .finish(screen_x, screen_y, &self.window_registry.bounds_snapshot())
+        let Some(target) =
+            self.tab_drag
+                .finish(screen_x, screen_y, &self.window_registry.bounds_snapshot())
         else {
             return;
         };
@@ -601,14 +706,24 @@ impl RootView {
     }
 
     fn open_webdav_editor(&mut self, cx: &mut Context<Self>) {
-        let config = self.webdav_config.clone().unwrap_or_else(|| serde_json::json!({}));
+        let config = self
+            .webdav_config
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
         self.pending_webdav_editor = Some(PendingWebDavEditor {
-            enabled: config.get("enabled").and_then(Value::as_bool).unwrap_or(false),
+            enabled: config
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             allow_insecure_tls: config
                 .get("allowInsecureTls")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
-            url: config.get("url").and_then(Value::as_str).unwrap_or_default().to_string(),
+            url: config
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             username: config
                 .get("username")
                 .and_then(Value::as_str)
@@ -626,7 +741,9 @@ impl RootView {
     }
 
     fn handle_webdav_editor_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(editor) = self.pending_webdav_editor.as_mut() else { return };
+        let Some(editor) = self.pending_webdav_editor.as_mut() else {
+            return;
+        };
         match event.keystroke.key.as_str() {
             "escape" => {
                 self.pending_webdav_editor = None;
@@ -652,7 +769,9 @@ impl RootView {
     }
 
     fn save_webdav_config(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.pending_webdav_editor.take() else { return };
+        let Some(editor) = self.pending_webdav_editor.take() else {
+            return;
+        };
         self.webdav_busy = true;
         self.webdav_message = None;
         let mut input = serde_json::json!({
@@ -691,9 +810,17 @@ impl RootView {
         self.webdav_message = None;
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
-            let result = if upload { api.webdav_upload().await } else { api.webdav_download().await };
+            let result = if upload {
+                api.webdav_upload().await
+            } else {
+                api.webdav_download().await
+            };
             let succeeded = result.is_ok();
-            let config = if succeeded { api.webdav_get_config().await.ok() } else { None };
+            let config = if succeeded {
+                api.webdav_get_config().await.ok()
+            } else {
+                None
+            };
             let _ = this.update(cx, |root, cx| {
                 root.webdav_busy = false;
                 if let Some(config) = config {
@@ -722,7 +849,9 @@ impl RootView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_webdav_editor.is_some() {
+        if self.pending_connection_editor.is_some() {
+            self.handle_connection_editor_key(event, cx);
+        } else if self.pending_webdav_editor.is_some() {
             self.handle_webdav_editor_key(event, cx);
         } else if self.pending_authentication.is_some() {
             self.handle_authentication_key(event, window, cx);
@@ -775,12 +904,7 @@ impl RootView {
         .detach();
     }
 
-    fn open_ftp_profile(
-        &mut self,
-        profile_id: String,
-        title: String,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_ftp_profile(&mut self, profile_id: String, title: String, cx: &mut Context<Self>) {
         let tab_id = format!("ftp:{profile_id}");
         if self.ftp_sessions.contains_key(&tab_id) {
             self.update_state(cx, |state| state.activate_tab(&tab_id));
@@ -803,7 +927,9 @@ impl RootView {
                         )
                     });
                     root.ftp_sessions.insert(tab_id.clone(), workspace);
-                    root.update_state(cx, |state| state.set_tab_status(&tab_id, TabStatus::Connected));
+                    root.update_state(cx, |state| {
+                        state.set_tab_status(&tab_id, TabStatus::Connected)
+                    });
                 }
                 Err(error) => root.update_state(cx, |state| {
                     state.set_tab_status(&tab_id, TabStatus::Error);
@@ -1627,7 +1753,7 @@ impl RootView {
                                     view.on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, event, _, cx| {
-                                            this.start_main_tab_drag(&drag_id, &event, cx)
+                                            this.start_main_tab_drag(&drag_id, event, cx)
                                         }),
                                     )
                                 })
@@ -1981,9 +2107,18 @@ impl RootView {
         palette: ThemePalette,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let config = self.webdav_config.clone().unwrap_or_else(|| serde_json::json!({}));
-        let enabled = config.get("enabled").and_then(Value::as_bool).unwrap_or(false);
-        let url = config.get("url").and_then(Value::as_str).unwrap_or("未配置");
+        let config = self
+            .webdav_config
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let enabled = config
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let url = config
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("未配置");
         let remote_path = config
             .get("remotePath")
             .and_then(Value::as_str)
@@ -2002,20 +2137,90 @@ impl RootView {
             .bg(palette.surface)
             .border_1()
             .border_color(palette.border)
-            .child(div().text_sm().text_color(palette.text).child("WebDAV 配置同步"))
-            .child(div().text_xs().text_color(palette.text_soft).child("手动同步完整连接配置包；远端写入使用 ETag 冲突保护。"))
-            .child(div().text_xs().text_color(palette.text_muted).child(format!("状态：{}", if enabled { "已启用" } else { "未启用" })))
-            .child(div().text_xs().text_color(palette.text_muted).child(format!("地址：{url}")))
-            .child(div().text_xs().text_color(palette.text_muted).child(format!("远端文件：{remote_path}")))
-            .child(div().text_xs().text_color(palette.text_muted).child(format!("上次同步：{last_synced}")))
             .child(
-                div().flex().gap_2()
-                    .child(settings_action("编辑配置", "webdav-edit", false, palette, cx, |this, cx| this.open_webdav_editor(cx)))
-                    .child(settings_action("上传", "webdav-upload", busy || !enabled, palette, cx, |this, cx| this.run_webdav_sync(true, cx)))
-                    .child(settings_action("下载", "webdav-download", busy || !enabled, palette, cx, |this, cx| this.run_webdav_sync(false, cx))),
+                div()
+                    .text_sm()
+                    .text_color(palette.text)
+                    .child("WebDAV 配置同步"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette.text_soft)
+                    .child("手动同步完整连接配置包；远端写入使用 ETag 冲突保护。"),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette.text_muted)
+                    .child(format!(
+                        "状态：{}",
+                        if enabled { "已启用" } else { "未启用" }
+                    )),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette.text_muted)
+                    .child(format!("地址：{url}")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette.text_muted)
+                    .child(format!("远端文件：{remote_path}")),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(palette.text_muted)
+                    .child(format!("上次同步：{last_synced}")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(settings_action(
+                        "编辑配置",
+                        "webdav-edit",
+                        false,
+                        palette,
+                        cx,
+                        |this, cx| this.open_webdav_editor(cx),
+                    ))
+                    .child(settings_action(
+                        "上传",
+                        "webdav-upload",
+                        busy || !enabled,
+                        palette,
+                        cx,
+                        |this, cx| this.run_webdav_sync(true, cx),
+                    ))
+                    .child(settings_action(
+                        "下载",
+                        "webdav-download",
+                        busy || !enabled,
+                        palette,
+                        cx,
+                        |this, cx| this.run_webdav_sync(false, cx),
+                    )),
             )
             .when_some(self.webdav_message.clone(), |view, message| {
-                view.child(div().text_xs().text_color(if message.contains("失败") || message.contains("error") || message.contains("冲突") { palette.danger } else { palette.text_soft }).child(message))
+                view.child(
+                    div()
+                        .text_xs()
+                        .text_color(
+                            if message.contains("失败")
+                                || message.contains("error")
+                                || message.contains("冲突")
+                            {
+                                palette.danger
+                            } else {
+                                palette.text_soft
+                            },
+                        )
+                        .child(message),
+                )
             })
     }
 
@@ -2027,30 +2232,130 @@ impl RootView {
     ) -> impl IntoElement {
         let enabled = editor.enabled;
         let insecure = editor.allow_insecure_tls;
-        div().absolute().inset_0().flex().items_center().justify_center().bg(gpui::rgba(0x00000088))
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::rgba(0x00000088))
             .child(
-                div().w(px(620.0)).flex().flex_col().gap_3().p_5().rounded_lg().bg(palette.surface).border_1().border_color(palette.border_strong)
-                    .child(div().text_lg().text_color(palette.text).child("WebDAV 配置"))
-                    .child(div().text_xs().text_color(palette.text_soft).child("Tab 切换输入项，Enter 保存，Esc 取消。密码留空会保留已保存凭据。"))
-                    .child(webdav_input("地址", editor.url, 0, editor.active_field, false, palette, cx))
-                    .child(webdav_input("用户名", editor.username, 1, editor.active_field, false, palette, cx))
-                    .child(webdav_input("密码", editor.password, 2, editor.active_field, true, palette, cx))
-                    .child(webdav_input("远端路径", editor.remote_path, 3, editor.active_field, false, palette, cx))
+                div()
+                    .w(px(620.0))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(palette.surface)
+                    .border_1()
+                    .border_color(palette.border_strong)
                     .child(
-                        div().flex().gap_2()
-                            .child(settings_action(if enabled { "同步已启用" } else { "同步未启用" }, "webdav-toggle-enabled", false, palette, cx, |this, cx| {
-                                if let Some(editor) = this.pending_webdav_editor.as_mut() { editor.enabled = !editor.enabled; }
-                                cx.notify();
-                            }))
-                            .child(settings_action(if insecure { "允许 HTTP" } else { "仅 HTTPS" }, "webdav-toggle-insecure", false, palette, cx, |this, cx| {
-                                if let Some(editor) = this.pending_webdav_editor.as_mut() { editor.allow_insecure_tls = !editor.allow_insecure_tls; }
-                                cx.notify();
-                            })),
+                        div()
+                            .text_lg()
+                            .text_color(palette.text)
+                            .child("WebDAV 配置"),
                     )
                     .child(
-                        div().flex().justify_end().gap_2()
-                            .child(settings_action("取消", "webdav-cancel", false, palette, cx, |this, cx| { this.pending_webdav_editor = None; cx.notify(); }))
-                            .child(settings_action("保存", "webdav-save", false, palette, cx, |this, cx| this.save_webdav_config(cx))),
+                        div().text_xs().text_color(palette.text_soft).child(
+                            "Tab 切换输入项，Enter 保存，Esc 取消。密码留空会保留已保存凭据。",
+                        ),
+                    )
+                    .child(webdav_input(
+                        "地址",
+                        editor.url,
+                        0,
+                        editor.active_field,
+                        false,
+                        palette,
+                        cx,
+                    ))
+                    .child(webdav_input(
+                        "用户名",
+                        editor.username,
+                        1,
+                        editor.active_field,
+                        false,
+                        palette,
+                        cx,
+                    ))
+                    .child(webdav_input(
+                        "密码",
+                        editor.password,
+                        2,
+                        editor.active_field,
+                        true,
+                        palette,
+                        cx,
+                    ))
+                    .child(webdav_input(
+                        "远端路径",
+                        editor.remote_path,
+                        3,
+                        editor.active_field,
+                        false,
+                        palette,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(settings_action(
+                                if enabled {
+                                    "同步已启用"
+                                } else {
+                                    "同步未启用"
+                                },
+                                "webdav-toggle-enabled",
+                                false,
+                                palette,
+                                cx,
+                                |this, cx| {
+                                    if let Some(editor) = this.pending_webdav_editor.as_mut() {
+                                        editor.enabled = !editor.enabled;
+                                    }
+                                    cx.notify();
+                                },
+                            ))
+                            .child(settings_action(
+                                if insecure { "允许 HTTP" } else { "仅 HTTPS" },
+                                "webdav-toggle-insecure",
+                                false,
+                                palette,
+                                cx,
+                                |this, cx| {
+                                    if let Some(editor) = this.pending_webdav_editor.as_mut() {
+                                        editor.allow_insecure_tls = !editor.allow_insecure_tls;
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(settings_action(
+                                "取消",
+                                "webdav-cancel",
+                                false,
+                                palette,
+                                cx,
+                                |this, cx| {
+                                    this.pending_webdav_editor = None;
+                                    cx.notify();
+                                },
+                            ))
+                            .child(settings_action(
+                                "保存",
+                                "webdav-save",
+                                false,
+                                palette,
+                                cx,
+                                |this, cx| this.save_webdav_config(cx),
+                            )),
                     ),
             )
     }
@@ -2067,64 +2372,8 @@ impl RootView {
         }
 
         if section == NavigationSection::Connections {
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .gap_4()
-                .p_6()
-                .child(
-                    div()
-                        .flex()
-                        .items_end()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_2xl()
-                                        .text_color(palette.text)
-                                        .child("连接管理器"),
-                                )
-                                .child(div().text_sm().text_color(palette.text_muted).child(
-                                    format!(
-                                        "{} 个连接，{} 个文件夹",
-                                        state.connections.len(),
-                                        state.connection_folders.len()
-                                    ),
-                                )),
-                        )
-                        .child(
-                            div()
-                                .id("refresh-connection-library")
-                                .px_3()
-                                .py_2()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .text_sm()
-                                .text_color(palette.accent)
-                                .hover(move |style| style.bg(palette.surface_hover))
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| {
-                                        this.reload_connection_library(cx)
-                                    }),
-                                )
-                                .child("刷新"),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .overflow_hidden()
-                        .rounded_lg()
-                        .bg(palette.surface)
-                        .border_1()
-                        .border_color(palette.border)
-                        .child(self.render_connection_library_content(state, palette, cx)),
-                )
+            return self
+                .render_connection_manager(state, palette, cx)
                 .into_any_element();
         }
 
@@ -2483,13 +2732,33 @@ fn webdav_input(
     } else {
         value
     };
-    div().flex().flex_col().gap_1()
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
         .child(div().text_xs().text_color(palette.text_muted).child(label))
         .child(
-            div().id(("webdav-input", field)).h(px(38.0)).flex().items_center().px_3().rounded_md()
-                .cursor_pointer().bg(palette.background).border_1()
-                .border_color(if active_field == field { palette.accent } else { palette.border })
-                .text_sm().text_color(if display == "输入内容" { palette.text_soft } else { palette.text })
+            div()
+                .id(("webdav-input", field))
+                .h(px(38.0))
+                .flex()
+                .items_center()
+                .px_3()
+                .rounded_md()
+                .cursor_pointer()
+                .bg(palette.background)
+                .border_1()
+                .border_color(if active_field == field {
+                    palette.accent
+                } else {
+                    palette.border
+                })
+                .text_sm()
+                .text_color(if display == "输入内容" {
+                    palette.text_soft
+                } else {
+                    palette.text
+                })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(editor) = this.pending_webdav_editor.as_mut() {
                         editor.active_field = field;
@@ -2508,10 +2777,23 @@ fn settings_action(
     cx: &mut Context<RootView>,
     callback: impl Fn(&mut RootView, &mut Context<RootView>) + 'static,
 ) -> impl IntoElement {
-    div().id(id).px_3().py_2().rounded_md().border_1().border_color(palette.border)
-        .text_xs().text_color(if disabled { palette.text_soft } else { palette.accent })
+    div()
+        .id(id)
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .border_1()
+        .border_color(palette.border)
+        .text_xs()
+        .text_color(if disabled {
+            palette.text_soft
+        } else {
+            palette.accent
+        })
         .when(!disabled, |button| {
-            button.cursor_pointer().hover(move |style| style.bg(palette.accent_surface))
+            button
+                .cursor_pointer()
+                .hover(move |style| style.bg(palette.accent_surface))
                 .on_click(cx.listener(move |this, _, _, cx| callback(this, cx)))
         })
         .child(label)
@@ -2527,7 +2809,7 @@ impl Render for RootView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let global_bounds = window.window_bounds().get_bounds();
         self.window_registry.update_bounds(
-            "main",
+            &self.window_label,
             ScreenBounds::new(
                 f32::from(global_bounds.origin.x) as i32,
                 f32::from(global_bounds.origin.y) as i32,
@@ -2542,10 +2824,51 @@ impl Render for RootView {
         let active_stream_session = self.stream_sessions.get(&state.active_tab_id).cloned();
         let pending_host_verification = self.pending_host_verification.clone();
         let pending_authentication = self.pending_authentication.clone();
+        let pending_connection_editor = self.pending_connection_editor.clone();
         let pending_command_editor = self.pending_command_editor.clone();
         let pending_command_delete = self.pending_command_delete.clone();
         let pending_webdav_editor = self.pending_webdav_editor.clone();
         let palette = ThemePalette::for_mode(state.theme);
+        let content = if let Some(section) = self.standalone_section {
+            self.render_section(&state, section, palette, cx)
+                .into_any_element()
+        } else {
+            let workspace = match (
+                active_session,
+                active_ftp_session,
+                active_local_session,
+                active_stream_session,
+            ) {
+                (Some(session), _, _, _) => session.into_any_element(),
+                (_, Some(session), _, _) => session.into_any_element(),
+                (_, _, Some(session), _) => session.into_any_element(),
+                (_, _, _, Some(session)) => session.into_any_element(),
+                (None, None, None, None) => self
+                    .render_section(&state, state.navigation, palette, cx)
+                    .into_any_element(),
+            };
+            div()
+                .size_full()
+                .flex()
+                .child(self.render_sidebar(&state, palette, cx))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .h_full()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .child(self.render_tabbar(&state, palette, cx))
+                        .child(
+                            div()
+                                .min_h(px(0.0))
+                                .flex_1()
+                                .overflow_hidden()
+                                .child(workspace),
+                        ),
+                )
+                .into_any_element()
+        };
 
         div()
             .id("fileterm-root")
@@ -2553,60 +2876,33 @@ impl Render for RootView {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::handle_root_key))
             .on_action(cx.listener(Self::toggle_theme))
+            .on_action(cx.listener(Self::new_connection))
             .on_action(cx.listener(Self::open_connection_manager))
             .on_action(cx.listener(Self::open_command_manager))
             .on_action(cx.listener(Self::close_active_tab))
             .on_action(cx.listener(Self::open_docs))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, event, window, cx| {
-                    this.finish_main_tab_drag(&event, window, cx)
-                }),
+                cx.listener(|this, event, window, cx| this.finish_main_tab_drag(event, window, cx)),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, event, window, cx| {
-                    this.finish_main_tab_drag(&event, window, cx)
-                }),
+                cx.listener(|this, event, window, cx| this.finish_main_tab_drag(event, window, cx)),
             )
             .size_full()
             .relative()
             .flex()
             .bg(palette.background)
             .text_color(palette.text)
-            .child(self.render_sidebar(&state, palette, cx))
-            .child(
-                div()
-                    .min_w(px(0.0))
-                    .h_full()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .child(self.render_tabbar(&state, palette, cx))
-                    .child(
-                        div().min_h(px(0.0)).flex_1().overflow_hidden().child(
-                            match (
-                                active_session,
-                                active_ftp_session,
-                                active_local_session,
-                                active_stream_session,
-                            ) {
-                                (Some(session), _, _, _) => session.into_any_element(),
-                                (_, Some(session), _, _) => session.into_any_element(),
-                                (_, _, Some(session), _) => session.into_any_element(),
-                                (_, _, _, Some(session)) => session.into_any_element(),
-                                (None, None, None, None) => self
-                                    .render_section(&state, state.navigation, palette, cx)
-                                    .into_any_element(),
-                            },
-                        ),
-                    ),
-            )
+            .child(content)
             .when_some(pending_host_verification, |view, pending| {
                 view.child(self.render_host_verification(&pending, palette, cx))
             })
             .when_some(pending_authentication, |view, pending| {
                 view.child(self.render_authentication(&pending, palette, cx))
+            })
+            .when_some(pending_connection_editor, |view, editor| {
+                view.child(self.render_connection_editor(editor, palette, cx))
             })
             .when_some(pending_command_editor, |view, pending| {
                 view.child(self.render_command_editor(pending, palette, cx))

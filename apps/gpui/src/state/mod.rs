@@ -111,6 +111,7 @@ pub struct AppState {
     pub data_load_state: DataLoadState,
     pub data_error: Option<String>,
     pub connections: Vec<ConnectionListItem>,
+    pub connection_profiles: Vec<Value>,
     pub connection_folders: Vec<ConnectionFolderItem>,
     pub commands: Vec<CommandListItem>,
     pub command_folders: Vec<CommandFolderItem>,
@@ -134,6 +135,7 @@ impl Default for AppState {
             data_load_state: DataLoadState::Loading,
             data_error: None,
             connections: Vec::new(),
+            connection_profiles: Vec::new(),
             connection_folders: Vec::new(),
             commands: Vec::new(),
             command_folders: Vec::new(),
@@ -237,6 +239,7 @@ impl AppState {
             .iter()
             .filter_map(connection_list_item)
             .collect();
+        self.connection_profiles = library.profiles;
         self.connection_folders = library
             .folders
             .iter()
