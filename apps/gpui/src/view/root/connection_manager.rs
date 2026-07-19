@@ -352,7 +352,7 @@ impl RootView {
                 }
                 match event {
                     TextInputEvent::Changed(value) => editor.set_field(field, value.clone()),
-                    TextInputEvent::Submit => root.save_connection(cx),
+                    TextInputEvent::Submit | TextInputEvent::Save => root.save_connection(cx),
                     TextInputEvent::Cancel => {
                         root.pending_connection_editor = None;
                         cx.notify();
@@ -361,6 +361,7 @@ impl RootView {
             })
             .detach();
         }
+        inputs.name.update(cx, |input, cx| input.request_focus(cx));
         editor.inputs = Some(inputs);
         self.pending_connection_editor = Some(editor);
         cx.notify();
@@ -687,134 +688,243 @@ impl RootView {
         div()
             .absolute()
             .inset_0()
+            .p_4()
             .flex()
             .items_center()
             .justify_center()
             .bg(gpui::rgba(0x00000088))
             .child(
                 div()
-                    .w(px(680.0))
-                    .max_h(px(660.0))
+                    .w_full()
+                    .max_w(px(900.0))
+                    .h_full()
+                    .max_h(px(760.0))
+                    .min_h(px(0.0))
                     .flex()
                     .flex_col()
-                    .gap_3()
-                    .p_5()
+                    .overflow_hidden()
                     .rounded_lg()
                     .bg(palette.surface)
                     .border_1()
                     .border_color(palette.border_strong)
-                    .child(div().text_lg().text_color(palette.text).child(if editing {
-                        "编辑连接"
-                    } else {
-                        "新建连接"
-                    }))
                     .child(
-                        div().text_xs().text_color(palette.text_soft).child(
-                            "支持中文输入；Tab/Shift+Tab 切换输入项，Enter 保存，Esc 取消。密码留空会保留已保存凭据。",
-                        ),
-                    )
-                    .child(
-                        div().flex().gap_2().children(
-                            ["ssh", "ftp", "telnet", "serial"]
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, protocol)| {
-                                    let active = editor.protocol == protocol;
-                                    div()
-                                        .id(("connection-protocol", index))
-                                        .px_3()
-                                        .py_2()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .bg(if active {
-                                            palette.accent_surface
-                                        } else {
-                                            palette.background
-                                        })
-                                        .border_1()
-                                        .border_color(if active {
-                                            palette.accent
-                                        } else {
-                                            palette.border
-                                        })
-                                        .text_xs()
-                                        .text_color(if active {
-                                            palette.accent
-                                        } else {
-                                            palette.text_muted
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if let Some(editor) =
-                                                this.pending_connection_editor.as_mut()
-                                            {
-                                                editor.protocol = protocol.to_string();
-                                                editor.port = default_port(protocol).to_string();
-                                                if let Some(inputs) = editor.inputs.as_ref() {
-                                                    inputs.port.update(cx, |input, cx| {
-                                                        input.set_value(
-                                                            default_port(protocol).to_string(),
-                                                            cx,
-                                                        )
-                                                    });
-                                                }
-                                                editor.error = None;
-                                            }
-                                            cx.notify();
-                                        }))
-                                        .child(protocol.to_uppercase())
-                                }),
-                        ),
-                    )
-                    .when(editor.protocol == "ssh", |view| {
-                        view.child(
-                            div().flex().gap_2().children(
-                                [("password", "密码认证"), ("privateKey", "私钥认证")]
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(index, (auth, label))| {
-                                        let active = editor.auth_type == auth;
-                                        div()
-                                            .id(("connection-auth", index))
-                                            .px_3()
-                                            .py_1()
-                                            .rounded_md()
-                                            .cursor_pointer()
-                                            .border_1()
-                                            .border_color(if active {
-                                                palette.accent
-                                            } else {
-                                                palette.border
-                                            })
-                                            .text_xs()
-                                            .text_color(if active {
-                                                palette.accent
-                                            } else {
-                                                palette.text_muted
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                if let Some(editor) =
-                                                    this.pending_connection_editor.as_mut()
-                                                {
-                                                    editor.auth_type = auth.to_string();
-                                                }
-                                                cx.notify();
-                                            }))
-                                            .child(label)
-                                    }),
+                        div()
+                            .flex_shrink_0()
+                            .px_5()
+                            .pt_5()
+                            .pb_4()
+                            .border_b_1()
+                            .border_color(palette.border)
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .child(div().text_lg().text_color(palette.text).child(if editing {
+                                "编辑连接"
+                            } else {
+                                "新建连接"
+                            }))
+                            .child(
+                                div().text_xs().text_color(palette.text_soft).child(
+                                    "支持中文输入；Tab/Shift+Tab 切换输入项，Enter 保存，Esc 取消。密码留空会保留已保存凭据。",
+                                ),
                             ),
-                        )
-                    })
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px_5()
+                            .py_3()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .bg(palette.surface)
+                            .border_b_1()
+                            .border_color(palette.border)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .w(px(72.0))
+                                            .text_xs()
+                                            .text_color(palette.text_muted)
+                                            .child("连接类型"),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w(px(0.0))
+                                            .flex_1()
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_2()
+                                            .children(
+                                                ["ssh", "ftp", "telnet", "serial"]
+                                                    .into_iter()
+                                                    .enumerate()
+                                                    .map(|(index, protocol)| {
+                                                        let active = editor.protocol == protocol;
+                                                        div()
+                                                            .id(("connection-protocol", index))
+                                                            .min_w(px(88.0))
+                                                            .flex_1()
+                                                            .px_3()
+                                                            .py_2()
+                                                            .rounded_md()
+                                                            .cursor_pointer()
+                                                            .bg(if active {
+                                                                palette.accent_surface
+                                                            } else {
+                                                                palette.background
+                                                            })
+                                                            .border_1()
+                                                            .border_color(if active {
+                                                                palette.accent
+                                                            } else {
+                                                                palette.border
+                                                            })
+                                                            .text_center()
+                                                            .text_xs()
+                                                            .text_color(if active {
+                                                                palette.accent
+                                                            } else {
+                                                                palette.text_muted
+                                                            })
+                                                            .on_mouse_down(
+                                                                gpui::MouseButton::Left,
+                                                                cx.listener(move |this, _, _, cx| {
+                                                                    if let Some(editor) = this
+                                                                        .pending_connection_editor
+                                                                        .as_mut()
+                                                                    {
+                                                                        editor.protocol =
+                                                                            protocol.to_string();
+                                                                        editor.port = default_port(
+                                                                            protocol,
+                                                                        )
+                                                                        .to_string();
+                                                                        if let Some(inputs) =
+                                                                            editor.inputs.as_ref()
+                                                                        {
+                                                                            inputs.port.update(
+                                                                                cx,
+                                                                                |input, cx| {
+                                                                                    input.set_value(
+                                                                                        default_port(
+                                                                                            protocol,
+                                                                                        )
+                                                                                        .to_string(),
+                                                                                        cx,
+                                                                                    )
+                                                                                },
+                                                                            );
+                                                                        }
+                                                                        editor.error = None;
+                                                                    }
+                                                                    cx.notify();
+                                                                }),
+                                                            )
+                                                            .child(protocol.to_uppercase())
+                                                    }),
+                                            ),
+                                    ),
+                            )
+                            .when(editor.protocol == "ssh", |view| {
+                                view.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .w(px(72.0))
+                                                .text_xs()
+                                                .text_color(palette.text_muted)
+                                                .child("认证方式"),
+                                        )
+                                        .child(
+                                            div()
+                                                .min_w(px(0.0))
+                                                .flex_1()
+                                                .flex()
+                                                .flex_wrap()
+                                                .gap_2()
+                                                .children(
+                                                    [
+                                                        ("password", "密码认证"),
+                                                        ("privateKey", "密钥认证"),
+                                                    ]
+                                                    .into_iter()
+                                                    .enumerate()
+                                                    .map(|(index, (auth, label))| {
+                                                        let active = editor.auth_type == auth;
+                                                        div()
+                                                            .id(("connection-auth", index))
+                                                            .min_w(px(120.0))
+                                                            .flex_1()
+                                                            .px_3()
+                                                            .py_2()
+                                                            .rounded_md()
+                                                            .cursor_pointer()
+                                                            .bg(if active {
+                                                                palette.accent_surface
+                                                            } else {
+                                                                palette.background
+                                                            })
+                                                            .border_1()
+                                                            .border_color(if active {
+                                                                palette.accent
+                                                            } else {
+                                                                palette.border
+                                                            })
+                                                            .text_center()
+                                                            .text_xs()
+                                                            .text_color(if active {
+                                                                palette.accent
+                                                            } else {
+                                                                palette.text_muted
+                                                            })
+                                                            .on_mouse_down(
+                                                                gpui::MouseButton::Left,
+                                                                cx.listener(move |this, _, _, cx| {
+                                                                    if let Some(editor) = this
+                                                                        .pending_connection_editor
+                                                                        .as_mut()
+                                                                    {
+                                                                        editor.auth_type =
+                                                                            auth.to_string();
+                                                                        editor.error = None;
+                                                                    }
+                                                                    cx.notify();
+                                                                }),
+                                                            )
+                                                            .child(label)
+                                                    }),
+                                                ),
+                                        ),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .id("connection-editor-scroll")
+                            .flex_1()
+                            .min_h(px(0.0))
+                            .overflow_y_scroll()
+                            .overflow_x_hidden()
+                            .p_5()
+                            .flex()
+                            .flex_col()
+                            .gap_4()
                     .when(
                         editor.protocol == "ssh" && editor.auth_type == "privateKey",
                         |view| {
                             view.child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
+                                connection_section("SSH 密钥", palette)
                                     .child(
                                         div().text_xs().text_color(palette.text_muted).child(
-                                            "托管密钥（点击选择；也可填写下方路径作为回退）",
+                                            "选择托管密钥；也可以使用下方私钥路径作为回退。",
                                         ),
                                     )
                                     .child(
@@ -911,70 +1021,101 @@ impl RootView {
                     )
                     .when(editor.protocol == "ftp", |view| {
                         view.child(
-                            div().flex().gap_2().children(
-                                [
-                                    ("none", "FTP"),
-                                    ("explicit", "显式 FTPS"),
-                                    ("implicit", "隐式 FTPS"),
-                                ]
-                                .into_iter()
-                                .enumerate()
-                                .map(|(index, (mode, label))| {
-                                    let active = editor.security_mode == mode;
-                                    div()
-                                        .id(("ftp-security", index))
-                                        .px_3()
-                                        .py_1()
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .border_1()
-                                        .border_color(if active {
-                                            palette.accent
-                                        } else {
-                                            palette.border
-                                        })
-                                        .text_xs()
-                                        .text_color(if active {
-                                            palette.accent
-                                        } else {
-                                            palette.text_muted
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            if let Some(editor) =
-                                                this.pending_connection_editor.as_mut()
-                                            {
-                                                editor.security_mode = mode.to_string();
-                                            }
-                                            cx.notify();
-                                        }))
-                                        .child(label)
-                                }),
+                            connection_section("安全模式", palette).child(
+                                div().flex().flex_wrap().gap_2().children(
+                                    [
+                                        ("none", "FTP"),
+                                        ("explicit", "显式 FTPS"),
+                                        ("implicit", "隐式 FTPS"),
+                                    ]
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, (mode, label))| {
+                                        let active = editor.security_mode == mode;
+                                        div()
+                                            .id(("ftp-security", index))
+                                            .min_w(px(128.0))
+                                            .flex_1()
+                                            .px_3()
+                                            .py_2()
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .border_1()
+                                            .border_color(if active {
+                                                palette.accent
+                                            } else {
+                                                palette.border
+                                            })
+                                            .text_center()
+                                            .text_xs()
+                                            .text_color(if active {
+                                                palette.accent
+                                            } else {
+                                                palette.text_muted
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                if let Some(editor) =
+                                                    this.pending_connection_editor.as_mut()
+                                                {
+                                                    editor.security_mode = mode.to_string();
+                                                }
+                                                cx.notify();
+                                            }))
+                                            .child(label)
+                                    }),
+                                ),
                             ),
                         )
                     })
                     .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .children(fields.into_iter().map(|(label, input)| {
-                                connection_input(label, input, palette)
-                            })),
+                        connection_section("连接信息", palette).child(
+                            div()
+                                .flex()
+                                .flex_wrap()
+                                .gap_3()
+                                .children(fields.into_iter().map(|(label, input)| {
+                                    connection_input(label, input, palette)
+                                })),
+                        ),
                     )
                     .when_some(editor.error.clone(), |view, error| {
-                        view.child(div().text_xs().text_color(palette.danger).child(error))
+                        view.child(
+                            div()
+                                .p_3()
+                                .rounded_md()
+                                .bg(palette.background)
+                                .border_1()
+                                .border_color(palette.danger)
+                                .text_xs()
+                                .text_color(palette.danger)
+                                .child(error),
+                        )
                     })
                     .when(editor.delete_confirmation, |view| {
                         view.child(
                             div()
+                                .p_3()
+                                .rounded_md()
+                                .bg(palette.background)
+                                .border_1()
+                                .border_color(palette.danger)
                                 .text_xs()
                                 .text_color(palette.danger)
                                 .child("再次点击“确认删除”将永久删除此连接配置和对应凭据。"),
                         )
                     })
+                    )
                     .child(
                         div()
+                            .flex_shrink_0()
+                            .px_5()
+                            .py_4()
+                            .border_t_1()
+                            .border_color(palette.border)
+                            .bg(palette.surface)
                             .flex()
+                            .flex_wrap()
+                            .gap_3()
                             .justify_between()
                             .child(div().when(editing, |view| {
                                 view.child(action_button(
@@ -1036,17 +1177,33 @@ fn default_port(protocol: &str) -> u64 {
     }
 }
 
+fn connection_section(title: &'static str, palette: ThemePalette) -> gpui::Div {
+    div()
+        .min_w(px(0.0))
+        .p_4()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .rounded_md()
+        .bg(palette.background)
+        .border_1()
+        .border_color(palette.border)
+        .child(div().text_sm().text_color(palette.text).child(title))
+}
+
 fn connection_input(
     label: &'static str,
     input: Entity<TextInput>,
     palette: ThemePalette,
 ) -> impl IntoElement {
     div()
+        .min_w(px(280.0))
+        .flex_1()
         .flex()
         .flex_col()
         .gap_1()
         .child(div().text_xs().text_color(palette.text_muted).child(label))
-        .child(input)
+        .child(div().min_w(px(0.0)).w_full().child(input))
 }
 
 fn action_button(
