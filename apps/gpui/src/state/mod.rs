@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use crate::{
     backend::{CommandLibrary, ConnectionLibrary},
+    services::ssh_keys::{SshKeyLayout, SshKeyMetadata},
     theme::ThemeMode,
 };
 
@@ -10,14 +11,16 @@ pub enum NavigationSection {
     Overview,
     Connections,
     Commands,
+    SshKeys,
     Settings,
 }
 
 impl NavigationSection {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Overview,
         Self::Connections,
         Self::Commands,
+        Self::SshKeys,
         Self::Settings,
     ];
 

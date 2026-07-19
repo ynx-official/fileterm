@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "npm run dev:tauri",
     "dev:tauri": "npm run dev -w @fileterm/tauri",
+    "dev:gpui": "cargo run -p fileterm-gpui --bin fileterm-gpui",
     "lint": "eslint apps/tauri packages/core packages/shared packages/storage --max-warnings=0",
     "lint:fix": "eslint apps/tauri packages/core packages/shared packages/storage --fix --max-warnings=0",
     "format": "prettier --write .",
@@ -18,6 +19,10 @@
     "sync:version": "node ./scripts/sync-version-from-root.mjs",
     "build": "npm run build:tauri",
     "build:tauri": "npm run build -w @fileterm/tauri",
+    "build:gpui": "cargo build -p fileterm-gpui --bin fileterm-gpui --release",
+    "package:gpui:mac": "bash apps/gpui/scripts/build-macos.sh",
+    "package:gpui:linux": "bash apps/gpui/scripts/build-linux.sh",
+    "package:gpui:windows": "bash apps/gpui/scripts/build-windows.sh",
     "typecheck": "npm run typecheck -w @fileterm/core && npm run typecheck -w @fileterm/shared && npm run typecheck -w @fileterm/storage && npm run typecheck -w @fileterm/tauri",
     "test": "npm run test:tauri",
     "test:tauri": "npm run test -w @fileterm/tauri",

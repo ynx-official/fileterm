@@ -24,6 +24,9 @@ pub use commands::{UiPreferences, UiPreferencesInput};
 use crate::{
     error::Result,
     ftp::{FtpProfile, FtpSession},
+    services::ssh_keys::{
+        SshKeyFileSelection, SshKeyImportResult, SshKeyLayout, SshKeyMetadata,
+    },
     ssh::SshController,
     term::{SerialConfig, StreamController, TermChunk},
 };
@@ -131,6 +134,25 @@ pub trait FileTermDesktopApi: Send + Sync {
         input: Value,
     ) -> Result<Value>;
     async fn app_delete_connection_profile(&self, profile_id: String) -> Result<()>;
+
+    /// Manage the process-local SSH key library. Private key bytes remain in
+    /// the service and are never returned through this API.
+    async fn ssh_keys_list(&self) -> Result<Vec<SshKeyMetadata>>;
+    async fn ssh_keys_select_file(&self) -> Result<Option<SshKeyFileSelection>>;
+    async fn ssh_keys_import(
+        &self,
+        source_path: String,
+        note: String,
+    ) -> Result<SshKeyImportResult>;
+    async fn ssh_keys_update_note(
+        &self,
+        key_id: String,
+        note: String,
+    ) -> Result<SshKeyMetadata>;
+    async fn ssh_keys_rename(&self, key_id: String, name: String) -> Result<SshKeyMetadata>;
+    async fn ssh_keys_delete(&self, key_id: String) -> Result<()>;
+    async fn ssh_keys_get_layout(&self) -> Result<SshKeyLayout>;
+    async fn ssh_keys_save_layout(&self, layout: SshKeyLayout) -> Result<SshKeyLayout>;
 
     /// Read product UI preferences from the shared runtime store.
     async fn app_get_ui_preferences(&self) -> Result<UiPreferences>;
@@ -250,6 +272,53 @@ impl FileTermDesktopApi for GpuiDesktopApi {
 
     async fn app_delete_connection_profile(&self, profile_id: String) -> Result<()> {
         crate::services::profile_ops::delete_profile(&self.app, &profile_id)
+    }
+
+    async fn ssh_keys_list(&self) -> Result<Vec<SshKeyMetadata>> {
+        crate::services::ssh_keys::list(&self.app)
+    }
+
+    async fn ssh_keys_select_file(&self) -> Result<Option<SshKeyFileSelection>> {
+        let Some(file) = rfd::AsyncFileDialog::new()
+            .set_title("导入 SSH 私钥")
+            .pick_file()
+            .await
+        else {
+            return Ok(None);
+        };
+        crate::services::ssh_keys::select_file(&self.app, file.path()).map(Some)
+    }
+
+    async fn ssh_keys_import(
+        &self,
+        source_path: String,
+        note: String,
+    ) -> Result<SshKeyImportResult> {
+        crate::services::ssh_keys::import(&self.app, &source_path, &note)
+    }
+
+    async fn ssh_keys_update_note(
+        &self,
+        key_id: String,
+        note: String,
+    ) -> Result<SshKeyMetadata> {
+        crate::services::ssh_keys::update_note(&self.app, &key_id, &note)
+    }
+
+    async fn ssh_keys_rename(&self, key_id: String, name: String) -> Result<SshKeyMetadata> {
+        crate::services::ssh_keys::rename(&self.app, &key_id, &name)
+    }
+
+    async fn ssh_keys_delete(&self, key_id: String) -> Result<()> {
+        crate::services::ssh_keys::delete(&self.app, &key_id)
+    }
+
+    async fn ssh_keys_get_layout(&self) -> Result<SshKeyLayout> {
+        crate::services::ssh_keys::get_layout(&self.app)
+    }
+
+    async fn ssh_keys_save_layout(&self, layout: SshKeyLayout) -> Result<SshKeyLayout> {
+        crate::services::ssh_keys::save_layout(&self.app, layout)
     }
 
     async fn app_get_ui_preferences(&self) -> Result<UiPreferences> {
