@@ -1,12 +1,130 @@
-use gpui::{div, prelude::*, px, AnyElement, Context, KeyDownEvent};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FocusHandle, Focusable};
 use serde_json::{json, Value};
 use zeroize::Zeroize;
 
 use super::RootView;
-use crate::{state::AppState, theme::ThemePalette};
+use crate::{
+    state::AppState,
+    theme::ThemePalette,
+    view::text_editor::{TextInput, TextInputEvent, TextInputMode},
+};
+
+#[derive(Clone, Copy)]
+enum ConnectionField {
+    Name,
+    Host,
+    Port,
+    Username,
+    Password,
+    Group,
+    RemotePath,
+    PrivateKeyPath,
+    Passphrase,
+    DevicePath,
+    BaudRate,
+    DataBits,
+    StopBits,
+    Parity,
+    FlowControl,
+}
+
+#[derive(Clone)]
+struct ConnectionInputs {
+    name: Entity<TextInput>,
+    host: Entity<TextInput>,
+    port: Entity<TextInput>,
+    username: Entity<TextInput>,
+    password: Entity<TextInput>,
+    group: Entity<TextInput>,
+    remote_path: Entity<TextInput>,
+    private_key_path: Entity<TextInput>,
+    passphrase: Entity<TextInput>,
+    device_path: Entity<TextInput>,
+    baud_rate: Entity<TextInput>,
+    data_bits: Entity<TextInput>,
+    stop_bits: Entity<TextInput>,
+    parity: Entity<TextInput>,
+    flow_control: Entity<TextInput>,
+}
+
+impl ConnectionInputs {
+    fn new(
+        editor: &PendingConnectionEditor,
+        palette: ThemePalette,
+        cx: &mut Context<RootView>,
+    ) -> Self {
+        let input =
+            |value: &str, placeholder: &'static str, secret: bool, cx: &mut Context<RootView>| {
+                cx.new(|cx| {
+                    TextInput::new(
+                        value,
+                        placeholder,
+                        TextInputMode::SingleLine,
+                        secret,
+                        palette,
+                        cx,
+                    )
+                })
+            };
+        Self {
+            name: input(&editor.name, "连接名称", false, cx),
+            host: input(&editor.host, "主机名或 IP 地址", false, cx),
+            port: input(&editor.port, "端口", false, cx),
+            username: input(&editor.username, "用户名", false, cx),
+            password: input(&editor.password, "密码", true, cx),
+            group: input(&editor.group, "分组", false, cx),
+            remote_path: input(&editor.remote_path, "远端路径", false, cx),
+            private_key_path: input(&editor.private_key_path, "私钥路径", false, cx),
+            passphrase: input(&editor.passphrase, "私钥口令", true, cx),
+            device_path: input(&editor.device_path, "设备路径", false, cx),
+            baud_rate: input(&editor.baud_rate, "波特率", false, cx),
+            data_bits: input(&editor.data_bits, "数据位", false, cx),
+            stop_bits: input(&editor.stop_bits, "停止位", false, cx),
+            parity: input(&editor.parity, "none / odd / even", false, cx),
+            flow_control: input(
+                &editor.flow_control,
+                "none / software / hardware",
+                false,
+                cx,
+            ),
+        }
+    }
+
+    fn all(&self) -> [(ConnectionField, Entity<TextInput>); 15] {
+        [
+            (ConnectionField::Name, self.name.clone()),
+            (ConnectionField::Host, self.host.clone()),
+            (ConnectionField::Port, self.port.clone()),
+            (ConnectionField::Username, self.username.clone()),
+            (ConnectionField::Password, self.password.clone()),
+            (ConnectionField::Group, self.group.clone()),
+            (ConnectionField::RemotePath, self.remote_path.clone()),
+            (
+                ConnectionField::PrivateKeyPath,
+                self.private_key_path.clone(),
+            ),
+            (ConnectionField::Passphrase, self.passphrase.clone()),
+            (ConnectionField::DevicePath, self.device_path.clone()),
+            (ConnectionField::BaudRate, self.baud_rate.clone()),
+            (ConnectionField::DataBits, self.data_bits.clone()),
+            (ConnectionField::StopBits, self.stop_bits.clone()),
+            (ConnectionField::Parity, self.parity.clone()),
+            (ConnectionField::FlowControl, self.flow_control.clone()),
+        ]
+    }
+
+    fn set_palette(&self, palette: ThemePalette, cx: &mut Context<RootView>) {
+        for (_, input) in self.all() {
+            input.update(cx, |input, _| input.set_palette(palette));
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(super) struct PendingConnectionEditor {
+    form_id: uuid::Uuid,
+    inputs: Option<ConnectionInputs>,
+    auto_focus: bool,
     profile_id: Option<String>,
     protocol: String,
     name: String,
@@ -27,7 +145,6 @@ pub(super) struct PendingConnectionEditor {
     stop_bits: String,
     parity: String,
     flow_control: String,
-    active_field: usize,
     busy: bool,
     error: Option<String>,
     delete_confirmation: bool,
@@ -42,8 +159,21 @@ impl Drop for PendingConnectionEditor {
 }
 
 impl PendingConnectionEditor {
+    pub(super) fn take_auto_focus_handle(&mut self, cx: &gpui::App) -> Option<FocusHandle> {
+        if !self.auto_focus {
+            return None;
+        }
+        self.auto_focus = false;
+        self.inputs
+            .as_ref()
+            .map(|inputs| inputs.name.focus_handle(cx))
+    }
+
     pub(super) fn new() -> Self {
         Self {
+            form_id: uuid::Uuid::new_v4(),
+            inputs: None,
+            auto_focus: true,
             profile_id: None,
             protocol: "ssh".to_string(),
             name: String::new(),
@@ -64,7 +194,6 @@ impl PendingConnectionEditor {
             stop_bits: "1".to_string(),
             parity: "none".to_string(),
             flow_control: "none".to_string(),
-            active_field: 0,
             busy: false,
             error: None,
             delete_confirmation: false,
@@ -112,47 +241,25 @@ impl PendingConnectionEditor {
         editor
     }
 
-    fn field_count(&self) -> usize {
-        match self.protocol.as_str() {
-            "serial" => 8,
-            "ssh" if self.auth_type == "privateKey" => 9,
-            _ => 7,
+    fn set_field(&mut self, field: ConnectionField, value: String) {
+        match field {
+            ConnectionField::Name => self.name = value,
+            ConnectionField::Host => self.host = value,
+            ConnectionField::Port => self.port = value,
+            ConnectionField::Username => self.username = value,
+            ConnectionField::Password => self.password = value,
+            ConnectionField::Group => self.group = value,
+            ConnectionField::RemotePath => self.remote_path = value,
+            ConnectionField::PrivateKeyPath => self.private_key_path = value,
+            ConnectionField::Passphrase => self.passphrase = value,
+            ConnectionField::DevicePath => self.device_path = value,
+            ConnectionField::BaudRate => self.baud_rate = value,
+            ConnectionField::DataBits => self.data_bits = value,
+            ConnectionField::StopBits => self.stop_bits = value,
+            ConnectionField::Parity => self.parity = value,
+            ConnectionField::FlowControl => self.flow_control = value,
         }
-    }
-
-    fn active_value(&mut self) -> &mut String {
-        match self.protocol.as_str() {
-            "serial" => match self.active_field {
-                0 => &mut self.name,
-                1 => &mut self.device_path,
-                2 => &mut self.baud_rate,
-                3 => &mut self.data_bits,
-                4 => &mut self.stop_bits,
-                5 => &mut self.parity,
-                6 => &mut self.flow_control,
-                _ => &mut self.group,
-            },
-            "ssh" if self.auth_type == "privateKey" => match self.active_field {
-                0 => &mut self.name,
-                1 => &mut self.host,
-                2 => &mut self.port,
-                3 => &mut self.username,
-                4 => &mut self.private_key_path,
-                5 => &mut self.passphrase,
-                6 => &mut self.group,
-                7 => &mut self.remote_path,
-                _ => &mut self.password,
-            },
-            _ => match self.active_field {
-                0 => &mut self.name,
-                1 => &mut self.host,
-                2 => &mut self.port,
-                3 => &mut self.username,
-                4 => &mut self.password,
-                5 => &mut self.group,
-                _ => &mut self.remote_path,
-            },
-        }
+        self.error = None;
     }
 
     fn to_input(&self) -> Result<Value, String> {
@@ -227,9 +334,40 @@ impl PendingConnectionEditor {
 }
 
 impl RootView {
-    pub(super) fn begin_new_connection(&mut self, cx: &mut Context<Self>) {
-        self.pending_connection_editor = Some(PendingConnectionEditor::new());
+    pub(super) fn install_connection_editor(
+        &mut self,
+        mut editor: PendingConnectionEditor,
+        cx: &mut Context<Self>,
+    ) {
+        let form_id = editor.form_id;
+        let palette = ThemePalette::for_mode(self.state.read(cx).theme);
+        let inputs = ConnectionInputs::new(&editor, palette, cx);
+        for (field, input) in inputs.all() {
+            cx.subscribe(&input, move |root, _, event, cx| {
+                let Some(editor) = root.pending_connection_editor.as_mut() else {
+                    return;
+                };
+                if editor.form_id != form_id || editor.busy {
+                    return;
+                }
+                match event {
+                    TextInputEvent::Changed(value) => editor.set_field(field, value.clone()),
+                    TextInputEvent::Submit => root.save_connection(cx),
+                    TextInputEvent::Cancel => {
+                        root.pending_connection_editor = None;
+                        cx.notify();
+                    }
+                }
+            })
+            .detach();
+        }
+        editor.inputs = Some(inputs);
+        self.pending_connection_editor = Some(editor);
         cx.notify();
+    }
+
+    pub(super) fn begin_new_connection(&mut self, cx: &mut Context<Self>) {
+        self.install_connection_editor(PendingConnectionEditor::new(), cx);
     }
 
     fn edit_connection(&mut self, profile_id: String, cx: &mut Context<Self>) {
@@ -242,49 +380,13 @@ impl RootView {
             .cloned();
         match profile {
             Some(profile) => {
-                self.pending_connection_editor =
-                    Some(PendingConnectionEditor::from_profile(&profile))
+                self.install_connection_editor(PendingConnectionEditor::from_profile(&profile), cx)
             }
             None => self.update_state(cx, |state| {
                 state.data_error = Some("连接配置不存在，请刷新后重试".to_string());
             }),
         }
         cx.notify();
-    }
-
-    pub(super) fn handle_connection_editor_key(
-        &mut self,
-        event: &KeyDownEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(editor) = self.pending_connection_editor.as_mut() else {
-            return;
-        };
-        if editor.busy {
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.pending_connection_editor = None;
-                cx.notify();
-            }
-            "tab" => {
-                editor.active_field = (editor.active_field + 1) % editor.field_count();
-                cx.notify();
-            }
-            "enter" | "return" => self.save_connection(cx),
-            "backspace" => {
-                editor.active_value().pop();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    editor.active_value().push_str(text);
-                    cx.notify();
-                }
-            }
-            _ => {}
-        }
     }
 
     fn save_connection(&mut self, cx: &mut Context<Self>) {
@@ -540,40 +642,44 @@ impl RootView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let editing = editor.profile_id.is_some();
-        let mut fields = vec![("名称", editor.name.clone(), false)];
+        let inputs = editor
+            .inputs
+            .as_ref()
+            .expect("connection editor inputs initialized");
+        inputs.set_palette(palette, cx);
+        let mut fields = vec![("名称", inputs.name.clone())];
         if editor.protocol == "serial" {
             fields.extend([
-                ("设备路径", editor.device_path.clone(), false),
-                ("波特率", editor.baud_rate.clone(), false),
-                ("数据位（5/6/7/8）", editor.data_bits.clone(), false),
-                ("停止位（1/2）", editor.stop_bits.clone(), false),
-                ("校验位（none/odd/even）", editor.parity.clone(), false),
+                ("设备路径", inputs.device_path.clone()),
+                ("波特率", inputs.baud_rate.clone()),
+                ("数据位（5/6/7/8）", inputs.data_bits.clone()),
+                ("停止位（1/2）", inputs.stop_bits.clone()),
+                ("校验位（none/odd/even）", inputs.parity.clone()),
                 (
                     "流控（none/software/hardware）",
-                    editor.flow_control.clone(),
-                    false,
+                    inputs.flow_control.clone(),
                 ),
-                ("分组", editor.group.clone(), false),
+                ("分组", inputs.group.clone()),
             ]);
         } else {
             fields.extend([
-                ("主机", editor.host.clone(), false),
-                ("端口", editor.port.clone(), false),
-                ("用户名", editor.username.clone(), false),
+                ("主机", inputs.host.clone()),
+                ("端口", inputs.port.clone()),
+                ("用户名", inputs.username.clone()),
             ]);
             if editor.protocol == "ssh" && editor.auth_type == "privateKey" {
                 fields.extend([
-                    ("私钥路径", editor.private_key_path.clone(), false),
-                    ("私钥口令", editor.passphrase.clone(), true),
-                    ("分组", editor.group.clone(), false),
-                    ("远端路径", editor.remote_path.clone(), false),
-                    ("备用密码", editor.password.clone(), true),
+                    ("私钥路径", inputs.private_key_path.clone()),
+                    ("私钥口令", inputs.passphrase.clone()),
+                    ("分组", inputs.group.clone()),
+                    ("远端路径", inputs.remote_path.clone()),
+                    ("备用密码", inputs.password.clone()),
                 ]);
             } else {
                 fields.extend([
-                    ("密码", editor.password.clone(), true),
-                    ("分组", editor.group.clone(), false),
-                    ("远端路径", editor.remote_path.clone(), false),
+                    ("密码", inputs.password.clone()),
+                    ("分组", inputs.group.clone()),
+                    ("远端路径", inputs.remote_path.clone()),
                 ]);
             }
         }
@@ -604,7 +710,7 @@ impl RootView {
                     }))
                     .child(
                         div().text_xs().text_color(palette.text_soft).child(
-                            "Tab 切换输入项，Enter 保存，Esc 取消。密码留空会保留已保存凭据。",
+                            "支持中文输入；Tab/Shift+Tab 切换输入项，Enter 保存，Esc 取消。密码留空会保留已保存凭据。",
                         ),
                     )
                     .child(
@@ -643,7 +749,14 @@ impl RootView {
                                             {
                                                 editor.protocol = protocol.to_string();
                                                 editor.port = default_port(protocol).to_string();
-                                                editor.active_field = 0;
+                                                if let Some(inputs) = editor.inputs.as_ref() {
+                                                    inputs.port.update(cx, |input, cx| {
+                                                        input.set_value(
+                                                            default_port(protocol).to_string(),
+                                                            cx,
+                                                        )
+                                                    });
+                                                }
                                                 editor.error = None;
                                             }
                                             cx.notify();
@@ -683,7 +796,6 @@ impl RootView {
                                                     this.pending_connection_editor.as_mut()
                                                 {
                                                     editor.auth_type = auth.to_string();
-                                                    editor.active_field = 0;
                                                 }
                                                 cx.notify();
                                             }))
@@ -773,9 +885,17 @@ impl RootView {
                                                                     {
                                                                         editor.private_key_id =
                                                                             key_id.clone();
-                                                                        editor
-                                                                            .private_key_path
-                                                                            .clear();
+                                                                        editor.private_key_path.clear();
+                                                                        if let Some(inputs) =
+                                                                            editor.inputs.as_ref()
+                                                                        {
+                                                                            inputs.private_key_path.update(
+                                                                                cx,
+                                                                                |input, cx| {
+                                                                                    input.clear(cx)
+                                                                                },
+                                                                            );
+                                                                        }
                                                                     }
                                                                     cx.notify();
                                                                 },
@@ -833,21 +953,13 @@ impl RootView {
                         )
                     })
                     .child(
-                        div().flex().flex_col().gap_2().children(
-                            fields.into_iter().enumerate().map(
-                                |(index, (label, value, secret))| {
-                                    connection_input(
-                                        label,
-                                        value,
-                                        index,
-                                        editor.active_field,
-                                        secret,
-                                        palette,
-                                        cx,
-                                    )
-                                },
-                            ),
-                        ),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_2()
+                            .children(fields.into_iter().map(|(label, input)| {
+                                connection_input(label, input, palette)
+                            })),
                     )
                     .when_some(editor.error.clone(), |view, error| {
                         view.child(div().text_xs().text_color(palette.danger).child(error))
@@ -926,55 +1038,15 @@ fn default_port(protocol: &str) -> u64 {
 
 fn connection_input(
     label: &'static str,
-    value: String,
-    field: usize,
-    active_field: usize,
-    secret: bool,
+    input: Entity<TextInput>,
     palette: ThemePalette,
-    cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let display = if secret && !value.is_empty() {
-        "•".repeat(value.chars().count())
-    } else if value.is_empty() {
-        "输入内容".to_string()
-    } else {
-        value
-    };
     div()
         .flex()
         .flex_col()
         .gap_1()
         .child(div().text_xs().text_color(palette.text_muted).child(label))
-        .child(
-            div()
-                .id(("connection-input", field))
-                .h(px(36.0))
-                .flex()
-                .items_center()
-                .px_3()
-                .rounded_md()
-                .cursor_pointer()
-                .bg(palette.background)
-                .border_1()
-                .border_color(if active_field == field {
-                    palette.accent
-                } else {
-                    palette.border
-                })
-                .text_sm()
-                .text_color(if display == "输入内容" {
-                    palette.text_soft
-                } else {
-                    palette.text
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(editor) = this.pending_connection_editor.as_mut() {
-                        editor.active_field = field;
-                    }
-                    cx.notify();
-                }))
-                .child(display),
-        )
+        .child(input)
 }
 
 fn action_button(

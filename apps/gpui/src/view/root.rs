@@ -279,8 +279,8 @@ impl RootView {
         );
         if let Some(window_id) = self.window_registry.handle_for("connection-manager") {
             let handle = WindowHandle::<RootView>::new(window_id);
-            let _ = handle.update(cx, |root, window, _| {
-                root.pending_connection_editor = Some(PendingConnectionEditor::new());
+            let _ = handle.update(cx, |root, window, cx| {
+                root.install_connection_editor(PendingConnectionEditor::new(), cx);
                 window.refresh();
                 window.activate_window();
             });
@@ -757,9 +757,15 @@ impl RootView {
         cx: &mut Context<Self>,
     ) {
         if self.pending_connection_editor.is_some() {
-            self.handle_connection_editor_key(event, cx);
+            if event.keystroke.key == "escape" {
+                self.pending_connection_editor = None;
+                cx.notify();
+            }
         } else if self.pending_ssh_key_editor.is_some() {
-            self.handle_ssh_key_editor_key(event, cx);
+            if event.keystroke.key == "escape" {
+                self.pending_ssh_key_editor = None;
+                cx.notify();
+            }
         } else if self.pending_webdav_editor.is_some() {
             self.handle_webdav_editor_key(event, cx);
         } else if self.pending_authentication.is_some() {
@@ -2405,6 +2411,20 @@ impl Render for RootView {
         let active_ftp_session = self.ftp_sessions.get(&state.active_tab_id).cloned();
         let active_local_session = self.local_sessions.get(&state.active_tab_id).cloned();
         let active_stream_session = self.stream_sessions.get(&state.active_tab_id).cloned();
+        if let Some(handle) = self
+            .pending_connection_editor
+            .as_mut()
+            .and_then(|editor| editor.take_auto_focus_handle(cx))
+        {
+            handle.focus(window, cx);
+        }
+        if let Some(handle) = self
+            .pending_ssh_key_editor
+            .as_mut()
+            .and_then(|editor| editor.take_auto_focus_handle(cx))
+        {
+            handle.focus(window, cx);
+        }
         let pending_host_verification = self.pending_host_verification.clone();
         let pending_authentication = self.pending_authentication.clone();
         let pending_connection_editor = self.pending_connection_editor.clone();

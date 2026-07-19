@@ -1,4 +1,4 @@
-use gpui::{div, prelude::*, px, AnyElement, Context, KeyDownEvent, MouseButton};
+use gpui::{div, prelude::*, px, AnyElement, Context, Entity, FocusHandle, Focusable, MouseButton};
 use zeroize::Zeroize;
 
 use super::RootView;
@@ -6,6 +6,7 @@ use crate::{
     services::ssh_keys::{SshKeyFileSelection, SshKeyFolder, SshKeyLayout, SshKeyMetadata},
     state::AppState,
     theme::ThemePalette,
+    view::text_editor::{TextInput, TextInputEvent, TextInputMode},
 };
 
 mod layout;
@@ -50,12 +51,14 @@ pub(super) enum SshKeyEditorMode {
 
 #[derive(Clone)]
 pub(super) struct PendingSshKeyEditor {
+    form_id: uuid::Uuid,
+    input: Option<Entity<TextInput>>,
+    auto_focus: bool,
     pub(super) mode: SshKeyEditorMode,
     pub(super) name: String,
     pub(super) note: String,
     pub(super) folder_id: Option<String>,
     pub(super) source: Option<SshKeyFileSelection>,
-    pub(super) active_field: usize,
     pub(super) busy: bool,
     pub(super) error: Option<String>,
 }
@@ -72,12 +75,14 @@ impl Drop for PendingSshKeyEditor {
 impl PendingSshKeyEditor {
     fn import(folder_id: Option<String>) -> Self {
         Self {
+            form_id: uuid::Uuid::new_v4(),
+            input: None,
+            auto_focus: true,
             mode: SshKeyEditorMode::Import,
             name: String::new(),
             note: String::new(),
             folder_id,
             source: None,
-            active_field: 0,
             busy: false,
             error: None,
         }
@@ -85,12 +90,14 @@ impl PendingSshKeyEditor {
 
     fn edit(key: &SshKeyMetadata, folder_id: Option<String>) -> Self {
         Self {
+            form_id: uuid::Uuid::new_v4(),
+            input: None,
+            auto_focus: true,
             mode: SshKeyEditorMode::Edit(key.id.clone()),
             name: key.name.clone(),
             note: key.note.clone().unwrap_or_default(),
             folder_id,
             source: None,
-            active_field: 0,
             busy: false,
             error: None,
         }
@@ -98,30 +105,71 @@ impl PendingSshKeyEditor {
 
     fn folder(mode: SshKeyEditorMode, name: String) -> Self {
         Self {
+            form_id: uuid::Uuid::new_v4(),
+            input: None,
+            auto_focus: true,
             mode,
             name,
             note: String::new(),
             folder_id: None,
             source: None,
-            active_field: 0,
             busy: false,
             error: None,
         }
     }
 
-    fn active_value(&mut self) -> &mut String {
+    fn set_value(&mut self, value: String) {
         match self.mode {
-            SshKeyEditorMode::Import | SshKeyEditorMode::Edit(_) => &mut self.note,
-            SshKeyEditorMode::CreateFolder | SshKeyEditorMode::RenameFolder(_) => &mut self.name,
+            SshKeyEditorMode::Import | SshKeyEditorMode::Edit(_) => self.note = value,
+            SshKeyEditorMode::CreateFolder | SshKeyEditorMode::RenameFolder(_) => self.name = value,
         }
+        self.error = None;
     }
 
-    fn field_count(&self) -> usize {
-        1
+    pub(super) fn take_auto_focus_handle(&mut self, cx: &gpui::App) -> Option<FocusHandle> {
+        if !self.auto_focus {
+            return None;
+        }
+        self.auto_focus = false;
+        self.input.as_ref().map(|input| input.focus_handle(cx))
     }
 }
 
 impl RootView {
+    fn install_ssh_key_editor(&mut self, mut editor: PendingSshKeyEditor, cx: &mut Context<Self>) {
+        let form_id = editor.form_id;
+        let palette = ThemePalette::for_mode(self.state.read(cx).theme);
+        let (value, placeholder, mode) = match editor.mode {
+            SshKeyEditorMode::Import | SshKeyEditorMode::Edit(_) => {
+                (editor.note.clone(), "备注信息", TextInputMode::MultiLine)
+            }
+            SshKeyEditorMode::CreateFolder | SshKeyEditorMode::RenameFolder(_) => {
+                (editor.name.clone(), "文件夹名称", TextInputMode::SingleLine)
+            }
+        };
+        let input = cx.new(|cx| TextInput::new(value, placeholder, mode, false, palette, cx));
+        cx.subscribe(&input, move |root, _, event, cx| {
+            let Some(editor) = root.pending_ssh_key_editor.as_mut() else {
+                return;
+            };
+            if editor.form_id != form_id || editor.busy {
+                return;
+            }
+            match event {
+                TextInputEvent::Changed(value) => editor.set_value(value.clone()),
+                TextInputEvent::Submit => root.save_ssh_key_editor(cx),
+                TextInputEvent::Cancel => {
+                    root.pending_ssh_key_editor = None;
+                    cx.notify();
+                }
+            }
+        })
+        .detach();
+        editor.input = Some(input);
+        self.pending_ssh_key_editor = Some(editor);
+        cx.notify();
+    }
+
     pub(super) fn reload_ssh_key_library(&mut self, cx: &mut Context<Self>) {
         let api = self.api.clone();
         cx.spawn(async move |this, cx| {
@@ -144,10 +192,10 @@ impl RootView {
     }
 
     pub(super) fn begin_ssh_key_import(&mut self, cx: &mut Context<Self>) {
-        self.pending_ssh_key_editor = Some(PendingSshKeyEditor::import(
-            self.active_ssh_key_folder.clone(),
-        ));
-        cx.notify();
+        self.install_ssh_key_editor(
+            PendingSshKeyEditor::import(self.active_ssh_key_folder.clone()),
+            cx,
+        );
     }
 
     fn begin_ssh_key_edit(&mut self, key_id: String, cx: &mut Context<Self>) {
@@ -166,17 +214,16 @@ impl RootView {
                 .assignments
                 .get(&key.id)
                 .cloned();
-            self.pending_ssh_key_editor = Some(PendingSshKeyEditor::edit(&key, folder_id));
+            self.install_ssh_key_editor(PendingSshKeyEditor::edit(&key, folder_id), cx);
         }
         cx.notify();
     }
 
     fn begin_create_key_folder(&mut self, cx: &mut Context<Self>) {
-        self.pending_ssh_key_editor = Some(PendingSshKeyEditor::folder(
-            SshKeyEditorMode::CreateFolder,
-            String::new(),
-        ));
-        cx.notify();
+        self.install_ssh_key_editor(
+            PendingSshKeyEditor::folder(SshKeyEditorMode::CreateFolder, String::new()),
+            cx,
+        );
     }
 
     fn begin_rename_key_folder(&mut self, folder_id: String, cx: &mut Context<Self>) {
@@ -189,10 +236,10 @@ impl RootView {
             .find(|folder| folder.id == folder_id)
             .cloned();
         if let Some(folder) = folder {
-            self.pending_ssh_key_editor = Some(PendingSshKeyEditor::folder(
-                SshKeyEditorMode::RenameFolder(folder.id),
-                folder.name,
-            ));
+            self.install_ssh_key_editor(
+                PendingSshKeyEditor::folder(SshKeyEditorMode::RenameFolder(folder.id), folder.name),
+                cx,
+            );
         }
         cx.notify();
     }
@@ -218,41 +265,6 @@ impl RootView {
             });
         })
         .detach();
-    }
-
-    pub(super) fn handle_ssh_key_editor_key(
-        &mut self,
-        event: &KeyDownEvent,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(editor) = self.pending_ssh_key_editor.as_mut() else {
-            return;
-        };
-        if editor.busy {
-            return;
-        }
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                self.pending_ssh_key_editor = None;
-                cx.notify();
-            }
-            "tab" => {
-                editor.active_field = (editor.active_field + 1) % editor.field_count();
-                cx.notify();
-            }
-            "enter" | "return" => self.save_ssh_key_editor(cx),
-            "backspace" => {
-                editor.active_value().pop();
-                cx.notify();
-            }
-            _ if !event.keystroke.modifiers.control && !event.keystroke.modifiers.platform => {
-                if let Some(text) = event.keystroke.key_char.as_deref() {
-                    editor.active_value().push_str(text);
-                    cx.notify();
-                }
-            }
-            _ => {}
-        }
     }
 
     fn save_ssh_key_editor(&mut self, cx: &mut Context<Self>) {
@@ -1288,6 +1300,11 @@ impl RootView {
         };
         let is_import = matches!(editor.mode, SshKeyEditorMode::Import);
         let is_edit = matches!(editor.mode, SshKeyEditorMode::Edit(_));
+        let input = editor
+            .input
+            .clone()
+            .expect("SSH key editor input initialized");
+        input.update(cx, |input, _| input.set_palette(palette));
         div()
             .absolute()
             .inset_0()
@@ -1307,12 +1324,13 @@ impl RootView {
                     .border_1()
                     .border_color(palette.border_strong)
                     .child(div().text_lg().text_color(palette.text).child(title))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(palette.text_soft)
-                            .child("Tab 切换输入项，Enter 保存，Esc 取消。"),
-                    )
+                    .child(div().text_xs().text_color(palette.text_soft).child(
+                        if is_import || is_edit {
+                            "支持中文输入；Enter 换行，Cmd/Ctrl+Enter 保存，Esc 取消。"
+                        } else {
+                            "支持中文输入；Enter 保存，Esc 取消。"
+                        },
+                    ))
                     .when(is_edit, |view| {
                         view.child(
                             div()
@@ -1337,24 +1355,10 @@ impl RootView {
                         )
                     })
                     .when(!is_import && !is_edit, |view| {
-                        view.child(key_input(
-                            "文件夹名称",
-                            editor.name.clone(),
-                            0,
-                            editor.active_field,
-                            palette,
-                            cx,
-                        ))
+                        view.child(key_input("文件夹名称", input.clone(), palette))
                     })
                     .when(is_import || is_edit, |view| {
-                        view.child(key_input(
-                            "备注信息",
-                            editor.note.clone(),
-                            0,
-                            editor.active_field,
-                            palette,
-                            cx,
-                        ))
+                        view.child(key_input("备注信息", input.clone(), palette))
                     })
                     .when(is_import || is_edit, |view| {
                         let folders = self.state.read(cx).ssh_key_layout.folders.clone();
@@ -1617,52 +1621,15 @@ fn folder_option(
 
 fn key_input(
     label: &'static str,
-    value: String,
-    field: usize,
-    active_field: usize,
+    input: Entity<TextInput>,
     palette: ThemePalette,
-    cx: &mut Context<RootView>,
 ) -> impl IntoElement {
-    let empty = value.is_empty();
     div()
         .flex()
         .flex_col()
         .gap_1()
         .child(div().text_xs().text_color(palette.text_muted).child(label))
-        .child(
-            div()
-                .id(("ssh-key-input", field))
-                .h(px(38.0))
-                .flex()
-                .items_center()
-                .px_3()
-                .rounded_md()
-                .cursor_pointer()
-                .bg(palette.background)
-                .border_1()
-                .border_color(if active_field == field {
-                    palette.accent
-                } else {
-                    palette.border
-                })
-                .text_sm()
-                .text_color(if empty {
-                    palette.text_soft
-                } else {
-                    palette.text
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if let Some(editor) = this.pending_ssh_key_editor.as_mut() {
-                        editor.active_field = field;
-                    }
-                    cx.notify();
-                }))
-                .child(if empty {
-                    "输入内容".to_string()
-                } else {
-                    value
-                }),
-        )
+        .child(input)
 }
 
 fn key_action_button(
